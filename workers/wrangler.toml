@@ -1,0 +1,77 @@
+name = "moontv-database"
+main = "src/index.js"
+compatibility_date = "2024-01-15"
+workers_dev = true
+
+# D1数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "moontv-database"
+database_id = "e388d241-b652-445a-b22f-c383f1b9f9f1"  # 需要替换为实际的数据库ID
+
+# KV命名空间绑定（用于缓存和任务状态）
+[[kv_namespaces]]
+binding = "CACHE"
+id = "737f2cfbd79d40b8ac14fec1fde88d26"
+preview_id = "737f2cfbd79d40b8ac14fec1fde88d26"
+
+[[kv_namespaces]]
+binding = "TASK_STATUS"
+id = "a19d21d5723d4d6b98bfb7f2f5791b08"
+preview_id = "a19d21d5723d4d6b98bfb7f2f5791b08"
+
+# 定时任务配置 - 每10分钟执行一次数据同步
+[triggers]
+crons = [
+  "*/10 * * * *"   # 每10分钟执行一次，同步外部API数据
+]
+
+# 环境变量配置
+[vars]
+ENVIRONMENT = "development"
+CACHE_TTL = "3600"           # 缓存时间(秒)
+MAX_SEARCH_RESULTS = "50"    # 最大搜索结果数
+ENABLE_AI_CLASSIFICATION = "true"  # 启用AI分类
+
+# 生产环境配置
+[env.production]
+name = "moontv-database"
+
+# 生产环境数据库绑定
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "moontv-database"
+database_id = "e388d241-b652-445a-b22f-c383f1b9f9f1"
+
+# 生产环境KV绑定
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "737f2cfbd79d40b8ac14fec1fde88d26"
+
+[[env.production.kv_namespaces]]
+binding = "TASK_STATUS"
+id = "a19d21d5723d4d6b98bfb7f2f5791b08"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+CACHE_TTL = "7200"
+MAX_SEARCH_RESULTS = "100"
+ENABLE_AI_CLASSIFICATION = "true"
+
+# 本地开发配置
+[env.development.vars]
+ENVIRONMENT = "development"
+CACHE_TTL = "1800"
+MAX_SEARCH_RESULTS = "20"
+ENABLE_AI_CLASSIFICATION = "false"
+
+# 日志配置
+[observability.logs]
+enabled = true
+
+# 密钥配置说明：
+# 1. 创建D1数据库：wrangler d1 create moontv-database
+# 2. 创建KV命名空间：wrangler kv:namespace create "CACHE"
+# 3. 创建KV命名空间：wrangler kv:namespace create "TASK_STATUS"
+# 4. 更新上述database_id和KV的id
+# 5. 执行初始化：wrangler d1 execute moontv-database --file=./schema.sql

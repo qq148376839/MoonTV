@@ -286,7 +286,12 @@ export async function getConfig(): Promise<AdminConfig> {
   const storage = getStorage();
   let adminConfig: AdminConfig | null = null;
   if (storage && typeof (storage as any).getAdminConfig === 'function') {
-    adminConfig = await (storage as any).getAdminConfig();
+    try {
+      adminConfig = await (storage as any).getAdminConfig();
+    } catch (error) {
+      console.error('获取管理员配置失败，使用默认配置:', error);
+      adminConfig = null;
+    }
   }
   if (adminConfig) {
     // 确保 CustomCategories 被初始化
@@ -379,8 +384,57 @@ export async function getConfig(): Promise<AdminConfig> {
     }
     cachedConfig = adminConfig;
   } else {
-    // DB 无配置，执行一次初始化
-    await initConfig();
+    // DB 无配置或获取失败，创建默认配置
+    console.log('创建默认管理员配置');
+
+    // 获取文件配置
+    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
+    const apiSiteEntries = Object.entries(fileConfig.api_site);
+    const customCategories = fileConfig.custom_category || [];
+
+    const defaultConfig: AdminConfig = {
+      SiteConfig: {
+        SiteName: process.env.SITE_NAME || 'MoonTV',
+        Announcement:
+          process.env.ANNOUNCEMENT ||
+          '本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。',
+        SearchDownstreamMaxPage:
+          Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
+        SiteInterfaceCacheTime: fileConfig.cache_time || 7200,
+        ImageProxy: process.env.NEXT_PUBLIC_IMAGE_PROXY || '',
+        DoubanProxy: process.env.NEXT_PUBLIC_DOUBAN_PROXY || '',
+        DisableYellowFilter:
+          process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true',
+      },
+      UserConfig: {
+        AllowRegister: process.env.NEXT_PUBLIC_ENABLE_REGISTER === 'true',
+        Users: process.env.USERNAME
+          ? [
+              {
+                username: process.env.USERNAME,
+                role: 'owner',
+              },
+            ]
+          : [],
+      },
+      SourceConfig: apiSiteEntries.map(([key, site]) => ({
+        key,
+        name: site.name,
+        api: site.api,
+        detail: site.detail,
+        from: 'config',
+        disabled: false,
+      })),
+      CustomCategories: customCategories.map((category) => ({
+        name: category.name,
+        type: category.type,
+        query: category.query,
+        from: 'config',
+        disabled: false,
+      })),
+    };
+
+    cachedConfig = defaultConfig;
   }
   return cachedConfig;
 }

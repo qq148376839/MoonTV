@@ -13,10 +13,12 @@ export class WorkersStorage implements IStorage {
 
   constructor() {
     // 从环境变量获取Workers API地址
-    this.baseUrl = process.env.WORKERS_API_URL || 'https://moontv-database.x8bd542jnt.workers.dev';
+    this.baseUrl =
+      process.env.WORKERS_API_URL ||
+      'https://moontv-database.x8bd542jnt.workers.dev';
     this.defaultHeaders = {
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     };
   }
 
@@ -29,13 +31,13 @@ export class WorkersStorage implements IStorage {
   }
 
   private async makeRequest<T>(
-    endpoint: string, 
-    options: RequestInit = {}, 
+    endpoint: string,
+    options: RequestInit = {},
     username?: string
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
     const headers = this.getHeaders(username);
-    
+
     try {
       const response = await fetch(url, {
         ...options,
@@ -44,11 +46,13 @@ export class WorkersStorage implements IStorage {
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`Workers API请求失败: ${response.status} - ${errorText}`);
+        throw new Error(
+          `Workers API请求失败: ${response.status} - ${errorText}`
+        );
       }
 
       const data = await response.json();
-      
+
       // 检查Workers API响应格式
       if (data.code !== 200) {
         throw new Error(data.msg || 'Workers API返回错误');
@@ -63,7 +67,10 @@ export class WorkersStorage implements IStorage {
 
   // ==================== 播放记录相关 ====================
 
-  async getPlayRecord(userName: string, key: string): Promise<PlayRecord | null> {
+  async getPlayRecord(
+    userName: string,
+    key: string
+  ): Promise<PlayRecord | null> {
     try {
       const records = await this.makeRequest<Record<string, PlayRecord>>(
         '/api/playrecords',
@@ -77,7 +84,11 @@ export class WorkersStorage implements IStorage {
     }
   }
 
-  async setPlayRecord(userName: string, key: string, record: PlayRecord): Promise<void> {
+  async setPlayRecord(
+    userName: string,
+    key: string,
+    record: PlayRecord
+  ): Promise<void> {
     await this.makeRequest(
       '/api/playrecords',
       {
@@ -88,7 +99,9 @@ export class WorkersStorage implements IStorage {
     );
   }
 
-  async getAllPlayRecords(userName: string): Promise<Record<string, PlayRecord>> {
+  async getAllPlayRecords(
+    userName: string
+  ): Promise<Record<string, PlayRecord>> {
     try {
       return await this.makeRequest<Record<string, PlayRecord>>(
         '/api/playrecords',
@@ -125,7 +138,11 @@ export class WorkersStorage implements IStorage {
     }
   }
 
-  async setFavorite(userName: string, key: string, favorite: Favorite): Promise<void> {
+  async setFavorite(
+    userName: string,
+    key: string,
+    favorite: Favorite
+  ): Promise<void> {
     await this.makeRequest(
       '/api/favorites',
       {
@@ -168,10 +185,13 @@ export class WorkersStorage implements IStorage {
 
   async verifyUser(userName: string, password: string): Promise<boolean> {
     try {
-      const result = await this.makeRequest<{ valid: boolean }>('/api/auth/verify', {
-        method: 'POST',
-        body: JSON.stringify({ username: userName, password }),
-      });
+      const result = await this.makeRequest<{ valid: boolean }>(
+        '/api/auth/verify',
+        {
+          method: 'POST',
+          body: JSON.stringify({ username: userName, password }),
+        }
+      );
       return result.valid;
     } catch (error) {
       console.error('验证用户失败:', error);
@@ -194,8 +214,8 @@ export class WorkersStorage implements IStorage {
     // 注意：这里需要旧密码，但接口设计可能需要调整
     await this.makeRequest('/api/user/change-password', {
       method: 'POST',
-      body: JSON.stringify({ 
-        username: userName, 
+      body: JSON.stringify({
+        username: userName,
         newPassword,
         // oldPassword 需要从其他地方获取
       }),
@@ -235,10 +255,10 @@ export class WorkersStorage implements IStorage {
   }
 
   async deleteSearchHistory(userName: string, keyword?: string): Promise<void> {
-    const url = keyword 
+    const url = keyword
       ? `/api/searchhistory?keyword=${encodeURIComponent(keyword)}`
       : '/api/searchhistory';
-    
+
     await this.makeRequest(url, { method: 'DELETE' }, userName);
   }
 
@@ -246,10 +266,13 @@ export class WorkersStorage implements IStorage {
 
   async getAllUsers(): Promise<string[]> {
     try {
-      const users = await this.makeRequest<Array<{username: string}>>('/api/admin/users', {
-        method: 'GET',
-      });
-      return users.map(u => u.username);
+      const users = await this.makeRequest<Array<{ username: string }>>(
+        '/api/admin/users',
+        {
+          method: 'GET',
+        }
+      );
+      return users.map((u) => u.username);
     } catch (error) {
       console.error('获取用户列表失败:', error);
       return [];
@@ -278,7 +301,11 @@ export class WorkersStorage implements IStorage {
 
   // ==================== 跳过片头片尾配置 ====================
 
-  async getSkipConfig(userName: string, source: string, id: string): Promise<SkipConfig | null> {
+  async getSkipConfig(
+    _userName: string,
+    _source: string,
+    _id: string
+  ): Promise<SkipConfig | null> {
     try {
       // 这个功能可能需要在Workers API中实现对应的端点
       console.warn('getSkipConfig: Workers API暂未实现此功能');
@@ -289,15 +316,26 @@ export class WorkersStorage implements IStorage {
     }
   }
 
-  async setSkipConfig(userName: string, source: string, id: string, config: SkipConfig): Promise<void> {
+  async setSkipConfig(
+    _userName: string,
+    _source: string,
+    _id: string,
+    _config: SkipConfig
+  ): Promise<void> {
     console.warn('setSkipConfig: Workers API暂未实现此功能');
   }
 
-  async deleteSkipConfig(userName: string, source: string, id: string): Promise<void> {
+  async deleteSkipConfig(
+    _userName: string,
+    _source: string,
+    _id: string
+  ): Promise<void> {
     console.warn('deleteSkipConfig: Workers API暂未实现此功能');
   }
 
-  async getAllSkipConfigs(userName: string): Promise<{ [key: string]: SkipConfig }> {
+  async getAllSkipConfigs(
+    _userName: string
+  ): Promise<{ [key: string]: SkipConfig }> {
     console.warn('getAllSkipConfigs: Workers API暂未实现此功能');
     return {};
   }
