@@ -59,20 +59,85 @@
 | 语言      | TypeScript 4                                                                                          |
 | 播放器    | [ArtPlayer](https://github.com/zhw2590582/ArtPlayer) · [HLS.js](https://github.com/video-dev/hls.js/) |
 | 代码质量  | ESLint · Prettier · Jest                                                                              |
-| 部署      | Docker · Vercel · CloudFlare pages                                                                    |
+| 部署      | Docker · Vercel · CloudFlare pages · Zeabur                                                           |
 
 ## 部署
 
-本项目**支持 Vercel、Docker 和 Cloudflare** 部署。
+本项目**支持 Zeabur、Vercel、Docker 和 Cloudflare** 部署。
+
+### Zeabur 一键部署（推荐）
+
+#### 方式一：使用一键部署按钮
+
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates)
+
+> **提示**: 如果您已创建 Zeabur 模板，请在按钮 URL 中添加模板 ID，例如：
+> `https://zeabur.com/templates/YOUR_TEMPLATE_ID`
+
+#### 方式二：通过 Zeabur 控制台部署
+
+1. 访问 [Zeabur](https://zeabur.com) 并登录/注册
+2. 点击 **"Create New Project"** 或 **"+ New"**
+3. 选择 **"Import from Git Repository"** 或 **"Deploy from GitHub"**
+4. 选择您的 GitHub 仓库（或直接导入 `https://github.com/your-username/MoonTV`）
+5. Zeabur 会自动检测 `zeabur.yaml` 和 `Dockerfile`
+6. 配置环境变量（见下方）
+7. 点击 **"Deploy"** 开始部署
+
+#### 配置环境变量
+
+在 Zeabur 项目设置中的 **Environment Variables** 部分添加以下变量：
+
+**必需变量：**
+
+- `USERNAME`: 管理员账号（必填）
+- `PASSWORD`: 管理员密码（必填）
+
+**存储配置（根据需求选择一种）：**
+
+1. **localStorage（默认）** - 无需额外配置，数据仅存储在浏览器本地
+2. **Upstash Redis（推荐）** - 支持多端数据同步
+3. **原生 Redis** - 需要自建 Redis 服务
+4. **KvRocks** - 需要自建 KvRocks 服务
+
+配置完成后，Zeabur 会自动重新部署。部署成功后，访问分配的域名即可使用。
+
+**Upstash Redis 配置示例：**
+
+如需使用 Upstash Redis 实现多端数据同步：
+
+1. 在 [Upstash](https://upstash.com/) 注册并创建 Redis 实例
+2. 复制 **HTTPS ENDPOINT** 和 **TOKEN**
+3. 在 Zeabur 项目设置中添加环境变量：
+   ```
+   NEXT_PUBLIC_STORAGE_TYPE=upstash
+   UPSTASH_URL=<你的 Upstash HTTPS Endpoint>
+   UPSTASH_TOKEN=<你的 Upstash Token>
+   ```
+
+**其他存储类型配置：**
+
+- **Redis**: `NEXT_PUBLIC_STORAGE_TYPE=redis` + `REDIS_URL=<redis连接地址>`
+- **KvRocks**: `NEXT_PUBLIC_STORAGE_TYPE=kvrocks` + `KVROCKS_URL=<kvrocks连接地址>`
+
+**其他可选配置：**
+
+- `NEXT_PUBLIC_SITE_NAME`: 站点名称（默认: MoonTV）
+- `ANNOUNCEMENT`: 站点公告文本
+- `NEXT_PUBLIC_SEARCH_MAX_PAGE`: 搜索最大页数（默认: 5）
+- `NEXT_PUBLIC_ENABLE_REGISTER`: 是否开放注册（默认: false）
+
+> 更多环境变量配置请参考 [环境变量](#环境变量) 章节。
 
 存储支持矩阵
 
-|               | Docker | Vercel | Cloudflare |
-| :-----------: | :----: | :----: | :--------: |
-| localstorage  |   ✅   |   ✅   |     ✅     |
-|  原生 redis   |   ✅   |        |            |
-| Cloudflare D1 |        |        |     ✅     |
-| Upstash Redis |   ☑️   |   ✅   |     ☑️     |
+|               | Docker | Vercel | Cloudflare | Zeabur |
+| :-----------: | :----: | :----: | :--------: | :----: |
+| localstorage  |   ✅   |   ✅   |     ✅     |   ✅   |
+|  原生 redis   |   ✅   |        |            |   ✅   |
+| Cloudflare D1 |        |        |     ✅     |        |
+| Upstash Redis |   ☑️   |   ✅   |     ☑️     |   ✅   |
+|    KvRocks    |   ✅   |        |            |   ✅   |
 
 ✅：经测试支持
 

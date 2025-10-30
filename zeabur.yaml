@@ -1,0 +1,58 @@
+# Zeabur 一键部署配置
+# Zeabur 会自动识别并使用 Dockerfile 进行构建
+
+# 构建配置（使用项目根目录的 Dockerfile）
+build:
+  type: dockerfile
+  dockerfile: Dockerfile
+  context: .
+
+# 端口配置（MoonTV 默认监听 3000 端口）
+ports:
+  - port: 3000
+    protocol: http
+
+# 健康检查配置
+healthcheck:
+  path: /
+  interval: 30
+  timeout: 10
+  retries: 3
+
+# 资源限制（可根据实际需求在 Zeabur 控制台调整）
+resources:
+  cpu: 0.5
+  memory: 512MB
+
+# ===========================================
+# 环境变量配置说明（在 Zeabur 控制台配置）
+# ===========================================
+#
+# 【必需】管理员账号密码：
+#   USERNAME=你的管理员账号
+#   PASSWORD=你的管理员密码
+#
+# 【存储类型】（选择一种，默认：localstorage）：
+#
+#   1. localStorage（默认，无需额外配置）
+#      NEXT_PUBLIC_STORAGE_TYPE=localstorage
+#
+#   2. Upstash Redis（推荐，支持多端同步）
+#      NEXT_PUBLIC_STORAGE_TYPE=upstash
+#      UPSTASH_URL=<从 upstash.com 获取的 HTTPS Endpoint>
+#      UPSTASH_TOKEN=<从 upstash.com 获取的 Token>
+#
+#   3. Redis（需要自建 Redis 服务）
+#      NEXT_PUBLIC_STORAGE_TYPE=redis
+#      REDIS_URL=redis://username:password@host:port
+#
+#   4. KvRocks（需要自建 KvRocks 服务）
+#      NEXT_PUBLIC_STORAGE_TYPE=kvrocks
+#      KVROCKS_URL=<KvRocks 连接地址>
+#
+# 【可选配置】：
+#   NEXT_PUBLIC_SITE_NAME=MoonTV
+#   ANNOUNCEMENT=站点公告文本
+#   NEXT_PUBLIC_SEARCH_MAX_PAGE=5
+#   NEXT_PUBLIC_ENABLE_REGISTER=false
+
