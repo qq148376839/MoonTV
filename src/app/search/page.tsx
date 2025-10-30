@@ -12,6 +12,7 @@ import {
   getSearchHistory,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { detailCacheManager } from '@/lib/detail-cache';
 import { searchCacheManager } from '@/lib/search-cache';
 import { SearchResult } from '@/lib/types';
 import { yellowWords } from '@/lib/yellow';
@@ -29,7 +30,7 @@ function SearchPageClient() {
   //   totalEntries: number;
   //   totalResults: number;
   //   oldestEntry: string | null;
-  //   newestEntry: string | null;
+  //   newestEntry:(year:string | null;
   // } | null>(null);
 
   const router = useRouter();
@@ -58,7 +59,7 @@ function SearchPageClient() {
   const aggregatedResults = useMemo(() => {
     const map = new Map<string, SearchResult[]>();
     searchResults.forEach((item) => {
-      // 使用 title + year + type 作为键，year 必然存在，但依然兜底 'unknown'
+      // 使用 title + year + type 作为键，year 必然存在，但依然兜底 meng未知'
       const key = `${item.title.replaceAll(' ', '')}-${
         item.year || 'unknown'
       }-${item.episodes.length === 1 ? 'movie' : 'tv'}`;
@@ -158,7 +159,7 @@ function SearchPageClient() {
     const query = searchParams.get('q');
     if (query) {
       setSearchQuery(query);
-      fetchSearchResults(query);
+      fetchSearchResultsStream(query); // 使用流式搜索
 
       // 保存到搜索历史 (事件监听会自动更新界面)
       addSearchHistory(query);
@@ -167,13 +168,36 @@ function SearchPageClient() {
     }
   }, [searchParams]);
 
-  const fetchSearchResults = async (query: string) => {
+  // 流式搜索函数 - 使用 SSE 实时返回结果
+  const fetchSearchResultsStream = async (query: string) => {
+    // 【修复】防止重复调用：检查是否已有进行中的SSE连接
+    if (typeof window !== 'undefined') {
+      const existingStatus = sessionStorage.getItem(
+        `sse_status_${query.trim()}`
+      );
+      if (existingStatus) {
+        try {
+          const parsed = JSON.parse(existingStatus);
+          if (parsed.isActive) {
+            // eslint-disable-next-line no-console
+            console.log('[Search] ⏸️ SSE仍在进行中，跳过重复调用:', query);
+            return;
+          }
+        } catch (err) {
+          // 忽略解析错误
+        }
+      }
+    }
+
     try {
       setIsLoading(true);
+      setSearchResults([]); // 清空之前的结果
 
       // 首先尝试从缓存获取
       const cachedResults = searchCacheManager.getCachedResults(query);
       if (cachedResults) {
+        // eslint-disable-next-line no-console
+        console.log('[DEBUG] 使用缓存结果，跳过SSE');
         let results = cachedResults;
         if (
           typeof window !== 'undefined' &&
@@ -185,88 +209,226 @@ function SearchPageClient() {
           });
         }
 
-        setSearchResults(
-          results.sort((a: SearchResult, b: SearchResult) => {
-            // 优先排序：标题与搜索词完全一致的排在前面
-            const aExactMatch = a.title === query.trim();
-            const bExactMatch = b.title === query.trim();
-
-            if (aExactMatch && !bExactMatch) return -1;
-            if (!aExactMatch && bExactMatch) return 1;
-
-            // 如果都匹配或都不匹配，则按原来的逻辑排序
-            if (a.year === b.year) {
-              return a.title.localeCompare(b.title);
-            } else {
-              // 处理 unknown 的情况
-              if (a.year === 'unknown' && b.year === 'unknown') {
-                return 0;
-              } else if (a.year === 'unknown') {
-                return 1; // a 排在后面
-              } else if (b.year === 'unknown') {
-                return -1; // b 排在后面
-              } else {
-                // 都是数字年份，按数字大小排序（大的在前面）
-                return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
-              }
-            }
-          })
-        );
+        setSearchResults(results);
         setShowResults(true);
         setIsLoading(false);
+
+        // 【新增】使用缓存结果时，也保存到 sessionStorage
+        try {
+          sessionStorage.setItem(
+            `search_results_${query.trim()}`,
+            JSON.stringify({
+              query: query.trim(),
+              results: results,
+              timestamp: Date.now(),
+            })
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('[Search] 无法保存搜索结果到 sessionStorage:', err);
+        }
+
+        // 【性能优化】使用缓存结果时，也预加载详情
+        detailCacheManager
+          .preloadDetails(results.slice(0, 10), 10)
+          .catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.warn(
+              '[DetailCache] 缓存结果预加载失败（不影响使用）:',
+              err
+            );
+          });
+
         return;
       }
 
-      // 缓存未命中，从API获取
-      const response = await fetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}`
+      // eslint-disable-next-line no-console
+      console.log('[DEBUG] 开始SSE流式搜索:', query);
+
+      // 使用 SSE 流式搜索
+      const eventSource = new EventSource(
+        `/api/search/stream?q=${encodeURIComponent(query.trim())}`
       );
-      const data = await response.json();
-      let results = data.results;
+      const seenResults = new Set<string>();
+      const accumulatedResults: SearchResult[] = [];
+      let hasReceivedResults = false;
 
-      // 缓存结果
-      searchCacheManager.cacheResults(query, results);
-      if (
-        typeof window !== 'undefined' &&
-        !(window as any).RUNTIME_CONFIG?.DISABLE_YELLOW_FILTER
-      ) {
-        results = results.filter((result: SearchResult) => {
-          const typeName = result.type_name || '';
-          return !yellowWords.some((word: string) => typeName.includes(word));
-        });
-      }
-      setSearchResults(
-        results.sort((a: SearchResult, b: SearchResult) => {
-          // 优先排序：标题与搜索词完全一致的排在前面
-          const aExactMatch = a.title === query.trim();
-          const bExactMatch = b.title === query.trim();
+      // 连接打开时，立即显示加载状态
+      eventSource.onopen = () => {
+        setShowResults(true);
+        // eslint-disable-next-line no-console
+        console.log('[SSE] 连接已打开');
+      };
 
-          if (aExactMatch && !bExactMatch) return -1;
-          if (!aExactMatch && bExactMatch) return 1;
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
 
-          // 如果都匹配或都不匹配，则按原来的逻辑排序
-          if (a.year === b.year) {
-            return a.title.localeCompare(b.title);
-          } else {
-            // 处理 unknown 的情况
-            if (a.year === 'unknown' && b.year === 'unknown') {
-              return 0;
-            } else if (a.year === 'unknown') {
-              return 1; // a 排在后面
-            } else if (b.year === 'unknown') {
-              return -1; // b 排在后面
-            } else {
-              // 都是数字年份，按数字大小排序（大的在前面）
-              return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
+          if (data.done) {
+            // eslint-disable-next-line no-console
+            console.log(
+              '[SSE] 搜索完成，共',
+              accumulatedResults.length,
+              '个结果'
+            );
+            eventSource.close();
+            // 缓存完整结果
+            if (accumulatedResults.length > 0) {
+              searchCacheManager.cacheResults(query, accumulatedResults);
+
+              // 【新增】搜索完成时，最终保存到 sessionStorage
+              try {
+                sessionStorage.setItem(
+                  `search_results_${query.trim()}`,
+                  JSON.stringify({
+                    query: query.trim(),
+                    results: accumulatedResults,
+                    timestamp: Date.now(),
+                  })
+                );
+                // 【新增】标记SSE已完成
+                sessionStorage.setItem(
+                  `sse_status_${query.trim()}`,
+                  JSON.stringify({
+                    isActive: false,
+                    query: query.trim(),
+                    timestamp: Date.now(),
+                  })
+                );
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  '[Search] 无法保存搜索结果到 sessionStorage:',
+                  err
+                );
+              }
+
+              // 【性能优化】搜索完成后，批量预加载前10个结果的详情
+              // 这可以在用户浏览结果时提前准备好数据
+              detailCacheManager
+                .preloadDetails(accumulatedResults.slice(0, 10), 10)
+                .catch((err: unknown) => {
+                  // eslint-disable-next-line no-console
+                  console.warn(
+                    '[DetailCache] 批量预加载失败（不影响使用）:',
+                    err
+                  );
+                });
+            }
+            setIsLoading(false);
+            return;
+          }
+
+          // 处理新结果
+          if (
+            data.results &&
+            Array.isArray(data.results) &&
+            data.results.length > 0
+          ) {
+            const newResults = data.results.filter(
+              (result: SearchResult) =>
+                !seenResults.has(`${result.source}-${result.id}`)
+            );
+
+            if (newResults.length > 0) {
+              // eslint-disable-next-line no-console
+              console.log('[SSE] 收到', newResults.length, '个新结果');
+              newResults.forEach((result: SearchResult) => {
+                seenResults.add(`${result.source}-${result.id}`);
+                accumulatedResults.push(result);
+              });
+
+              // 【优化】立即更新 UI，允许用户点击
+              setSearchResults([...accumulatedResults]);
+              setShowResults(true);
+
+              // 【优化】收到第一个结果时，立即停止加载动画并允许用户点击
+              if (!hasReceivedResults) {
+                hasReceivedResults = true;
+                setIsLoading(false); // 停止加载动画，允许点击
+                // eslint-disable-next-line no-console
+                console.log('[SSE] ✓ 已收到第一个结果，用户可以立即点击播放');
+              }
+
+              // 【新增】标记SSE仍在进行中，供后续使用
+              try {
+                sessionStorage.setItem(
+                  `sse_status_${query.trim()}`,
+                  JSON.stringify({
+                    isActive: true,
+                    query: query.trim(),
+                    timestamp: Date.now(),
+                  })
+                );
+              } catch (err) {
+                // sessionStorage可能已满，静默处理
+              }
+
+              // 【新增】每次更新结果时，保存到 sessionStorage，供播放页面使用
+              if (accumulatedResults.length > 0) {
+                try {
+                  sessionStorage.setItem(
+                    `search_results_${query.trim()}`,
+                    JSON.stringify({
+                      query: query.trim(),
+                      results: accumulatedResults,
+                      timestamp: Date.now(),
+                    })
+                  );
+                } catch (err) {
+                  // sessionStorage 可能已满，静默处理
+                  // eslint-disable-next-line no-console
+                  console.warn(
+                    '[Search] 无法保存搜索结果到 sessionStorage:',
+                    err
+                  );
+                }
+              }
+
+              // 【性能优化】后台预加载详情（不阻塞UI）
+              // 对新收到的结果进行预加载，最多预加载前10个
+              if (accumulatedResults.length <= 10) {
+                detailCacheManager
+                  .preloadDetails(newResults, newResults.length)
+                  .catch((err: unknown) => {
+                    // eslint-disable-next-line no-console
+                    console.warn(
+                      '[DetailCache] 预加载失败（不影响使用）:',
+                      err
+                    );
+                  });
+              }
             }
           }
-        })
-      );
-      setShowResults(true);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[SSE] Error parsing SSE message:', err, event.data);
+        }
+      };
+
+      eventSource.onerror = (error) => {
+        // eslint-disable-next-line no-console
+        console.error(
+          '[SSE] Connection error:',
+          error,
+          'ReadyState:',
+          eventSource.readyState
+        );
+        // 只有在连接失败时才关闭
+        if (eventSource.readyState === EventSource.CLOSED) {
+          eventSource.close();
+          setIsLoading(false);
+        } else if (eventSource.readyState === EventSource.CONNECTING) {
+          // 连接中，可能是暂时断线，保持流式更新
+          // eslint-disable-next-line no-console
+          console.log('[SSE] 连接中断，尝试重连...');
+        }
+      };
     } catch (error) {
-      setSearchResults([]);
-    } finally {
+      // eslint-disable-next-line no-console
+      console.error('Search error:', error);
       setIsLoading(false);
+      setSearchResults([]);
     }
   };
 
@@ -281,8 +443,8 @@ function SearchPageClient() {
     setShowResults(true);
 
     router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-    // 直接发请求
-    fetchSearchResults(trimmed);
+    // 直接发请求 - 使用流式搜索
+    fetchSearchResultsStream(trimmed);
 
     // 保存到搜索历史 (事件监听会自动更新界面)
     addSearchHistory(trimmed);

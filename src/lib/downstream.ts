@@ -25,9 +25,9 @@ export async function searchFromApi(
       apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
     const apiName = apiSite.name;
 
-    // 添加超时处理
+    // 添加超时处理 - 【优化】降低超时时间从8s到2.5s，提升响应速度
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
 
     const response = await fetch(apiUrl, {
       headers: API_CONFIG.search.headers,
@@ -91,7 +91,11 @@ export async function searchFromApi(
     });
 
     const config = await getConfig();
-    const MAX_SEARCH_PAGES: number = config.SiteConfig.SearchDownstreamMaxPage;
+    // 【优化】限制多页搜索页数，最多只搜索3页，而不是5页，减少延迟
+    const MAX_SEARCH_PAGES: number = Math.min(
+      config.SiteConfig.SearchDownstreamMaxPage || 5,
+      3
+    );
 
     // 获取总页数
     const pageCount = data.pagecount || 1;
@@ -112,9 +116,10 @@ export async function searchFromApi(
         const pagePromise = (async () => {
           try {
             const pageController = new AbortController();
+            // 【优化】降低多页搜索超时时间从8s到2s，提升响应速度
             const pageTimeoutId = setTimeout(
               () => pageController.abort(),
-              8000
+              2000
             );
 
             const pageResponse = await fetch(pageUrl, {

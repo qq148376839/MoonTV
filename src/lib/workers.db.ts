@@ -308,9 +308,11 @@ export class WorkersStorage implements IStorage {
   ): Promise<SkipConfig | null> {
     try {
       // 这个功能可能需要在Workers API中实现对应的端点
+      // eslint-disable-next-line no-console
       console.warn('getSkipConfig: Workers API暂未实现此功能');
       return null;
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error('获取跳过配置失败:', error);
       return null;
     }
@@ -322,6 +324,7 @@ export class WorkersStorage implements IStorage {
     _id: string,
     _config: SkipConfig
   ): Promise<void> {
+    // eslint-disable-next-line no-console
     console.warn('setSkipConfig: Workers API暂未实现此功能');
   }
 
@@ -330,12 +333,14 @@ export class WorkersStorage implements IStorage {
     _source: string,
     _id: string
   ): Promise<void> {
+    // eslint-disable-next-line no-console
     console.warn('deleteSkipConfig: Workers API暂未实现此功能');
   }
 
   async getAllSkipConfigs(
     _userName: string
   ): Promise<{ [key: string]: SkipConfig }> {
+    // eslint-disable-next-line no-console
     console.warn('getAllSkipConfigs: Workers API暂未实现此功能');
     return {};
   }

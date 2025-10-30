@@ -2,7 +2,7 @@
 
 'use client';
 
-const CURRENT_VERSION = '20250923095022';
+const CURRENT_VERSION = '20251030181525';
 
 // 版本检查结果枚举
 export enum UpdateStatus {
@@ -63,14 +63,27 @@ async function fetchVersionFromUrl(url: string): Promise<string | null> {
 
     clearTimeout(timeoutId);
 
+    // 【性能优化】对于 404 错误，静默处理，不输出警告日志
     if (!response.ok) {
+      // 404 错误表示文件不存在，这是正常情况，静默处理
+      if (response.status === 404) {
+        return null;
+      }
+      // 其他错误才抛出，但仅在开发环境输出调试日志
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
     const version = await response.text();
     return version.trim();
   } catch (error) {
-    console.warn(`从 ${url} 获取版本信息失败:`, error);
+    // 【性能优化】仅对于非 404 的错误输出调试日志，且仅在开发环境
+    const is404Error =
+      error instanceof Error &&
+      (error.message.includes('404') || error.message.includes('Not Found'));
+
+    if (!is404Error && process.env.NODE_ENV === 'development') {
+      console.debug(`[VersionCheck] 从 ${url} 获取版本信息失败:`, error);
+    }
     return null;
   }
 }

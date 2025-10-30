@@ -2,7 +2,6 @@
 
 import { CheckCircle, Heart, Link, PlayCircleIcon } from 'lucide-react';
 import Image from 'next/image';
-import { useRouter } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -55,7 +54,17 @@ export default function VideoCard({
   items,
   type = '',
 }: VideoCardProps) {
-  const router = useRouter();
+  // 【强制日志】确认组件被渲染
+  // eslint-disable-next-line no-console
+  console.error('🔴 [VideoCard] 组件渲染，props:', {
+    id,
+    source,
+    title,
+    from,
+    itemsLength: items?.length,
+    isAggregate: from === 'search' && !!items?.length,
+  });
+
   const [favorited, setFavorited] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -96,18 +105,61 @@ export default function VideoCard({
     };
   }, [isAggregate, items]);
 
-  const actualTitle = aggregateData?.first.title ?? title;
-  const actualPoster = aggregateData?.first.poster ?? poster;
-  const actualSource = aggregateData?.first.source ?? source;
-  const actualId = aggregateData?.first.id ?? id;
+  // 【修复】确保聚合模式下正确获取source和id
+  // 优先级：aggregateData?.first > items[0] > props
+  const actualTitle = aggregateData?.first?.title ?? items?.[0]?.title ?? title;
+  const actualPoster =
+    aggregateData?.first?.poster ?? items?.[0]?.poster ?? poster;
+
+  // 【诊断】在计算前先记录原始值
+  if (isAggregate && items && items.length > 0) {
+    // eslint-disable-next-line no-console
+    console.error('🔴 [VideoCard] 🔍 聚合模式数据检查:', {
+      aggregateDataFirst: aggregateData?.first
+        ? {
+            source: aggregateData.first.source,
+            id: aggregateData.first.id,
+          }
+        : null,
+      itemsFirst: items[0]
+        ? {
+            source: items[0].source,
+            id: items[0].id,
+          }
+        : null,
+      propsSource: source,
+      propsId: id,
+    });
+  }
+
+  const actualSource =
+    isAggregate && items && items.length > 0
+      ? aggregateData?.first?.source ?? items[0]?.source ?? source
+      : aggregateData?.first?.source ?? source;
+  const actualId =
+    isAggregate && items && items.length > 0
+      ? aggregateData?.first?.id ?? items[0]?.id ?? id
+      : aggregateData?.first?.id ?? id;
+
+  // 【诊断】记录最终计算的值
+  if (isAggregate) {
+    // eslint-disable-next-line no-console
+    console.error('🔴 [VideoCard] ✅ 聚合模式最终值:', {
+      actualSource: actualSource || '(空)',
+      actualId: actualId || '(空)',
+      hasSource: !!actualSource,
+      hasId: !!actualId,
+      canNavigate: !!(actualSource && actualId),
+    });
+  }
   const actualDoubanId = String(
     aggregateData?.mostFrequentDoubanId ?? douban_id
   );
   const actualEpisodes = aggregateData?.mostFrequentEpisodes ?? episodes;
-  const actualYear = aggregateData?.first.year ?? year;
+  const actualYear = aggregateData?.first?.year ?? items?.[0]?.year ?? year;
   const actualQuery = query || '';
   const actualSearchType = isAggregate
-    ? aggregateData?.first.episodes?.length === 1
+    ? (aggregateData?.first?.episodes ?? items?.[0]?.episodes)?.length === 1
       ? 'movie'
       : 'tv'
     : type;
@@ -196,33 +248,110 @@ export default function VideoCard({
   );
 
   const handleClick = useCallback(() => {
+    // 【诊断日志】点击时的详细参数信息（强制输出）
+    // eslint-disable-next-line no-console
+    console.error('🔴 [VideoCard] 🖱️ 点击事件触发:', {
+      from,
+      isAggregate,
+      actualSource,
+      actualId,
+      actualTitle,
+      actualYear,
+      actualQuery,
+      actualSearchType,
+      itemsLength: items?.length,
+      aggregateData: isAggregate
+        ? {
+            firstSource: aggregateData?.first.source,
+            firstId: aggregateData?.first.id,
+            itemsCount: items?.length,
+          }
+        : null,
+    });
+
+    // 【修复】确保有source和id时才跳转
     if (from === 'douban') {
-      router.push(
-        `/play?title=${encodeURIComponent(actualTitle.trim())}${
-          actualYear ? `&year=${actualYear}` : ''
-        }${actualSearchType ? `&stype=${actualSearchType}` : ''}`
+      const url = `/play?title=${encodeURIComponent(actualTitle.trim())}${
+        actualYear ? `&year=${actualYear}` : ''
+      }${actualSearchType ? `&stype=${actualSearchType}` : ''}`;
+      // eslint-disable-next-line no-console
+      console.error(
+        '🔴 [VideoCard] 📤 立即跳转到播放页面（豆瓣模式，不等待任何操作）:',
+        url
       );
+      // 【优化】使用 window.location.href 强制立即跳转
+      window.location.href = url;
     } else if (actualSource && actualId) {
-      router.push(
-        `/play?source=${actualSource}&id=${actualId}&title=${encodeURIComponent(
-          actualTitle
-        )}${actualYear ? `&year=${actualYear}` : ''}${
-          isAggregate ? '&prefer=true' : ''
-        }${
-          actualQuery ? `&stitle=${encodeURIComponent(actualQuery.trim())}` : ''
-        }${actualSearchType ? `&stype=${actualSearchType}` : ''}`
-      );
+      // 【修复】聚合模式下，传递完整的items信息到sessionStorage
+      if (isAggregate && items && items.length > 0) {
+        try {
+          sessionStorage.setItem(
+            `video_sources_${actualTitle}_${actualYear || ''}`,
+            JSON.stringify({
+              items: items,
+              query: actualQuery,
+              timestamp: Date.now(),
+            })
+          );
+          // eslint-disable-next-line no-console
+          console.error('🔴 [VideoCard] 💾 已保存源信息到 sessionStorage:', {
+            key: `video_sources_${actualTitle}_${actualYear || ''}`,
+            itemsCount: items.length,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('[VideoCard] 无法保存源信息到 sessionStorage:', err);
+        }
+      }
+
+      const url = `/play?source=${actualSource}&id=${actualId}&title=${encodeURIComponent(
+        actualTitle
+      )}${actualYear ? `&year=${actualYear}` : ''}${
+        isAggregate ? '&prefer=true' : ''
+      }${
+        actualQuery ? `&stitle=${encodeURIComponent(actualQuery.trim())}` : ''
+      }${actualSearchType ? `&stype=${actualSearchType}` : ''}`;
+
+      // eslint-disable-next-line no-console
+      console.error('🔴 [VideoCard] 📤 立即跳转到播放页面（不等待SSE完成）:', {
+        url,
+        params: {
+          source: actualSource,
+          id: actualId,
+          title: actualTitle,
+          year: actualYear,
+          prefer: isAggregate ? 'true' : undefined,
+          stitle: actualQuery,
+          stype: actualSearchType,
+        },
+      });
+
+      // 【优化】使用 window.location.href 强制立即跳转，不等待任何React状态更新
+      // 这样可以确保即使SSE还在进行中，也能立即跳转到播放页面
+      window.location.href = url;
+    } else {
+      // 【修复】如果没有source和id，打印警告信息
+      // eslint-disable-next-line no-console
+      console.error('[VideoCard] ✗ 无法跳转：缺少 source 或 id', {
+        actualSource,
+        actualId,
+        isAggregate,
+        itemsLength: items?.length,
+        aggregateDataFirst: aggregateData?.first,
+        itemsFirst: items?.[0],
+      });
     }
   }, [
     from,
     actualSource,
     actualId,
-    router,
     actualTitle,
     actualYear,
     isAggregate,
     actualQuery,
     actualSearchType,
+    items,
+    aggregateData,
   ]);
 
   const config = useMemo(() => {

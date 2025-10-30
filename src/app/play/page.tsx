@@ -21,6 +21,8 @@ import {
   saveSkipConfig,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { detailCacheManager } from '@/lib/detail-cache';
+import { searchCacheManager } from '@/lib/search-cache';
 import { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 
@@ -218,6 +220,7 @@ function PlayPageClient() {
           try {
             // 检查是否有第一集的播放地址
             if (!source.episodes || source.episodes.length === 0) {
+              // eslint-disable-next-line no-console
               console.warn(`播放源 ${source.source_name} 没有可用的播放地址`);
               return null;
             }
@@ -270,6 +273,7 @@ function PlayPageClient() {
     setPrecomputedVideoInfo(newVideoInfoMap);
 
     if (successfulResults.length === 0) {
+      // eslint-disable-next-line no-console
       console.warn('所有播放源测速都失败，使用第一个播放源');
       return sources[0];
     }
@@ -313,8 +317,10 @@ function PlayPageClient() {
     // 按综合评分排序，选择最佳播放源
     resultsWithScore.sort((a, b) => b.score - a.score);
 
+    // eslint-disable-next-line no-console
     console.log('播放源评分排序结果:');
     resultsWithScore.forEach((result, index) => {
+      // eslint-disable-next-line no-console
       console.log(
         `${index + 1}. ${
           result.source.source_name
@@ -532,6 +538,7 @@ function PlayPageClient() {
           newConfig
         );
       }
+      // eslint-disable-next-line no-console
       console.log('跳过片头片尾配置已保存:', newConfig);
     } catch (err) {
       console.error('保存跳过片头片尾配置失败:', err);
@@ -593,13 +600,40 @@ function PlayPageClient() {
     updateVideoUrl(detail, currentEpisodeIndex);
   }, [detail, currentEpisodeIndex]);
 
-  // 进入页面时直接获取全部源信息
+  // 【关键】进入页面时初始化 - 必须输出日志来确认代码执行
   useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.error('🔴 [PlayPage] useEffect 触发，准备调用 initAll');
+    // eslint-disable-next-line no-console
+    console.error(
+      '🔴 [PlayPage] 当前URL:',
+      typeof window !== 'undefined' ? window.location.href : 'SSR'
+    );
+    // eslint-disable-next-line no-console
+    console.error('🔴 [PlayPage] searchParams:', {
+      source: searchParams.get('source'),
+      id: searchParams.get('id'),
+      title: searchParams.get('title'),
+      stitle: searchParams.get('stitle'),
+    });
+
     const fetchSourceDetail = async (
       source: string,
       id: string
     ): Promise<SearchResult[]> => {
       try {
+        // 【性能优化】优先从缓存获取
+        const cachedDetail = detailCacheManager.getCachedDetail(source, id);
+        if (cachedDetail) {
+          // eslint-disable-next-line no-console
+          console.log(`[DetailCache] 缓存命中: ${source}:${id}`);
+          setAvailableSources([cachedDetail]);
+          return [cachedDetail];
+        }
+
+        // 缓存未命中，从API获取
+        // eslint-disable-next-line no-console
+        console.log(`[DetailCache] 缓存未命中，从API获取: ${source}:${id}`);
         const detailResponse = await fetch(
           `/api/detail?source=${source}&id=${id}`
         );
@@ -607,9 +641,14 @@ function PlayPageClient() {
           throw new Error('获取视频详情失败');
         }
         const detailData = (await detailResponse.json()) as SearchResult;
+
+        // 缓存详情供下次使用
+        detailCacheManager.cacheDetail(source, id, detailData);
+
         setAvailableSources([detailData]);
         return [detailData];
       } catch (err) {
+        // eslint-disable-next-line no-console
         console.error('获取视频详情失败:', err);
         return [];
       } finally {
@@ -617,7 +656,82 @@ function PlayPageClient() {
       }
     };
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
-      // 根据搜索词获取全部源信息
+      // 【优化】优先使用多层缓存策略，减少 API 调用
+
+      // 【优化1】首先尝试从 sessionStorage 获取（最新的搜索结果）
+      try {
+        const cached = sessionStorage.getItem(`search_results_${query.trim()}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          // 检查是否过期（5分钟内有效）
+          const isExpired = Date.now() - parsed.timestamp > 5 * 60 * 1000;
+
+          if (!isExpired && parsed.results && Array.isArray(parsed.results)) {
+            // eslint-disable-next-line no-console
+            console.log(
+              '[PlayPage] ✓ 从 sessionStorage 获取搜索结果，跳过 API 调用'
+            );
+
+            // 处理搜索结果，根据规则过滤
+            const results = parsed.results.filter(
+              (result: SearchResult) =>
+                result.title.replaceAll(' ', '').toLowerCase() ===
+                  videoTitleRef.current.replaceAll(' ', '').toLowerCase() &&
+                (videoYearRef.current
+                  ? result.year.toLowerCase() ===
+                    videoYearRef.current.toLowerCase()
+                  : true) &&
+                (searchType
+                  ? (searchType === 'tv' && result.episodes.length > 1) ||
+                    (searchType === 'movie' && result.episodes.length === 1)
+                  : true)
+            );
+
+            if (results.length > 0) {
+              setAvailableSources(results);
+              setSourceSearchLoading(false);
+              return results;
+            }
+          }
+        }
+      } catch (err) {
+        // sessionStorage 解析失败，继续使用其他缓存或 API
+        // eslint-disable-next-line no-console
+        console.warn('[PlayPage] sessionStorage 数据无效，继续查找:', err);
+      }
+
+      // 【优化2】其次使用搜索缓存（searchCacheManager）
+      const cachedResults = searchCacheManager.getCachedResults(query.trim());
+      if (cachedResults) {
+        // eslint-disable-next-line no-console
+        console.log('[PlayPage] ✓ 从搜索缓存获取结果，跳过 API 调用');
+
+        // 处理搜索结果，根据规则过滤
+        const results = cachedResults.filter(
+          (result: SearchResult) =>
+            result.title.replaceAll(' ', '').toLowerCase() ===
+              videoTitleRef.current.replaceAll(' ', '').toLowerCase() &&
+            (videoYearRef.current
+              ? result.year.toLowerCase() === videoYearRef.current.toLowerCase()
+              : true) &&
+            (searchType
+              ? (searchType === 'tv' && result.episodes.length > 1) ||
+                (searchType === 'movie' && result.episodes.length === 1)
+              : true)
+        );
+
+        if (results.length > 0) {
+          setAvailableSources(results);
+          setSourceSearchLoading(false);
+          return results;
+        }
+      }
+
+      // 【优化】检测SSE是否仍在进行中（通知将在useEffect中处理）
+
+      // 【最后】从 API 获取
+      // eslint-disable-next-line no-console
+      console.error('🔴 [PlayPage] ⚠️ 从 API 获取搜索结果（缓存未命中）');
       try {
         const response = await fetch(
           `/api/search?q=${encodeURIComponent(query.trim())}`
@@ -651,29 +765,294 @@ function PlayPageClient() {
       }
     };
 
+    // 【新增】后台SSE结果加载器：持续监听sessionStorage更新
+    // 注意：这个函数会在useEffect中调用，用于监听sessionStorage变化
+
     const initAll = async () => {
-      if (!currentSource && !currentId && !videoTitle && !searchTitle) {
+      // 直接从 searchParams 读取，避免 state 初始化延迟的问题
+      const rawUrlSource = searchParams.get('source');
+      const rawUrlId = searchParams.get('id');
+      const urlSource = rawUrlSource?.trim() || '';
+      const urlId = rawUrlId?.trim() || '';
+      const urlTitle = searchParams.get('title')?.trim() || '';
+      const urlSearchTitle = searchParams.get('stitle')?.trim() || '';
+      const urlYear = searchParams.get('year')?.trim() || '';
+
+      // 获取完整的 URL 用于调试
+      const fullUrl = typeof window !== 'undefined' ? window.location.href : '';
+      const timestamp = Date.now();
+
+      // 【诊断日志】详细的参数验证日志（强制输出，不会被过滤）
+      // eslint-disable-next-line no-console
+      console.error(`🔴 [PlayPage] 🚀 initAll 开始 [${timestamp}]:`, {
+        fullUrl,
+        rawParams: {
+          rawUrlSource: `"${rawUrlSource}"`,
+          rawUrlId: `"${rawUrlId}"`,
+        },
+        processedParams: {
+          urlSource: `"${urlSource}"`,
+          urlId: `"${urlId}"`,
+          urlTitle: `"${urlTitle}"`,
+          urlSearchTitle: `"${urlSearchTitle}"`,
+        },
+        validation: {
+          hasSource: urlSource.length > 0,
+          hasId: urlId.length > 0,
+          hasSourceAndId: urlSource.length > 0 && urlId.length > 0,
+          sourceLength: urlSource.length,
+          idLength: urlId.length,
+        },
+        stateParams: {
+          currentSource,
+          currentId,
+          videoTitle,
+        },
+      });
+
+      // 参数检查：必须至少有 source+id 或 title+stitle
+      if (!urlSource && !urlId && !urlTitle && !urlSearchTitle) {
+        // eslint-disable-next-line no-console
+        console.warn('[PlayPage] ✗ 缺少必要参数，无法继续');
         setError('缺少必要参数');
         setLoading(false);
         return;
       }
       setLoading(true);
-      setLoadingStage(currentSource && currentId ? 'fetching' : 'searching');
-      setLoadingMessage(
-        currentSource && currentId
-          ? '🎬 正在获取视频详情...'
-          : '🔍 正在搜索播放源...'
-      );
 
-      let sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
-      if (
-        currentSource &&
-        currentId &&
-        !sourcesInfo.some(
-          (source) => source.source === currentSource && source.id === currentId
-        )
-      ) {
-        sourcesInfo = await fetchSourceDetail(currentSource, currentId);
+      let sourcesInfo: SearchResult[] = [];
+
+      // 【性能优化】如果有明确的 source 和 id（非空字符串），优先尝试从缓存获取，绝对不执行搜索
+      // 严格验证：必须同时有非空的 source 和 id
+      const hasValidSourceAndId = urlSource.length > 0 && urlId.length > 0;
+
+      if (hasValidSourceAndId) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `🔴 [PlayPage] ✓ 检测到有效的 source 和 id，优先使用缓存/详情API，绝对跳过搜索 [${timestamp}]:`,
+          {
+            urlSource,
+            urlId,
+            decision: '使用缓存/详情API，不执行搜索',
+          }
+        );
+        setLoadingStage('fetching');
+        setLoadingMessage('🎬 正在获取视频详情...');
+
+        // 同步更新 state
+        if (urlSource !== currentSource) {
+          setCurrentSource(urlSource);
+        }
+        if (urlId !== currentId) {
+          setCurrentId(urlId);
+        }
+
+        // 优先尝试从缓存获取（同步操作，立即返回）
+        const cacheStartTime = Date.now();
+        const cachedDetail = detailCacheManager.getCachedDetail(
+          urlSource,
+          urlId
+        );
+        const cacheTime = Date.now() - cacheStartTime;
+
+        if (cachedDetail) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[DetailCache] ✓ 缓存命中，立即使用 [耗时: ${cacheTime}ms]: ${urlSource}:${urlId}`
+          );
+          sourcesInfo = [cachedDetail];
+
+          // 立即设置 detail 和相关状态，让UI能快速响应
+          setDetail(cachedDetail);
+          setVideoYear(cachedDetail.year);
+          const finalTitle =
+            cachedDetail.title || urlTitle || videoTitleRef.current;
+          setVideoTitle(finalTitle);
+          setVideoCover(cachedDetail.poster);
+
+          // 【新增】尝试从 sessionStorage 读取聚合的源数据
+          try {
+            // 尝试多个可能的 key 格式以提高兼容性
+            const possibleKeys = [
+              `video_sources_${finalTitle}_${cachedDetail.year || ''}`,
+              `video_sources_${urlTitle}_${urlYear || ''}`,
+              `video_sources_${finalTitle}_${urlYear || ''}`,
+              `video_sources_${urlTitle}_${cachedDetail.year || ''}`,
+            ];
+
+            let aggData: string | null = null;
+            // 尝试从多个可能的key读取聚合数据
+            for (const key of possibleKeys) {
+              aggData = sessionStorage.getItem(key);
+              if (aggData) {
+                // eslint-disable-next-line no-console
+                console.log(
+                  `[PlayPage] ✓ 从 sessionStorage 读取聚合数据，key: ${key}`
+                );
+                break;
+              }
+            }
+
+            if (aggData) {
+              const parsed = JSON.parse(aggData);
+              if (
+                parsed.items &&
+                Array.isArray(parsed.items) &&
+                parsed.items.length > 0
+              ) {
+                console.log(
+                  `[PlayPage] ✓ 找到聚合源数据，共 ${parsed.items.length} 个源`
+                );
+                setAvailableSources(parsed.items);
+                sourcesInfo = parsed.items; // 更新 sourcesInfo 以便后续处理
+              } else {
+                console.warn('[PlayPage] 聚合数据格式不正确');
+                setAvailableSources([cachedDetail]);
+              }
+            } else {
+              console.log(
+                `[PlayPage] 未找到聚合数据，尝试的keys: ${possibleKeys.join(
+                  ', '
+                )}`
+              );
+              setAvailableSources([cachedDetail]);
+            }
+          } catch (err) {
+            console.warn('[PlayPage] 读取聚合数据失败，使用单个源:', err);
+            setAvailableSources([cachedDetail]);
+          }
+
+          // eslint-disable-next-line no-console
+          console.log(`[PlayPage] ✓ 缓存路径完成，绝不执行搜索 [${timestamp}]`);
+        } else {
+          // 缓存未命中，调用 fetchSourceDetail（内部会从API获取并缓存）
+          // eslint-disable-next-line no-console
+          console.log(
+            `[DetailCache] ⏳ 缓存未命中，从详情API获取: ${urlSource}:${urlId}`
+          );
+          const apiStartTime = Date.now();
+          sourcesInfo = await fetchSourceDetail(urlSource, urlId);
+          const apiTime = Date.now() - apiStartTime;
+
+          // 如果 API 获取成功，确保设置了状态
+          if (sourcesInfo.length > 0) {
+            const detailData = sourcesInfo[0];
+            setDetail(detailData);
+            setVideoYear(detailData.year);
+            const finalTitle =
+              detailData.title || urlTitle || videoTitleRef.current;
+            setVideoTitle(finalTitle);
+            setVideoCover(detailData.poster);
+
+            // 【新增】尝试从 sessionStorage 读取聚合的源数据
+            try {
+              // 尝试多个可能的 key 格式以提高兼容性
+              const possibleKeys = [
+                `video_sources_${finalTitle}_${detailData.year || ''}`,
+                `video_sources_${urlTitle}_${urlYear || ''}`,
+                `video_sources_${finalTitle}_${urlYear || ''}`,
+                `video_sources_${urlTitle}_${detailData.year || ''}`,
+              ];
+
+              let aggData: string | null = null;
+              // 尝试从多个可能的key读取聚合数据
+              for (const key of possibleKeys) {
+                aggData = sessionStorage.getItem(key);
+                if (aggData) {
+                  // eslint-disable-next-line no-console
+                  console.log(
+                    `[PlayPage] ✓ 从 sessionStorage 读取聚合数据，key: ${key}`
+                  );
+                  break;
+                }
+              }
+
+              if (aggData) {
+                const parsed = JSON.parse(aggData);
+                if (
+                  parsed.items &&
+                  Array.isArray(parsed.items) &&
+                  parsed.items.length > 0
+                ) {
+                  // eslint-disable-next-line no-console
+                  console.log(
+                    `[PlayPage] ✓ 找到聚合源数据，共 ${parsed.items.length} 个源`
+                  );
+                  setAvailableSources(parsed.items);
+                  sourcesInfo = parsed.items; // 更新 sourcesInfo 以便后续处理
+                } else {
+                  // eslint-disable-next-line no-console
+                  console.warn('[PlayPage] 聚合数据格式不正确');
+                  setAvailableSources([detailData]);
+                }
+              } else {
+                // eslint-disable-next-line no-console
+                console.log(
+                  `[PlayPage] 未找到聚合数据，尝试的keys: ${possibleKeys.join(
+                    ', '
+                  )}`
+                );
+                setAvailableSources([detailData]);
+              }
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.warn('[PlayPage] 读取聚合数据失败，使用单个源:', err);
+              setAvailableSources([detailData]);
+            }
+
+            // eslint-disable-next-line no-console
+            console.log(
+              `[DetailCache] ✓ 详情API获取成功 [耗时: ${apiTime}ms]: ${urlSource}:${urlId}`
+            );
+            // eslint-disable-next-line no-console
+            console.log(
+              `[PlayPage] ✓ 详情API路径完成，绝不执行搜索 [${timestamp}]`
+            );
+          } else {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[DetailCache] ✗ 详情API获取失败 [耗时: ${apiTime}ms]: ${urlSource}:${urlId}`
+            );
+            // 注意：即使失败也绝不执行搜索，因为已经有明确的 source 和 id
+            setError('获取视频详情失败，请检查网络连接或稍后重试');
+            setLoading(false);
+            return;
+          }
+        }
+      } else {
+        // 没有明确的 source 和 id，才执行搜索
+        console.error(
+          `🔴 [PlayPage] ⚠️ 没有有效的 source 和 id，执行搜索 [${timestamp}]:`,
+          {
+            urlSearchTitle,
+            urlTitle,
+            reason: {
+              sourceValid: urlSource.length > 0,
+              idValid: urlId.length > 0,
+              missingBoth: !urlSource && !urlId,
+              urlSourceValue: `"${urlSource}"`,
+              urlIdValue: `"${urlId}"`,
+              urlSourceLength: urlSource.length,
+              urlIdLength: urlId.length,
+            },
+            fullUrl:
+              typeof window !== 'undefined' ? window.location.href : 'N/A',
+          }
+        );
+        // eslint-disable-next-line no-console
+        console.error(
+          '🔴 [PlayPage] ⚠️ 这通常不应该发生！如果从搜索结果点击进入，应该有source和id参数'
+        );
+
+        setLoadingStage('searching');
+        setLoadingMessage('🔍 正在搜索播放源...');
+        const searchStartTime = Date.now();
+        sourcesInfo = await fetchSourcesData(urlSearchTitle || urlTitle);
+        const searchTime = Date.now() - searchStartTime;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[PlayPage] 搜索完成，结果数量: ${sourcesInfo.length} [耗时: ${searchTime}ms]`
+        );
       }
       if (sourcesInfo.length === 0) {
         setError('未找到匹配结果');
@@ -682,31 +1061,86 @@ function PlayPageClient() {
       }
 
       let detailData: SearchResult = sourcesInfo[0];
-      // 指定源和id且无需优选
-      if (currentSource && currentId && !needPreferRef.current) {
+
+      // 【性能优化】源选择逻辑：如果有明确的 source 和 id，绝对不使用优选逻辑
+      // 严格验证：必须同时有非空的 source 和 id
+      const checkSource = urlSource.length > 0 ? urlSource : currentSource;
+      const checkId = urlId.length > 0 ? urlId : currentId;
+      const shouldUseDirectly = checkSource.length > 0 && checkId.length > 0;
+
+      // eslint-disable-next-line no-console
+      console.log('[PlayPage] 源选择逻辑判断:', {
+        checkSource: `"${checkSource}"`,
+        checkId: `"${checkId}"`,
+        shouldUseDirectly,
+        needPrefer: needPreferRef.current,
+        optimizationEnabled,
+        sourcesInfoLength: sourcesInfo.length,
+        decision: shouldUseDirectly
+          ? '直接使用指定源，绝不执行优选'
+          : optimizationEnabled
+          ? '执行优选逻辑'
+          : '使用第一个源',
+      });
+
+      // 【核心修复】如果有明确的 source 和 id，无论 prefer 参数如何，都直接使用，绝不执行优选
+      if (shouldUseDirectly) {
+        // eslint-disable-next-line no-console
+        console.log(
+          '[PlayPage] ✓ 有明确的 source 和 id，直接使用，绝对跳过优选逻辑'
+        );
         const target = sourcesInfo.find(
-          (source) => source.source === currentSource && source.id === currentId
+          (source) => source.source === checkSource && source.id === checkId
         );
         if (target) {
           detailData = target;
+          // eslint-disable-next-line no-console
+          console.log('[PlayPage] ✓ 成功找到指定源，跳过优选:', {
+            source: target.source,
+            id: target.id,
+          });
         } else {
+          // eslint-disable-next-line no-console
+          console.error('[PlayPage] ✗ 在sourcesInfo中未找到指定的源:', {
+            checkSource,
+            checkId,
+            availableSources: sourcesInfo.map((s) => ({
+              source: s.source,
+              id: s.id,
+            })),
+          });
           setError('未找到匹配结果');
           setLoading(false);
           return;
         }
-      }
-
-      // 未指定源和 id 或需要优选，且开启优选开关
-      if (
-        (!currentSource || !currentId || needPreferRef.current) &&
-        optimizationEnabled
+      } else if (
+        !shouldUseDirectly &&
+        optimizationEnabled &&
+        sourcesInfo.length > 1
       ) {
+        // 只有在没有明确的 source 和 id，且有多个源时，才执行优选
+        // eslint-disable-next-line no-console
+        console.log('[PlayPage] ⚡ 执行源优选（因为没有明确的 source 和 id）');
         setLoadingStage('preferring');
         setLoadingMessage('⚡ 正在优选最佳播放源...');
-
+        const preferStartTime = Date.now();
         detailData = await preferBestSource(sourcesInfo);
+        const preferTime = Date.now() - preferStartTime;
+        // eslint-disable-next-line no-console
+        console.log(`[PlayPage] ✓ 优选完成 [耗时: ${preferTime}ms]:`, {
+          source: detailData.source,
+          id: detailData.id,
+        });
+      } else {
+        // 没有明确的 source 和 id，且只有一个源或优选未启用，使用第一个
+        // eslint-disable-next-line no-console
+        console.log(
+          '[PlayPage] ✓ 使用第一个源（没有明确的 source 和 id，且优选未启用或只有一个源）'
+        );
+        detailData = sourcesInfo[0];
       }
 
+      // eslint-disable-next-line no-console
       console.log(detailData.source, detailData.id);
 
       setNeedPrefer(false);
@@ -732,14 +1166,143 @@ function PlayPageClient() {
       setLoadingStage('ready');
       setLoadingMessage('✨ 准备就绪，即将开始播放...');
 
+      // 【新增】如果有searchTitle，启动后台加载器持续监听SSE结果更新（无论是否有source和id）
+      const searchTitle = urlSearchTitle || urlTitle;
+      if (searchTitle) {
+        try {
+          const trimmedQuery = searchTitle.trim();
+          let lastResultCount = 0;
+          let lastTimestamp = 0;
+
+          // 初始化时读取当前结果数量和时间戳
+          // 延迟启动，避免阻塞初始化
+          setTimeout(() => {
+            console.log(
+              '[PlayPage] ⚡ 启动SSE后台加载器，持续监听搜索结果更新'
+            );
+
+            let checkCount = 0;
+            const maxChecks = 60; // 最多检查60次（约30秒）
+
+            const loader = () => {
+              try {
+                checkCount++;
+
+                // 检查是否有新的搜索结果
+                const cached = sessionStorage.getItem(
+                  `search_results_${trimmedQuery}`
+                );
+                if (cached) {
+                  const parsed = JSON.parse(cached);
+
+                  // 检查是否有更新（通过结果数量或时间戳判断）
+                  const hasUpdate =
+                    parsed.timestamp > lastTimestamp ||
+                    parsed.results.length > lastResultCount;
+
+                  if (hasUpdate) {
+                    lastTimestamp = parsed.timestamp;
+                    lastResultCount = parsed.results.length;
+
+                    // 过滤匹配的结果
+                    const filteredResults = parsed.results.filter(
+                      (result: SearchResult) => {
+                        const titleMatch =
+                          result.title.replaceAll(' ', '').toLowerCase() ===
+                          videoTitleRef.current
+                            .replaceAll(' ', '')
+                            .toLowerCase();
+                        const yearMatch = videoYearRef.current
+                          ? result.year.toLowerCase() ===
+                            videoYearRef.current.toLowerCase()
+                          : true;
+                        const typeMatch = searchType
+                          ? (searchType === 'tv' &&
+                              result.episodes.length > 1) ||
+                            (searchType === 'movie' &&
+                              result.episodes.length === 1)
+                          : true;
+
+                        return titleMatch && yearMatch && typeMatch;
+                      }
+                    );
+
+                    // 合并新源到 availableSources（使用函数式更新确保获取最新状态）
+                    setAvailableSources((prevSources) => {
+                      const existingKeys = new Set(
+                        prevSources.map((s) => `${s.source}-${s.id}`)
+                      );
+                      const newSources = filteredResults.filter(
+                        (r: SearchResult) =>
+                          !existingKeys.has(`${r.source}-${r.id}`)
+                      );
+
+                      if (newSources.length > 0) {
+                        // eslint-disable-next-line no-console
+                        console.log(
+                          `[PlayPage] 📥 后台加载到 ${newSources.length} 个新源（总数：${filteredResults.length}）`
+                        );
+                        return [...prevSources, ...newSources];
+                      }
+                      return prevSources;
+                    });
+                  }
+                }
+
+                // 检查是否应该继续监听
+                const shouldContinue = checkCount < maxChecks;
+                const status = sessionStorage.getItem(
+                  `sse_status_${trimmedQuery}`
+                );
+
+                if (status) {
+                  const parsedStatus = JSON.parse(status);
+                  if (parsedStatus.isActive && shouldContinue) {
+                    // SSE还在进行，继续监听
+                    setTimeout(loader, 300);
+                  } else {
+                    // SSE已完成，但再检查一次是否有最终更新
+                    setTimeout(() => {
+                      loader(); // 最后一次检查
+                      // eslint-disable-next-line no-console
+                      console.log('[PlayPage] ✓ SSE已完成，后台加载器将停止');
+                    }, 500);
+                  }
+                } else if (shouldContinue) {
+                  // 没有SSE状态信息，但可能还在更新，继续监听一段时间（最多30秒）
+                  setTimeout(loader, 300);
+                } else {
+                  // eslint-disable-next-line no-console
+                  console.log('[PlayPage] ✓ 达到最大检查次数，停止后台加载器');
+                }
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn('[PlayPage] SSE后台加载器执行失败:', err);
+                // 即使出错也继续监听（如果还有检查次数）
+                if (checkCount < maxChecks) {
+                  setTimeout(loader, 500);
+                }
+              }
+            };
+
+            // 立即执行一次，获取初始结果
+            loader();
+          }, 500); // 缩短延迟时间，更快启动监听
+        } catch (err) {
+          console.warn('[PlayPage] SSE后台加载器启动失败:', err);
+        }
+      }
+
       // 短暂延迟让用户看到完成状态
       setTimeout(() => {
         setLoading(false);
       }, 1000);
     };
 
+    console.error('🔴 [PlayPage] 准备调用 initAll()');
     initAll();
-  }, []);
+    console.error('🔴 [PlayPage] initAll() 调用完成');
+  }, [searchParams]);
 
   // 播放记录处理
   useEffect(() => {

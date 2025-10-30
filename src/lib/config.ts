@@ -76,7 +76,22 @@ async function initConfig() {
       // 尝试从数据库获取管理员配置
       let adminConfig: AdminConfig | null = null;
       if (storage && typeof (storage as any).getAdminConfig === 'function') {
-        adminConfig = await (storage as any).getAdminConfig();
+        try {
+          adminConfig = await (storage as any).getAdminConfig();
+        } catch (err: any) {
+          // 优雅处理 Workers API 权限错误，避免大量错误日志
+          if (
+            err?.isPermissionError ||
+            err?.message?.includes('403') ||
+            err?.message?.includes('权限不足')
+          ) {
+            // Workers API 权限不足时，静默使用默认配置
+            adminConfig = null;
+          } else {
+            // 其他错误才记录日志
+            console.error('获取管理员配置失败:', err);
+          }
+        }
       }
 
       // 获取所有用户名，用于补全 Users
