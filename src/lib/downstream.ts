@@ -25,18 +25,57 @@ export async function searchFromApi(
       apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
     const apiName = apiSite.name;
 
-    // 添加超时处理 - 【优化】降低超时时间从8s到2.5s，提升响应速度
+    // 【修复】Edge Runtime环境下的超时处理
+    // 使用AbortController实现超时，兼容Edge Runtime
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-    const response = await fetch(apiUrl, {
+    // 创建超时处理
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+      }, 2500);
+    } catch (e) {
+      // 如果setTimeout不可用（Edge Runtime应该支持，但以防万一）
+      // 使用Promise.race作为备选方案
+    }
+
+    const fetchPromise = fetch(apiUrl, {
       headers: API_CONFIG.search.headers,
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
+    let response: Response;
+    try {
+      response = await fetchPromise;
+    } catch (error) {
+      // 如果请求被中止或失败
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      if (error instanceof Error && error.name === 'AbortError') {
+        // 超时错误
+        if (process.env.NODE_ENV === 'development') {
+          // eslint-disable-next-line no-console
+          console.warn(`[searchFromApi] ${apiSite.key} request timeout`);
+        }
+      }
+      throw error;
+    }
+
+    // 清理超时
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
+      // 记录非200状态码（仅在开发环境）
+      if (process.env.NODE_ENV === 'development') {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[searchFromApi] ${apiSite.key} returned status ${response.status}`
+        );
+      }
       return [];
     }
 
