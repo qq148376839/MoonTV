@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev -H 0.0.0.0",
+    "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev -H 0.0.0.0 -p 5000",
     "build": "pnpm gen:runtime && pnpm gen:manifest && next build",
     "start": "next start",
     "lint": "next lint",

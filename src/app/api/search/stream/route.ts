@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import { getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import { SearchResult } from '@/lib/types';
@@ -238,21 +239,67 @@ export async function GET(request: Request) {
       const searchStartTime = Date.now();
 
       // 封装消息推送函数 - 立即推送结果
-      const pushResult = (results: SearchResult[], done = false) => {
+      const pushResult = (
+        results: SearchResult[],
+        done = false,
+        debugInfo?: Record<string, unknown>
+      ) => {
+        // 【调试日志】记录推送前的统计信息（服务端终端）
+        console.log(`[SSE] 推送结果 - 数量: ${results.length}, done: ${done}`);
+        const bySource = results.reduce((acc, r) => {
+          acc[r.source] = (acc[r.source] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+        console.log(`[SSE] 按源分组:`, bySource);
+
         // 应用黄色内容过滤
         let filteredResults = results;
         if (!config.SiteConfig.DisableYellowFilter) {
+          const beforeFilter = filteredResults.length;
           filteredResults = results.filter((result) => {
             const typeName = result.type_name || '';
             return !yellowWords.some((word: string) => typeName.includes(word));
           });
+
+          // 【调试日志】记录过滤结果
+          if (beforeFilter !== filteredResults.length) {
+            console.log(
+              `[SSE] 黄色内容过滤: ${beforeFilter} -> ${filteredResults.length}`
+            );
+          }
         }
 
-        // 发送 SSE 消息
+        // 【调试日志】记录最终推送结果
+        const emptyEpisodes = filteredResults.filter(
+          (r) => r.episodes.length === 0
+        );
+        if (emptyEpisodes.length > 0) {
+          console.warn(
+            `[SSE] ⚠️ 推送结果中有 ${emptyEpisodes.length} 个episodes为空:`,
+            emptyEpisodes.map((r) => ({
+              title: r.title,
+              source: r.source,
+              episodesCount: r.episodes.length,
+            }))
+          );
+        }
+
+        // 发送 SSE 消息（包含调试信息）
         const message = {
           results: filteredResults,
           done,
           timestamp: Date.now(),
+          debug:
+            process.env.NODE_ENV === 'development'
+              ? {
+                  totalResults: results.length,
+                  filteredResults: filteredResults.length,
+                  bySource,
+                  emptyEpisodes: emptyEpisodes.length,
+                  emptyEpisodesSources: emptyEpisodes.map((r) => r.source),
+                  ...debugInfo,
+                }
+              : undefined,
         };
 
         controller.enqueue(
@@ -282,6 +329,8 @@ export async function GET(request: Request) {
             );
           }
 
+          console.log(`[SSE] 开始搜索源: ${site.key} (${site.name})`);
+
           const results = await searchFromApiWithTimeout(
             site,
             query,
@@ -291,6 +340,20 @@ export async function GET(request: Request) {
           // 记录响应时间
           const responseTime = Date.now() - taskStartTime;
           responseTimes.push(responseTime);
+
+          console.log(
+            `[SSE] 源 ${site.key} 搜索完成 - 耗时: ${responseTime}ms, 结果数: ${results.length}`
+          );
+          if (results.length > 0) {
+            console.log(
+              `[SSE] 源 ${site.key} 结果详情:`,
+              results.map((r) => ({
+                title: r.title,
+                episodesCount: r.episodes.length,
+                source: r.source,
+              }))
+            );
+          }
 
           // 去重并推送新结果 - 立即推送，不等待其他源
           if (results.length > 0) {
@@ -306,11 +369,16 @@ export async function GET(request: Request) {
 
             // 立即推送结果
             if (newResults.length > 0) {
-              // eslint-disable-next-line no-console
               console.log(
                 `[SSE Stream] 推送 ${newResults.length} 个结果，来源: ${site.key}`
               );
-              pushResult(newResults, false);
+              pushResult(newResults, false, {
+                source: site.key,
+                sourceName: site.name,
+                duration: responseTime,
+                resultCount: results.length,
+                newResultCount: newResults.length,
+              });
             }
           }
 

@@ -2,6 +2,7 @@
  * 搜索结果智能缓存管理器
  * 解决HTTP缓存导致的数据不一致问题
  */
+/* eslint-disable no-console */
 
 import { SearchResult } from '@/lib/types';
 
@@ -110,10 +111,41 @@ class SearchCacheManager {
   public cacheResults(query: string, results: SearchResult[]): void {
     const normalizedQuery = query.trim().toLowerCase();
 
+    // 【调试日志】记录缓存前的统计信息
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[SearchCache] 缓存搜索结果 - 查询: ${query}`);
+      console.log(`[SearchCache] 总结果数: ${results.length}`);
+      const bySource = results.reduce((acc, r) => {
+        acc[r.source] = (acc[r.source] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      console.log(`[SearchCache] 按源分组:`, bySource);
+
+      const emptyEpisodes = results.filter((r) => r.episodes.length === 0);
+      if (emptyEpisodes.length > 0) {
+        console.warn(
+          `[SearchCache] ⚠️ 有 ${emptyEpisodes.length} 个结果episodes为空:`,
+          emptyEpisodes.map((r) => ({
+            title: r.title,
+            source: r.source,
+            episodesCount: r.episodes.length,
+          }))
+        );
+      }
+    }
+
     // 统计有效数据源
     const validSources = results
       .filter((r) => r.episodes.length > 0)
       .map((r) => r.source);
+
+    // 【调试日志】记录过滤后的统计信息
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        `[SearchCache] 有效结果数（episodes > 0）: ${validSources.length}`
+      );
+      console.log(`[SearchCache] 有效源:`, [...new Set(validSources)]);
+    }
 
     const cacheEntry: CachedSearchResult = {
       query: normalizedQuery,

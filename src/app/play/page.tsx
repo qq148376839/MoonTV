@@ -6,7 +6,7 @@ import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import { Heart } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   deleteFavorite,
@@ -141,6 +141,19 @@ function PlayPageClient() {
 
   // 视频播放地址
   const [videoUrl, setVideoUrl] = useState('');
+
+  // 官方解析解密状态
+  const [decrypting, setDecrypting] = useState(false);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+
+  // 源配置（用于检查official_parser）
+  const [sourceConfig, setSourceConfig] = useState<
+    Array<{
+      key: string;
+      official_parser?: boolean;
+      detail?: string;
+    }>
+  >([]);
 
   // 总集数
   const totalEpisodes = detail?.episodes?.length || 0;
@@ -403,24 +416,114 @@ function PlayPageClient() {
     return Math.round(score * 100) / 100; // 保留两位小数
   };
 
-  // 更新视频地址
-  const updateVideoUrl = (
-    detailData: SearchResult | null,
-    episodeIndex: number
-  ) => {
-    if (
-      !detailData ||
-      !detailData.episodes ||
-      episodeIndex >= detailData.episodes.length
-    ) {
-      setVideoUrl('');
-      return;
-    }
-    const newUrl = detailData?.episodes[episodeIndex] || '';
-    if (newUrl !== videoUrl) {
-      setVideoUrl(newUrl);
-    }
-  };
+  // 更新视频地址（支持官方解析解密）
+  const updateVideoUrl = useCallback(
+    async (detailData: SearchResult | null, episodeIndex: number) => {
+      if (
+        !detailData ||
+        !detailData.episodes ||
+        episodeIndex >= detailData.episodes.length
+      ) {
+        setVideoUrl('');
+        setDecrypting(false);
+        setDecryptError(null);
+        return;
+      }
+
+      const originalUrl = detailData.episodes[episodeIndex] || '';
+      if (!originalUrl) {
+        setVideoUrl('');
+        setDecrypting(false);
+        setDecryptError(null);
+        return;
+      }
+
+      // 检查是否是官方解析资源
+      const apiSite = sourceConfig.find((s) => s.key === detailData.source);
+      const needsDecrypt = apiSite?.official_parser === true;
+
+      console.log('[updateVideoUrl] 检查官方解析:', {
+        source: detailData.source,
+        originalUrl: originalUrl.substring(0, 100),
+        sourceConfigLength: sourceConfig.length,
+        apiSite: apiSite
+          ? { key: apiSite.key, official_parser: apiSite.official_parser }
+          : null,
+        needsDecrypt,
+      });
+
+      if (!needsDecrypt) {
+        // 普通资源，直接设置URL
+        console.log('[updateVideoUrl] 普通资源，直接使用URL');
+        setVideoUrl(originalUrl);
+        setDecrypting(false);
+        setDecryptError(null);
+        return;
+      }
+
+      // 官方解析资源，需要解密
+      // 使用默认解析器URL（detail字段仅用于爬取详情页，不用于解析）
+      const parserUrl = 'https://jx.789jiexi.com';
+
+      console.log('[updateVideoUrl] 开始官方解析解密:', {
+        parserUrl,
+        videoUrl: originalUrl.substring(0, 100),
+      });
+
+      setDecrypting(true);
+      setDecryptError(null);
+
+      try {
+        const response = await fetch('/api/decrypt', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            parserUrl: parserUrl,
+            videoUrl: originalUrl,
+          }),
+        });
+
+        const result = await response.json();
+
+        console.log('[updateVideoUrl] 解密API响应:', {
+          success: result.success,
+          cached: result.cached,
+          error: result.error,
+          m3u8Url: result.m3u8Url ? result.m3u8Url.substring(0, 100) : null,
+        });
+
+        if (result.success && result.m3u8Url) {
+          // 解密成功，使用解密后的URL
+          const decryptedUrl = result.m3u8Url;
+          console.log(
+            '[updateVideoUrl] ✓ 官方解析解密成功，设置videoUrl:',
+            decryptedUrl.substring(0, 100)
+          );
+          setVideoUrl(decryptedUrl);
+          setDecrypting(false);
+          setDecryptError(null);
+        } else {
+          // 解密失败
+          const errorMsg =
+            result.error || '视频解析失败，请稍后重试或切换其他资源';
+          console.error('[updateVideoUrl] ✗ 官方解析解密失败:', errorMsg);
+          setDecryptError(errorMsg);
+          setDecrypting(false);
+          // 不设置videoUrl，让用户选择是否切换
+        }
+      } catch (error) {
+        // 网络错误或其他错误
+        const errorMsg =
+          error instanceof Error ? error.message : '网络错误，请检查网络后重试';
+        console.error('[updateVideoUrl] ✗ 官方解析解密请求失败:', error);
+        setDecryptError(errorMsg);
+        setDecrypting(false);
+      }
+    },
+    [sourceConfig]
+  );
 
   const ensureVideoSource = (video: HTMLVideoElement | null, url: string) => {
     if (!video || !url) return;
@@ -595,10 +698,56 @@ function PlayPageClient() {
     }
   }
 
-  // 当集数索引变化时自动更新视频地址
+  // 获取源配置信息（用于检查official_parser）
   useEffect(() => {
+    const fetchSourceConfig = async () => {
+      try {
+        console.log('[PlayPage] 开始获取源配置...');
+        const response = await fetch('/api/server-config');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.SourceConfig) {
+            const configs = data.SourceConfig.map((s: any) => ({
+              key: s.key,
+              official_parser: s.official_parser,
+              detail: s.detail,
+            }));
+            console.log('[PlayPage] ✓ 源配置加载完成:', {
+              total: configs.length,
+              officialParserSources: configs
+                .filter((s) => s.official_parser)
+                .map((s) => s.key),
+              allSources: configs.map((s) => ({
+                key: s.key,
+                official_parser: s.official_parser,
+              })),
+            });
+            setSourceConfig(configs);
+          } else {
+            console.warn('[PlayPage] ⚠️ 源配置数据为空，data:', data);
+          }
+        }
+      } catch (error) {
+        console.error('[PlayPage] 获取源配置失败:', error);
+      }
+    };
+    fetchSourceConfig();
+  }, []);
+
+  // 当集数索引变化时自动更新视频地址
+  // 注意：只有当sourceConfig加载完成后才调用updateVideoUrl
+  useEffect(() => {
+    if (sourceConfig.length === 0) {
+      console.log('[PlayPage] sourceConfig未加载完成，跳过updateVideoUrl');
+      return;
+    }
+    console.log('[PlayPage] 调用updateVideoUrl:', {
+      detailSource: detail?.source,
+      currentEpisodeIndex,
+      sourceConfigLength: sourceConfig.length,
+    });
     updateVideoUrl(detail, currentEpisodeIndex);
-  }, [detail, currentEpisodeIndex]);
+  }, [detail, currentEpisodeIndex, updateVideoUrl, sourceConfig]);
 
   // 【关键】进入页面时初始化 - 必须输出日志来确认代码执行
   useEffect(() => {
@@ -2408,10 +2557,59 @@ function PlayPageClient() {
                       {/* 换源消息 */}
                       <div className='space-y-2'>
                         <p className='text-xl font-semibold text-white animate-pulse'>
-                          {videoLoadingStage === 'sourceChanging'
+                          {decrypting
+                            ? '🔐 正在解析视频...'
+                            : videoLoadingStage === 'sourceChanging'
                             ? '🔄 切换播放源...'
                             : '🔄 视频加载中...'}
                         </p>
+                        {decryptError && (
+                          <div className='mt-4 p-4 bg-red-500/20 border border-red-500/50 rounded-lg'>
+                            <p className='text-red-200 text-sm mb-2'>
+                              {decryptError}
+                            </p>
+                            <div className='flex gap-2 justify-center'>
+                              <button
+                                onClick={() => {
+                                  setDecryptError(null);
+                                  updateVideoUrl(detail, currentEpisodeIndex);
+                                }}
+                                className='px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg text-sm transition-colors'
+                              >
+                                重试
+                              </button>
+                              {availableSources.length > 1 && (
+                                <button
+                                  onClick={() => {
+                                    setDecryptError(null);
+                                    // 切换到下一个可用源
+                                    const currentIndex =
+                                      availableSources.findIndex(
+                                        (s) =>
+                                          s.source === detail?.source &&
+                                          s.id === detail?.id
+                                      );
+                                    if (
+                                      currentIndex >= 0 &&
+                                      currentIndex < availableSources.length - 1
+                                    ) {
+                                      const nextSource =
+                                        availableSources[currentIndex + 1];
+                                      handleSourceChange(
+                                        nextSource.source,
+                                        nextSource.id,
+                                        nextSource.title
+                                      );
+                                    }
+                                  }}
+                                  className='px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm transition-colors'
+                                >
+                                  切换其他源
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

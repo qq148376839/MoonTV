@@ -10,6 +10,7 @@ export interface ApiSite {
   api: string;
   name: string;
   detail?: string;
+  official_parser?: boolean; // 是否为官方解析资源
 }
 
 interface ConfigFileStruct {
@@ -120,6 +121,7 @@ async function initConfig() {
             name: site.name,
             api: site.api,
             detail: site.detail,
+            official_parser: site.official_parser ?? false,
             from: 'config',
             disabled: false,
           });
@@ -228,6 +230,7 @@ async function initConfig() {
             name: site.name,
             api: site.api,
             detail: site.detail,
+            official_parser: site.official_parser ?? false,
             from: 'config',
             disabled: false,
           })),
@@ -276,6 +279,7 @@ async function initConfig() {
         name: site.name,
         api: site.api,
         detail: site.detail,
+        official_parser: site.official_parser ?? false,
         from: 'config',
         disabled: false,
       })),
@@ -337,11 +341,21 @@ export async function getConfig(): Promise<AdminConfig> {
 
     apiSiteEntries.forEach(([key, site]) => {
       const existingSource = sourceConfigMap.get(key);
+      const officialParser = site.official_parser ?? false;
+
+      // 【调试日志】记录配置加载
+      if (process.env.NODE_ENV === 'development' && officialParser) {
+        console.log(
+          `[Config] 加载源配置 - key: ${key}, name: ${site.name}, official_parser: ${officialParser}`
+        );
+      }
+
       if (existingSource) {
-        // 如果已存在，只覆盖 name、api、detail 和 from
+        // 如果已存在，只覆盖 name、api、detail、official_parser 和 from
         existingSource.name = site.name;
         existingSource.api = site.api;
         existingSource.detail = site.detail;
+        existingSource.official_parser = officialParser;
         existingSource.from = 'config';
       } else {
         // 如果不存在，创建新条目
@@ -350,6 +364,7 @@ export async function getConfig(): Promise<AdminConfig> {
           name: site.name,
           api: site.api,
           detail: site.detail,
+          official_parser: officialParser,
           from: 'config',
           disabled: false,
         });

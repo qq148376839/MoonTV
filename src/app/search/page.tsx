@@ -1,4 +1,4 @@
-/* eslint-disable react-hooks/exhaustive-deps, @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/exhaustive-deps, @typescript-eslint/no-explicit-any, no-console */
 'use client';
 
 import { ChevronUp, Search, X } from 'lucide-react';
@@ -252,6 +252,9 @@ function SearchPageClient() {
       const seenResults = new Set<string>();
       const accumulatedResults: SearchResult[] = [];
       let hasReceivedResults = false;
+
+      // 【调试日志】记录SSE连接
+      console.log('[Search] SSE连接已建立，开始接收搜索结果');
 
       // 连接打开时，立即显示加载状态
       eventSource.onopen = () => {

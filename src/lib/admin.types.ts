@@ -21,6 +21,7 @@ export interface AdminConfig {
     name: string;
     api: string;
     detail?: string;
+    official_parser?: boolean; // 是否为官方解析资源
     from: 'config' | 'custom';
     disabled?: boolean;
   }[];

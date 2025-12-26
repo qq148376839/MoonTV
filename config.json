@@ -84,6 +84,16 @@
     "xiaomaomi": {
       "api": "https://zy.xmm.hk/api.php/provide/vod",
       "name": "小猫咪资源"
+    },
+    "789caiji": {
+      "api": "https://www.caiji.cyou/api.php/provide/vod",
+      "name": "789采集",
+      "official_parser": true
+    },
+    "jinchan": {
+      "api": "https://zy.jinchancaiji.com/api.php/provide/vod",
+      "name": "金蝉采集",
+      "official_parser": true
     }
   }
 }
