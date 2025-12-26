@@ -1,0 +1,52 @@
+# MoonTV - Cursor Rules
+
+## 📋 项目概述
+
+MoonTV 是一个基于 Next.js 的影视聚合平台，支持多源搜索、视频播放、用户收藏等功能。
+
+## 🎯 快速开始
+
+### 使用斜杠命令激活角色
+
+- `/dev` 或 `/developer` - 开发角色（代码编写、功能实现）
+- `/review` 或 `/reviewer` - 审核角色（代码审查、质量检查）
+- `/test` 或 `/tester` - 测试角色（测试用例、质量保证）
+- `/pm` 或 `/product-manager` - 产品经理角色（需求分析、PRD 编写）
+- `/summarize` 或 `/summarizer` - 项目总结角色（文档整理、导航文件更新）
+- `/git` 或 `/commit` - Git 提交角色（代码提交、版本管理）
+
+### 规则文件导航
+
+详细规则和使用指南请参考：`.cursor/rules/README.md`
+
+### 核心规范
+
+- **架构规范**: `.cursor/rules/architecture.md`
+- **编码规范**: `.cursor/rules/coding-standards.md`
+- **API 设计**: `.cursor/rules/api-design.md`
+- **前端规范**: `.cursor/rules/frontend.md`
+- **测试规范**: `.cursor/rules/testing.md`
+- **通用规范**: `.cursor/rules/common.md`
+- **沟通规范**: `.cursor/rules/communication.md` ⚠️ **最重要**
+
+### 角色定义
+
+- **开发角色**: `.cursor/rules/developer.md`
+- **审核角色**: `.cursor/rules/reviewer.md`
+- **测试角色**: `.cursor/rules/tester.md`
+- **产品经理角色**: `.cursor/rules/product-manager.md`
+- **项目总结角色**: `.cursor/rules/project-summarizer.md`
+- **Git 提交角色**: `.cursor/rules/git-committer.md`
+
+### 命令速查
+
+详细命令说明请参考：`.cursor/rules/COMMANDS.md`
+
+## ⚠️ 重要原则
+
+**先确认后开发**：遇到不清楚、不确定的地方，必须先咨询、沟通，确认清楚后再开发。
+
+## 📚 更多信息
+
+- **规则使用指南**: `.cursor/rules/README.md`
+- **命令速查表**: `.cursor/rules/COMMANDS.md`
