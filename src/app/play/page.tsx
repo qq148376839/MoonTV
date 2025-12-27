@@ -707,7 +707,11 @@ function PlayPageClient() {
         if (response.ok) {
           const data = await response.json();
           if (data.SourceConfig) {
-            const configs = data.SourceConfig.map((s: any) => ({
+            const configs: Array<{
+              key: string;
+              official_parser?: boolean;
+              detail?: string;
+            }> = data.SourceConfig.map((s: any) => ({
               key: s.key,
               official_parser: s.official_parser,
               detail: s.detail,

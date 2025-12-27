@@ -2,10 +2,13 @@
 
 'use client';
 
+// 使用边缘运行时，避免静态生成问题
+export const runtime = 'edge';
+
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import PageLayout from '@/components/PageLayout';
 
@@ -175,6 +178,14 @@ function PlayerPageClient() {
       video.removeAttribute('disableRemotePlayback');
     }
   };
+
+  // 监听容器挂载状态（使用 useLayoutEffect 确保在 DOM 更新后立即检查）
+  useLayoutEffect(() => {
+    if (artRef.current && !containerReady) {
+      console.log('播放器容器已挂载，节点:', artRef.current);
+      setContainerReady(true);
+    }
+  });
 
   // 初始化播放器
   useEffect(() => {
@@ -398,7 +409,7 @@ function PlayerPageClient() {
       });
 
       // 监听视频加载开始
-      artPlayerRef.current.on('video:loadstart', () => {
+      artPlayerRef.current.on('video:loadstart' as any, () => {
         console.log('视频开始加载');
         setLoading(true);
       });
@@ -504,18 +515,7 @@ function PlayerPageClient() {
         <div className='w-full max-w-7xl mx-auto px-4 py-6 relative'>
           {/* 播放器容器 - 始终渲染但可能隐藏 */}
           <div
-            ref={(node) => {
-              if (node) {
-                artRef.current = node;
-                // 直接设置状态，React会处理批处理
-                if (!containerReady) {
-                  setContainerReady(true);
-                  console.log('播放器容器已挂载，节点:', node);
-                }
-              } else {
-                artRef.current = null;
-              }
-            }}
+            ref={artRef}
             className='w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl'
             style={{
               maxHeight: 'calc(100vh - 8rem)',

@@ -144,7 +144,7 @@ class SearchCacheManager {
       console.log(
         `[SearchCache] 有效结果数（episodes > 0）: ${validSources.length}`
       );
-      console.log(`[SearchCache] 有效源:`, [...new Set(validSources)]);
+      console.log(`[SearchCache] 有效源:`, Array.from(new Set(validSources)));
     }
 
     const cacheEntry: CachedSearchResult = {
