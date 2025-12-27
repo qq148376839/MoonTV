@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { API_CONFIG, ApiSite, getConfig } from '@/lib/config';
+import { decryptEpisodeUrls, DEFAULT_PARSER_URL } from '@/lib/decrypt';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 
@@ -28,7 +29,8 @@ interface ApiSearchItem {
 
 export async function searchFromApi(
   apiSite: ApiSite,
-  query: string
+  query: string,
+  requestUrl?: string
 ): Promise<SearchResult[]> {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const _startTime = Date.now();
@@ -292,7 +294,7 @@ export async function searchFromApi(
         `[searchFromApi] 源: ${apiSite.key}, 总结果数: ${
           results.length
         }, 有episodes的结果数: ${
-          results.filter((r) => r.episodes.length > 0).length
+          results.filter((r: SearchResult) => r.episodes.length > 0).length
         }`
       );
     }
@@ -417,6 +419,108 @@ export async function searchFromApi(
       });
     }
 
+    // 【API层自动解密】如果是官方解析资源，自动解密所有剧集URL
+    if (isOfficialParser && results.length > 0) {
+      const parserUrl = DEFAULT_PARSER_URL;
+      console.log(
+        `[searchFromApi] 开始自动解密官方解析资源 - 源: ${apiSite.key}, 结果数: ${results.length}`
+      );
+
+      // 收集所有需要解密的URL
+      const allEpisodesToDecrypt: Array<{
+        resultIndex: number;
+        episodeIndex: number;
+        url: string;
+      }> = [];
+
+      results.forEach((result: SearchResult, resultIndex: number) => {
+        result.episodes.forEach((url: string, episodeIndex: number) => {
+          allEpisodesToDecrypt.push({
+            resultIndex,
+            episodeIndex,
+            url,
+          });
+        });
+      });
+
+      if (allEpisodesToDecrypt.length > 0) {
+        console.log(
+          `[searchFromApi] 需要解密的URL总数: ${allEpisodesToDecrypt.length}`
+        );
+
+        try {
+          // 批量解密所有URL
+          // Edge Runtime 环境需要通过 HTTP API 调用解密
+          const urlsToDecrypt = allEpisodesToDecrypt.map((item) => item.url);
+          const decryptedUrls = await decryptEpisodeUrls(
+            parserUrl,
+            urlsToDecrypt,
+            true, // 强制使用 HTTP API（Edge Runtime）
+            requestUrl // 传递请求 URL 用于获取 base URL
+          );
+
+          // 更新结果中的URL，过滤掉解密失败的（空字符串）
+          allEpisodesToDecrypt.forEach((item, index) => {
+            const decryptedUrl = decryptedUrls[index];
+            if (
+              decryptedUrl &&
+              decryptedUrl !== '' &&
+              decryptedUrl !== item.url
+            ) {
+              // 解密成功，更新URL
+              results[item.resultIndex].episodes[item.episodeIndex] =
+                decryptedUrl;
+              console.log(
+                `[searchFromApi] ✓ URL解密成功: ${item.url.substring(
+                  0,
+                  50
+                )}... → ${decryptedUrl.substring(0, 50)}...`
+              );
+            } else {
+              // 解密失败（空字符串或返回原始URL），移除该 URL（因为无法播放）
+              console.warn(
+                `[searchFromApi] ⚠️ URL解密失败，移除该URL: ${item.url.substring(
+                  0,
+                  50
+                )}...`
+              );
+              // 设置为空字符串，后续会过滤掉
+              results[item.resultIndex].episodes[item.episodeIndex] = '';
+            }
+          });
+
+          // 过滤掉解密失败的 URL（空字符串）
+          results.forEach((result: SearchResult) => {
+            result.episodes = result.episodes.filter((url) => url !== '');
+          });
+
+          const successCount = decryptedUrls.filter(
+            (url, index) => url && url !== urlsToDecrypt[index] && url !== ''
+          ).length;
+          const failCount = decryptedUrls.filter(
+            (url) => !url || url === ''
+          ).length;
+
+          console.log(
+            `[searchFromApi] ✓ 自动解密完成 - 成功: ${successCount}, 失败: ${failCount}`
+          );
+        } catch (error) {
+          // 解密失败，清空所有 episodes（因为无法播放）
+          console.error(
+            `[searchFromApi] ✗ 自动解密失败，清空所有episodes:`,
+            error instanceof Error ? error.message : error
+          );
+          // 清空所有官方解析资源的 episodes（因为无法播放）
+          results.forEach((result: SearchResult) => {
+            if (result.source === apiSite.key) {
+              result.episodes = [];
+            }
+          });
+          // 不抛出错误，确保API正常返回
+        }
+      }
+    }
+
     return results;
   } catch (error) {
     return [];
@@ -428,11 +532,16 @@ const M3U8_PATTERN = /(https?:\/\/[^"'\s]+?\.m3u8)/g;
 
 export async function getDetailFromApi(
   apiSite: ApiSite,
-  id: string
+  id: string,
+  requestUrl?: string
 ): Promise<SearchResult> {
   if (apiSite.detail) {
     return handleSpecialSourceDetail(id, apiSite);
   }
+
+  // 获取源配置，判断是否为官方解析资源
+  const siteConfig = await getApiSiteConfig(apiSite.key);
+  const isOfficialParser = siteConfig?.official_parser === true;
 
   const detailUrl = `${apiSite.api}${API_CONFIG.detail.path}${id}`;
 
@@ -466,19 +575,55 @@ export async function getDetailFromApi(
 
   // 处理播放源拆分
   if (videoDetail.vod_play_url) {
-    const playSources = videoDetail.vod_play_url.split('$$$');
-    if (playSources.length > 0) {
-      const mainSource = playSources[0];
-      const episodeList = mainSource.split('#');
-      episodes = episodeList
-        .map((ep: string) => {
+    if (isOfficialParser) {
+      // 官方解析资源：提取所有第三方视频网站URL
+      const playSources = videoDetail.vod_play_url.split('$$$');
+      const allEpisodes: string[] = [];
+
+      playSources.forEach((source: string) => {
+        if (!source || !source.trim()) {
+          return;
+        }
+
+        // 每个播放源可能有多个剧集（用#分隔）
+        const episodeList = source.split('#');
+
+        episodeList.forEach((ep: string) => {
+          if (!ep || !ep.trim()) {
+            return;
+          }
+
+          // 每个剧集格式：剧集名$URL
           const parts = ep.split('$');
-          return parts.length > 1 ? parts[1] : '';
-        })
-        .filter(
-          (url: string) =>
-            url && (url.startsWith('http://') || url.startsWith('https://'))
-        );
+          if (parts.length >= 2) {
+            const url = parts[1]?.trim();
+            if (
+              url &&
+              (url.startsWith('http://') || url.startsWith('https://'))
+            ) {
+              allEpisodes.push(url);
+            }
+          }
+        });
+      });
+
+      episodes = allEpisodes;
+    } else {
+      // 普通资源：使用原有逻辑
+      const playSources = videoDetail.vod_play_url.split('$$$');
+      if (playSources.length > 0) {
+        const mainSource = playSources[0];
+        const episodeList = mainSource.split('#');
+        episodes = episodeList
+          .map((ep: string) => {
+            const parts = ep.split('$');
+            return parts.length > 1 ? parts[1] : '';
+          })
+          .filter(
+            (url: string) =>
+              url && (url.startsWith('http://') || url.startsWith('https://'))
+          );
+      }
     }
   }
 
@@ -486,6 +631,49 @@ export async function getDetailFromApi(
   if (episodes.length === 0 && videoDetail.vod_content) {
     const matches = videoDetail.vod_content.match(M3U8_PATTERN) || [];
     episodes = matches.map((link: string) => link.replace(/^\$/, ''));
+  }
+
+  // 【API层自动解密】如果是官方解析资源，自动解密所有剧集URL
+  if (isOfficialParser && episodes.length > 0) {
+    const parserUrl = DEFAULT_PARSER_URL;
+    console.log(
+      `[getDetailFromApi] 开始自动解密官方解析资源 - 源: ${apiSite.key}, 剧集数: ${episodes.length}`
+    );
+
+    try {
+      // 批量解密所有URL
+      // Edge Runtime 环境需要通过 HTTP API 调用解密
+      const decryptedUrls = await decryptEpisodeUrls(
+        parserUrl,
+        episodes,
+        true, // 强制使用 HTTP API（Edge Runtime）
+        requestUrl // 传递请求 URL 用于获取 base URL
+      );
+
+      // 统计解密结果
+      const successCount = decryptedUrls.filter(
+        (url, index) => url && url !== episodes[index] && url !== ''
+      ).length;
+      const failCount = decryptedUrls.filter(
+        (url) => !url || url === ''
+      ).length;
+
+      // 更新episodes，过滤掉解密失败的（空字符串）
+      episodes = decryptedUrls.filter((url) => url !== '');
+
+      console.log(
+        `[getDetailFromApi] ✓ 自动解密完成 - 成功: ${successCount}, 失败: ${failCount}`
+      );
+    } catch (error) {
+      // 解密失败，清空所有 episodes（因为无法播放）
+      console.error(
+        `[getDetailFromApi] ✗ 自动解密失败，清空所有episodes:`,
+        error instanceof Error ? error.message : error
+      );
+      // 清空所有 episodes（因为无法播放）
+      episodes = [];
+      // 不抛出错误，确保API正常返回
+    }
   }
 
   return {

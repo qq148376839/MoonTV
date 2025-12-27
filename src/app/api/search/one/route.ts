@@ -31,8 +31,8 @@ export async function GET(request: Request) {
 
   try {
     // 根据 resourceId 查找对应的 API 站点
-    const targetSite = apiSites.find((site) => site.key === resourceId);
-    if (!targetSite) {
+    const targetSiteConfig = apiSites.find((site) => site.key === resourceId);
+    if (!targetSiteConfig) {
       return NextResponse.json(
         {
           error: `未找到指定的视频源: ${resourceId}`,
@@ -42,7 +42,16 @@ export async function GET(request: Request) {
       );
     }
 
-    const results = await searchFromApi(targetSite, query);
+    // 转换为 ApiSite 格式，包含 official_parser 字段
+    const targetSite = {
+      key: targetSiteConfig.key,
+      name: targetSiteConfig.name,
+      api: targetSiteConfig.api,
+      detail: targetSiteConfig.detail,
+      official_parser: targetSiteConfig.official_parser ?? false,
+    };
+
+    const results = await searchFromApi(targetSite, query, request.url);
     let result = results.filter((r) => r.title === query);
     if (!config.SiteConfig.DisableYellowFilter) {
       result = result.filter((result) => {

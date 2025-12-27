@@ -322,9 +322,11 @@ networks:
   - `detail`：（可选）部分无法通过 API 获取剧集详情的站点，需要提供网页详情根 URL，用于爬取。
   - `official_parser`：（可选）是否为官方解析资源，默认为 `false`。当为 `true` 时，播放地址需要经过官方解析器解密后才能播放。
     - 解析器 URL 使用固定的默认值（`https://jx.789jiexi.com`），与 `detail` 字段无关
-    - 搜索阶段：从 `vod_play_url` 中提取所有播放源的第三方视频网站 URL（腾讯、优酷、爱奇艺等）
-    - 播放阶段：自动调用解密 API 获取真实的 m3u8 或 MP4 播放地址
+    - **搜索阶段**：从 `vod_play_url` 中提取所有播放源的第三方视频网站 URL（腾讯、优酷、爱奇艺等）
+    - **API 层自动解密**：在 API 返回前自动解密所有 URL，返回真实的 m3u8 或 MP4 播放地址
+    - **播放阶段**：网页端播放时也会自动调用解密 API（双重保障）
     - 支持 MP4 格式的试看片段播放
+    - **OrionTV 兼容**：API 返回的 URL 可以直接播放，无需客户端解密
 - `custom_category`：自定义分类配置，用于在导航中添加个性化的影视分类。以 type + query 作为唯一标识。支持以下字段：
   - `name`：分类显示名称（可选，如不提供则使用 query 作为显示名）
   - `type`：分类类型，支持 `movie`（电影）或 `tv`（电视剧）
@@ -353,11 +355,63 @@ MoonTV 支持标准的苹果 CMS V10 API 格式。
 
 ## AndroidTV 使用
 
-目前该项目可以配合 [OrionTV](https://github.com/zimplexing/OrionTV) 在 Android TV 上使用，可以直接作为 OrionTV 后端
+目前该项目可以配合 [OrionTV](https://github.com/zimplexing/OrionTV) 在 Android TV 上使用，可以直接作为 OrionTV 后端。
+
+### API 接口
+
+MoonTV 提供以下 OrionTV 兼容的 API 接口：
+
+- `/api/search/resources` - 获取资源站点列表
+- `/api/search/one?q={query}&resourceId={sourceId}` - 单源搜索
+- `/api/detail?id={id}&source={source}` - 获取视频详情
+- `/api/image-proxy?url={imageUrl}` - 图片代理
+
+### 官方解析资源支持
+
+对于配置了 `official_parser: true` 的资源源，API 会自动解密第三方视频网站 URL，返回真实的 m3u8 或 MP4 播放地址，OrionTV 可以直接播放。
+
+**配置示例**：
+
+```json
+{
+  "api_site": {
+    "789caiji": {
+      "api": "https://www.caiji.cyou/api.php/provide/vod",
+      "name": "789采集",
+      "official_parser": true
+    }
+  }
+}
+```
+
+**注意事项**：
+
+- 解密失败时，API 会返回空数组（不返回无法播放的原始 URL）
+- 解密过程需要 3-10 秒，请耐心等待
+- 部分资源可能只能获取试看片段
 
 暂时收藏夹与播放记录和网页端隔离，后续会支持同步用户数据
 
 ## 📢 重要更新
+
+### 2025-01-26: 官方解析 API 层自动解密功能 ⭐ 新功能
+
+新增官方解析 API 层自动解密功能，支持在 API 返回前自动解密官方解析资源，返回真实的 m3u8 或 MP4 播放地址。OrionTV 等第三方客户端可以直接使用解密后的 URL，无需客户端解密。
+
+**核心特性**：
+
+- ✅ API 层自动解密，OrionTV 可直接使用
+- ✅ Edge Runtime 兼容，通过 HTTP API 调用解密
+- ✅ 解密失败时清空 episodes，不返回无法播放的 URL
+- ✅ 只有 `official_parser: true` 的源才解密
+
+**相关文档**：
+
+- 📄 [功能 PRD](docs/features/250126-官方解析API层自动解密功能-PRD.md)
+- 📄 [实现总结](docs/features/250126-官方解析API层自动解密功能-实现总结.md)
+- 📄 [测试验证](docs/features/250126-官方解析API层自动解密功能-测试验证.md)
+
+---
 
 ### 2025-01-24: 直接播放路由功能 ⭐ 新功能
 
@@ -382,6 +436,8 @@ MoonTV 支持标准的苹果 CMS V10 API 格式。
 - [x] 持久化存储
 - [x] 多账户
 - [x] 直接播放路由
+- [x] 官方解析功能
+- [x] 官方解析 API 层自动解密
 
 ## 📚 项目文档
 
@@ -389,10 +445,18 @@ MoonTV 支持标准的苹果 CMS V10 API 格式。
 
 - 📄 [直接播放路由功能 - PRD](docs/features/direct-player-prd.md)
 - 📄 [直接播放路由功能 - 实施总结](docs/features/250124-直接播放路由功能.md)
+- 📄 [官方解析功能 - PRD](docs/features/250125-官方解析功能-PRD.md)
+- 📄 [官方解析功能 - 实现总结](docs/features/250125-官方解析功能-实现总结.md)
+- 📄 [官方解析 API 层自动解密功能 - PRD](docs/features/250126-官方解析API层自动解密功能-PRD.md)
+- 📄 [官方解析 API 层自动解密功能 - 实现总结](docs/features/250126-官方解析API层自动解密功能-实现总结.md)
 
 ### 使用指南
 
 - 📄 [直接播放路由 - 使用指南](docs/guides/250124-直接播放路由-使用指南.md)
+
+### 测试文档
+
+- 📄 [官方解析 API 层自动解密功能 - 测试验证](docs/features/250126-官方解析API层自动解密功能-测试验证.md)
 
 ### 修复文档
 

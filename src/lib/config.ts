@@ -574,5 +574,6 @@ export async function getAvailableApiSites(): Promise<ApiSite[]> {
     name: s.name,
     api: s.api,
     detail: s.detail,
+    official_parser: s.official_parser ?? false,
   }));
 }
