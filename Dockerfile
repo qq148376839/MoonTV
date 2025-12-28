@@ -1,20 +1,30 @@
 # ---- 第 1 阶段：安装依赖 ----
 FROM node:20-alpine AS deps
 
-# 启用 corepack 并激活 pnpm（Node20 默认提供 corepack）
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# 设置国内镜像源并激活 pnpm
+RUN corepack enable && \
+  corepack prepare pnpm@10.12.4 --activate && \
+  npm config set registry https://registry.npmmirror.com/ && \
+  pnpm config set registry https://registry.npmmirror.com/
 
 WORKDIR /app
 
 # 仅复制依赖清单，提高构建缓存利用率
 COPY package.json pnpm-lock.yaml ./
 
-# 安装所有依赖（含 devDependencies，后续会裁剪）
-RUN pnpm install --frozen-lockfile
+# 安装所有依赖（含 devDependencies，后续会裁剪），增加超时和重试机制
+RUN pnpm install --frozen-lockfile --timeout=300000 || \
+  (echo "第一次安装失败，重试..." && pnpm install --frozen-lockfile --timeout=300000)
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:20-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# 设置国内镜像源并激活 pnpm
+RUN corepack enable && \
+  corepack prepare pnpm@10.12.4 --activate && \
+  npm config set registry https://registry.npmmirror.com/ && \
+  pnpm config set registry https://registry.npmmirror.com/
+
 WORKDIR /app
 
 # 复制依赖
