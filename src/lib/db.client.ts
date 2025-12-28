@@ -560,10 +560,84 @@ export async function savePlayRecord(
         detail: allRecords,
       })
     );
+
+    // 【本地资源下载】在 localStorage 模式下也触发自动下载
+    // 检查是否启用了本地存储功能
+    const autoDownloadEnabled =
+      (window as any).RUNTIME_CONFIG?.LOCAL_STORAGE_ENABLED !== 'false';
+    const shouldAutoDownload =
+      autoDownloadEnabled && record.source && record.id;
+
+    if (shouldAutoDownload) {
+      // 异步触发下载，不阻塞保存
+      triggerAutoDownloadForLocalStorage(
+        record.source,
+        record.id,
+        record.index
+      ).catch((error) => {
+        console.warn('[LocalStorage] 自动下载触发失败:', error);
+      });
+    }
   } catch (err) {
     console.error('保存播放记录失败:', err);
     triggerGlobalError('保存播放记录失败');
     throw err;
+  }
+}
+
+/**
+ * 在 localStorage 模式下触发自动下载
+ */
+async function triggerAutoDownloadForLocalStorage(
+  source: string,
+  id: string,
+  currentIndex: number
+): Promise<void> {
+  try {
+    console.log(
+      `[LocalStorage] 触发自动下载: ${source}_${id}, 当前集数: ${currentIndex}`
+    );
+
+    // 计算下载范围：当前集数 + 下2集
+    const downloadNextEpisodes = 2; // 默认下载下2集
+
+    // 调用下载 API
+    const response = await fetch('/api/download', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        source,
+        id,
+        auto_download: false,
+        episode_range: {
+          start: currentIndex,
+          end: currentIndex + downloadNextEpisodes,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`下载 API 请求失败: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json();
+
+    // 检查是否已完全下载
+    if (result.is_already_downloaded) {
+      console.log(
+        `[LocalStorage] ⚠️ 资源已完全下载，跳过自动下载: ${source}_${id}`
+      );
+      return;
+    }
+
+    console.log(
+      `[LocalStorage] ✓ 自动下载任务已创建: ${result.task_id} (${source}_${id})`
+    );
+  } catch (error) {
+    console.error(`[LocalStorage] ✗ 触发自动下载失败: ${source}_${id}`, error);
   }
 }
 

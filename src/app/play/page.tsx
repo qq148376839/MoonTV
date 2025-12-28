@@ -122,6 +122,10 @@ function PlayPageClient() {
   const detailRef = useRef<SearchResult | null>(detail);
   const currentEpisodeIndexRef = useRef(currentEpisodeIndex);
 
+  // 本地资源检测相关
+  const [isUsingLocalResource, setIsUsingLocalResource] = useState(false);
+  const localResourceCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
   // 同步最新值到 refs
   useEffect(() => {
     currentSourceRef.current = currentSource;
@@ -416,7 +420,7 @@ function PlayPageClient() {
     return Math.round(score * 100) / 100; // 保留两位小数
   };
 
-  // 更新视频地址（支持官方解析解密）
+  // 更新视频地址（支持官方解析解密和本地资源）
   const updateVideoUrl = useCallback(
     async (detailData: SearchResult | null, episodeIndex: number) => {
       if (
@@ -437,6 +441,93 @@ function PlayPageClient() {
         setDecryptError(null);
         return;
       }
+
+      // 【本地资源检测】优先检查本地资源
+      try {
+        console.log(
+          `[updateVideoUrl] 检查本地资源: ${detailData.source}_${
+            detailData.id
+          }, 集数: ${episodeIndex + 1}`
+        );
+        const localResourceResponse = await fetch(
+          `/api/local-resource?source=${encodeURIComponent(
+            detailData.source
+          )}&id=${encodeURIComponent(detailData.id)}`
+        );
+
+        if (localResourceResponse.ok) {
+          const localResourceData = await localResourceResponse.json();
+          console.log(
+            `[updateVideoUrl] 本地资源检测结果: exists=${
+              localResourceData.exists
+            }, hasMetadata=${!!localResourceData.metadata}`
+          );
+
+          if (localResourceData.exists && localResourceData.metadata) {
+            // 本地资源存在，使用本地资源播放
+            const episodeNumber = episodeIndex + 1;
+            // 获取剧集文件路径（可能是相对路径或绝对路径）
+            const episodePath =
+              localResourceData.metadata.episodes[episodeIndex] ||
+              localResourceData.metadata.episodes[0];
+
+            console.log(
+              `[updateVideoUrl] 剧集路径: episodeIndex=${episodeIndex}, episodePath=${episodePath}, totalEpisodes=${localResourceData.metadata.episodes.length}`
+            );
+
+            if (episodePath) {
+              // 处理路径：episodePath 可能是绝对路径或相对路径
+              let fullPath = episodePath;
+
+              // 如果 episodePath 已经是完整路径（包含 data/videos），直接使用
+              if (episodePath.includes('data/videos')) {
+                // 已经是完整路径，直接使用
+                fullPath = episodePath;
+              } else if (!episodePath.startsWith('/')) {
+                // 相对路径，需要拼接本地路径
+                fullPath = `${localResourceData.metadata.local_path}/${episodePath}`;
+              }
+
+              // 确保路径格式正确（移除开头的 ./ 如果有）
+              fullPath = fullPath.replace(/^\.\//, '');
+
+              const localPlayUrl = `/api/local-video?path=${encodeURIComponent(
+                fullPath
+              )}`;
+
+              console.log(
+                `[updateVideoUrl] ✓ 使用本地资源播放: ${detailData.source}_${detailData.id}, 集数: ${episodeNumber}, URL: ${localPlayUrl}`
+              );
+              setVideoUrl(localPlayUrl);
+              setIsUsingLocalResource(true);
+              setDecrypting(false);
+              setDecryptError(null);
+              return;
+            } else {
+              console.warn(
+                `[updateVideoUrl] ⚠️ 本地资源存在但未找到剧集路径: episodeIndex=${episodeIndex}`
+              );
+            }
+          } else {
+            console.log(
+              `[updateVideoUrl] 本地资源不存在或元数据缺失，将使用在线资源`
+            );
+            setIsUsingLocalResource(false);
+          }
+        } else {
+          console.warn(
+            `[updateVideoUrl] 本地资源检测请求失败: ${localResourceResponse.status}`
+          );
+          setIsUsingLocalResource(false);
+        }
+      } catch (error) {
+        // 本地资源检测失败，继续使用在线资源
+        console.warn('[updateVideoUrl] 本地资源检测失败，使用在线资源:', error);
+        setIsUsingLocalResource(false);
+      }
+
+      // 标记未使用本地资源（将使用在线资源）
+      setIsUsingLocalResource(false);
 
       // 检查是否是官方解析资源
       const apiSite = sourceConfig.find((s) => s.key === detailData.source);
@@ -1753,7 +1844,7 @@ function PlayPageClient() {
     }
 
     try {
-      await savePlayRecord(currentSourceRef.current, currentIdRef.current, {
+      const playRecord = {
         title: videoTitleRef.current,
         source_name: detailRef.current?.source_name || '',
         year: detailRef.current?.year,
@@ -1764,7 +1855,23 @@ function PlayPageClient() {
         total_time: Math.floor(duration),
         save_time: Date.now(),
         search_title: searchTitle,
+        // 添加 source 和 id 到播放记录中，用于自动下载
+        source: currentSourceRef.current,
+        id: currentIdRef.current,
+      };
+
+      console.log('[PlayPage] 保存播放记录:', {
+        source: currentSourceRef.current,
+        id: currentIdRef.current,
+        title: videoTitleRef.current,
+        index: playRecord.index,
       });
+
+      await savePlayRecord(
+        currentSourceRef.current,
+        currentIdRef.current,
+        playRecord
+      );
 
       lastSaveTimeRef.current = Date.now();
       console.log('播放进度已保存:', {
@@ -1801,6 +1908,95 @@ function PlayPageClient() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [currentEpisodeIndex, detail, artPlayerRef.current]);
+
+  // 监听本地资源下载完成，自动切换到本地资源
+  useEffect(() => {
+    // 如果已经在使用本地资源，不需要检查
+    if (isUsingLocalResource || !currentSource || !currentId || !detail) {
+      return;
+    }
+
+    // 清理之前的定时器
+    if (localResourceCheckIntervalRef.current) {
+      clearInterval(localResourceCheckIntervalRef.current);
+    }
+
+    // 每5秒检查一次本地资源是否可用
+    localResourceCheckIntervalRef.current = setInterval(async () => {
+      try {
+        const episodeIndex = currentEpisodeIndexRef.current;
+        const episodeNumber = episodeIndex + 1;
+
+        // 检查当前剧集是否已下载
+        const localResourceResponse = await fetch(
+          `/api/local-resource?source=${encodeURIComponent(
+            currentSource
+          )}&id=${encodeURIComponent(currentId)}`
+        );
+
+        if (localResourceResponse.ok) {
+          const localResourceData = await localResourceResponse.json();
+
+          if (localResourceData.exists && localResourceData.metadata) {
+            const episodePath =
+              localResourceData.metadata.episodes[episodeIndex] ||
+              localResourceData.metadata.episodes[0];
+
+            if (episodePath) {
+              // 处理路径：episodePath 可能是绝对路径或相对路径
+              let fullPath = episodePath;
+
+              // 如果 episodePath 已经是完整路径（包含 data/videos），直接使用
+              if (episodePath.includes('data/videos')) {
+                // 已经是完整路径，直接使用
+                fullPath = episodePath;
+              } else if (!episodePath.startsWith('/')) {
+                // 相对路径，需要拼接本地路径
+                fullPath = `${localResourceData.metadata.local_path}/${episodePath}`;
+              }
+
+              // 确保路径格式正确（移除开头的 ./ 如果有）
+              fullPath = fullPath.replace(/^\.\//, '');
+
+              const localPlayUrl = `/api/local-video?path=${encodeURIComponent(
+                fullPath
+              )}`;
+
+              console.log(
+                `[PlayPage] ✓ 检测到本地资源已下载完成，切换到本地资源: ${currentSource}_${currentId}, 集数: ${episodeNumber}`
+              );
+
+              // 更新视频URL
+              setVideoUrl(localPlayUrl);
+              setIsUsingLocalResource(true);
+
+              // 清理定时器
+              if (localResourceCheckIntervalRef.current) {
+                clearInterval(localResourceCheckIntervalRef.current);
+                localResourceCheckIntervalRef.current = null;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('[PlayPage] 检查本地资源失败:', error);
+      }
+    }, 5000); // 每5秒检查一次
+
+    // 清理函数
+    return () => {
+      if (localResourceCheckIntervalRef.current) {
+        clearInterval(localResourceCheckIntervalRef.current);
+        localResourceCheckIntervalRef.current = null;
+      }
+    };
+  }, [
+    isUsingLocalResource,
+    currentSource,
+    currentId,
+    detail,
+    currentEpisodeIndex,
+  ]);
 
   // 清理定时器
   useEffect(() => {

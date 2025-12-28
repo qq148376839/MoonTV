@@ -43,3 +43,22 @@ sitemap-*.xml
 # generated files
 src/lib/runtime.ts
 public/manifest.json
+
+# local video storage (本地资源下载目录)
+/data/videos/
+/data/videos/**
+./data/videos/
+./data/videos/**
+data/videos/
+data/videos/**
+*.videos/
+
+# local resource metadata (本地资源元数据)
+**/metadata.json
+**/index.json
+
+# local storage config (本地存储配置，如果存在)
+.local-storage.json
+local-storage-config.json.env.bak
+public/sw.js
+public/workbox-*.js

@@ -233,6 +233,7 @@ export async function GET(request: Request) {
     async start(controller) {
       const encoder = new TextEncoder();
       const seenResults = new Set<string>(); // 用于去重
+      let isClosed = false; // 跟踪流是否已关闭
 
       // 【优化】记录响应时间用于后续优化
       const responseTimes: number[] = [];
@@ -244,6 +245,10 @@ export async function GET(request: Request) {
         done = false,
         debugInfo?: Record<string, unknown>
       ) => {
+        // 如果流已关闭，直接返回
+        if (isClosed) {
+          return;
+        }
         // 【调试日志】记录推送前的统计信息（服务端终端）
         console.log(`[SSE] 推送结果 - 数量: ${results.length}, done: ${done}`);
         const bySource = results.reduce((acc, r) => {
@@ -302,9 +307,27 @@ export async function GET(request: Request) {
               : undefined,
         };
 
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(message)}\n\n`)
-        );
+        // 使用 try-catch 捕获 Controller 已关闭的错误
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(message)}\n\n`)
+          );
+        } catch (error) {
+          // Controller 已关闭（客户端断开连接等）
+          if (
+            error instanceof Error &&
+            (error.message.includes('closed') ||
+              error.message.includes('Invalid state'))
+          ) {
+            isClosed = true;
+            if (process.env.NODE_ENV === 'development') {
+              console.warn('[SSE] Controller 已关闭，停止推送数据');
+            }
+          } else {
+            // 其他错误，重新抛出
+            throw error;
+          }
+        }
       };
 
       // 并发搜索所有源 - 每个源完成后立即推送
@@ -423,8 +446,16 @@ export async function GET(request: Request) {
           }
 
           // 所有源完成后发送完成标志
-          pushResult([], true);
-          controller.close();
+          if (!isClosed) {
+            pushResult([], true);
+            try {
+              controller.close();
+              isClosed = true;
+            } catch (error) {
+              // Controller 可能已经关闭
+              isClosed = true;
+            }
+          }
         })
         .catch((error) => {
           // 【修复】记录最终错误
@@ -433,8 +464,16 @@ export async function GET(request: Request) {
             console.error('[SSE] 搜索流发生错误:', error);
           }
           // 发生错误时也发送完成标志
-          pushResult([], true);
-          controller.close();
+          if (!isClosed) {
+            pushResult([], true);
+            try {
+              controller.close();
+              isClosed = true;
+            } catch (closeError) {
+              // Controller 可能已经关闭
+              isClosed = true;
+            }
+          }
         });
     },
   });
