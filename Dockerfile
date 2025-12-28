@@ -5,16 +5,17 @@ FROM node:20-alpine AS deps
 RUN corepack enable && \
   corepack prepare pnpm@10.12.4 --activate && \
   npm config set registry https://registry.npmmirror.com/ && \
-  pnpm config set registry https://registry.npmmirror.com/
+  pnpm config set registry https://registry.npmmirror.com/ && \
+  pnpm config set network-timeout 300000
 
 WORKDIR /app
 
 # 仅复制依赖清单，提高构建缓存利用率
 COPY package.json pnpm-lock.yaml ./
 
-# 安装所有依赖（含 devDependencies，后续会裁剪），增加超时和重试机制
-RUN pnpm install --frozen-lockfile --timeout=300000 || \
-  (echo "第一次安装失败，重试..." && pnpm install --frozen-lockfile --timeout=300000)
+# 安装所有依赖（含 devDependencies，后续会裁剪），增加重试机制
+RUN pnpm install --frozen-lockfile || \
+  (echo "第一次安装失败，重试..." && pnpm install --frozen-lockfile)
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:20-alpine AS builder
