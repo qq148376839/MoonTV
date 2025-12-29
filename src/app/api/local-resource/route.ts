@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getResourceDetector } from '@/lib/resource-detector';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
+export const dynamic = 'force-dynamic'; // 强制动态渲染，因为使用了 request.url
 
 /**
  * GET /api/local-resource - 检测本地资源是否存在

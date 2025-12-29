@@ -7,6 +7,7 @@ import path from 'path';
 import { getStorageManager } from '@/lib/local-storage';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
+export const dynamic = 'force-dynamic'; // 强制动态渲染，因为使用了 request.url
 
 /**
  * GET /api/[episode]/[segment] - 处理 HLS.js 解析的相对路径 TS 片段请求

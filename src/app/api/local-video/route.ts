@@ -7,6 +7,7 @@ import path from 'path';
 import { getStorageManager } from '@/lib/local-storage';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
+export const dynamic = 'force-dynamic'; // 强制动态渲染，因为使用了 request.url
 
 /**
  * GET /api/local-video - 提供本地视频文件的 HTTP 访问
@@ -40,7 +41,7 @@ export async function GET(request: NextRequest) {
     const resolvedStoragePath = path.resolve(process.cwd(), storagePath);
 
     // 处理路径：可能是相对路径或绝对路径
-    let resolvedPath: string;
+    let resolvedPath: string | undefined;
     if (path.isAbsolute(decodedPath)) {
       // 绝对路径，直接使用
       resolvedPath = decodedPath;
@@ -160,6 +161,11 @@ export async function GET(request: NextRequest) {
         // 普通相对路径，相对于项目根目录解析
         resolvedPath = path.resolve(projectRoot, decodedPath);
       }
+    }
+
+    // 类型检查：确保 resolvedPath 已经被赋值
+    if (!resolvedPath) {
+      return NextResponse.json({ error: '路径解析失败' }, { status: 500 });
     }
 
     // 确保路径在存储目录内

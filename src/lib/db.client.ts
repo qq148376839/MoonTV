@@ -40,6 +40,8 @@ export interface PlayRecord {
   total_time: number; // 总进度（秒）
   save_time: number; // 记录保存时间（时间戳）
   search_title?: string; // 搜索时使用的标题
+  source?: string; // 站点key（可选，用于自动下载功能）
+  id?: string; // 资源ID（可选，用于自动下载功能）
 }
 
 // ---- 收藏类型 ----
@@ -568,7 +570,8 @@ export async function savePlayRecord(
     const shouldAutoDownload =
       autoDownloadEnabled && record.source && record.id;
 
-    if (shouldAutoDownload) {
+    if (shouldAutoDownload && record.source && record.id) {
+      // 类型守卫：确保 source 和 id 都存在
       // 异步触发下载，不阻塞保存
       triggerAutoDownloadForLocalStorage(
         record.source,
