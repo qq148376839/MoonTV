@@ -20,6 +20,10 @@ RUN pnpm install --frozen-lockfile || \
 # ---- 第 2 阶段：构建项目 ----
 FROM node:20-alpine AS builder
 
+# 构建参数：是否跳过类型检查（默认跳过以避免内存溢出）
+ARG SKIP_TYPE_CHECK=true
+ARG BUILD_MEMORY_LIMIT=4096
+
 # 设置国内镜像源并激活 pnpm
 RUN corepack enable && \
   corepack prepare pnpm@10.12.4 --activate && \
@@ -43,7 +47,16 @@ ENV DOCKER_ENV=true
 RUN sed -i "/const inter = Inter({ subsets: \['latin'] });/a export const dynamic = 'force-dynamic';" src/app/layout.tsx
 
 # 生成生产构建
-RUN pnpm run build
+# 默认使用 build:skip-typecheck 避免内存溢出问题
+# 类型检查应该在 CI/CD 中单独运行，而不是在 Docker 构建时
+# 如果需要完整构建（包含类型检查），构建时传入: --build-arg SKIP_TYPE_CHECK=false --build-arg BUILD_MEMORY_LIMIT=6144
+RUN if [ "$SKIP_TYPE_CHECK" = "true" ]; then \
+  echo "使用跳过类型检查的构建（推荐，避免内存溢出）"; \
+  NODE_OPTIONS="--max-old-space-size=${BUILD_MEMORY_LIMIT}" pnpm run build:skip-typecheck; \
+  else \
+  echo "使用完整构建（包含类型检查，需要更多内存）"; \
+  NODE_OPTIONS="--max-old-space-size=${BUILD_MEMORY_LIMIT}" pnpm run build; \
+  fi
 
 # ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:20-alpine AS runner
