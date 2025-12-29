@@ -51,6 +51,18 @@ MoonTV/
 
 ## 🔄 修改文件
 
+### 2025-01-28
+
+#### 核心修复
+
+- `src/app/play/page.tsx` - 修复无限循环问题，添加初始化标志
+- `src/lib/config.ts` - 修复 Edge Runtime 兼容性，添加运行时检查
+- `src/lib/decrypt.ts` - 修复 Edge Runtime 兼容性，动态加载 crypto 模块
+
+#### 依赖更新
+
+- `package.json` - TypeScript 从 4.9.5 升级到 5.9.3
+
 ### 2025-01-24
 
 #### 组件更新
@@ -93,5 +105,5 @@ src/components/PageLayout.tsx
 
 ---
 
-**版本**：v1.0  
-**最后更新**：2025-01-24
+**版本**：v1.2  
+**最后更新**：2025-01-28

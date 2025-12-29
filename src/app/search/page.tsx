@@ -525,13 +525,17 @@ function SearchPageClient() {
               >
                 {viewMode === 'agg'
                   ? aggregatedResults.map(([mapKey, group]) => {
+                      // 确保 group 不为空
+                      if (!group || group.length === 0) {
+                        return null;
+                      }
                       return (
                         <div key={`agg-${mapKey}`} className='w-full'>
                           <VideoCard
                             from='search'
                             items={group}
                             query={
-                              searchQuery.trim() !== group[0].title
+                              searchQuery.trim() !== group[0]?.title
                                 ? searchQuery.trim()
                                 : ''
                             }

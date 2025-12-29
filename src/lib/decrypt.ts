@@ -4,7 +4,30 @@
  */
 /* eslint-disable no-console */
 
-import crypto from 'crypto';
+// 动态导入 crypto 模块，避免 Edge Runtime 构建错误
+let crypto: typeof import('crypto') | null = null;
+
+// 仅在 Node.js runtime 中加载 crypto 模块
+function getCrypto(): typeof import('crypto') {
+  if (crypto) {
+    return crypto;
+  }
+
+  // Edge Runtime 中不加载 crypto
+  if (isEdgeRuntime()) {
+    throw new Error('crypto module is not available in Edge Runtime');
+  }
+
+  // 动态导入 crypto（仅在 Node.js runtime 中）
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    crypto = require('crypto');
+    // 此时 crypto 已经被赋值，不会是 null
+    return crypto as typeof import('crypto');
+  } catch (error) {
+    throw new Error('Failed to load crypto module');
+  }
+}
 
 import { getStorage } from './db';
 
@@ -68,20 +91,28 @@ export function decryptUrl(encryptedUrl: string, uid: string): string | null {
   // 方式2: MD5哈希（16字节）
   keyMethods.push({
     name: 'MD5哈希',
-    key: crypto.createHash('md5').update(keyBytes).digest(),
+    key: getCrypto().createHash('md5').update(keyBytes).digest(),
   });
 
   // 方式3: SHA256哈希（前16字节）
   keyMethods.push({
     name: 'SHA256前16字节',
-    key: crypto.createHash('sha256').update(keyBytes).digest().slice(0, 16),
+    key: getCrypto()
+      .createHash('sha256')
+      .update(keyBytes)
+      .digest()
+      .slice(0, 16),
   });
 
   // 方式4: SHA256哈希（前24字节）
   if (keyBytes.length !== 24) {
     keyMethods.push({
       name: 'SHA256前24字节',
-      key: crypto.createHash('sha256').update(keyBytes).digest().slice(0, 24),
+      key: getCrypto()
+        .createHash('sha256')
+        .update(keyBytes)
+        .digest()
+        .slice(0, 24),
     });
   }
 
@@ -89,7 +120,11 @@ export function decryptUrl(encryptedUrl: string, uid: string): string | null {
   if (keyBytes.length !== 32) {
     keyMethods.push({
       name: 'SHA256前32字节',
-      key: crypto.createHash('sha256').update(keyBytes).digest().slice(0, 32),
+      key: getCrypto()
+        .createHash('sha256')
+        .update(keyBytes)
+        .digest()
+        .slice(0, 32),
     });
   }
 
@@ -160,7 +195,7 @@ export function decryptUrl(encryptedUrl: string, uid: string): string | null {
 
       try {
         // AES-CBC解密
-        const decipher = crypto.createDecipheriv(
+        const decipher = getCrypto().createDecipheriv(
           'aes-128-cbc',
           key.slice(0, 16),
           iv
@@ -649,7 +684,13 @@ async function decryptVideoInternal(
 function isEdgeRuntime(): boolean {
   try {
     // Edge Runtime 中没有 process.versions.node
-    return typeof process === 'undefined' || !process.versions?.node;
+    if (typeof process === 'undefined') {
+      return true;
+    }
+    // 安全地检查 process.versions
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const versions = (process as any).versions;
+    return !versions || !versions.node;
   } catch {
     // 如果访问 process 抛出错误，说明是 Edge Runtime
     return true;

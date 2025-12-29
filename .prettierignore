@@ -39,3 +39,10 @@ yarn-error.log*
 CHANGELOG.md
 
 pnpm-lock.yaml
+
+# local video storage (本地资源下载目录，包含二进制 TS 文件)
+/data/videos/
+data/videos/
+**/*.ts
+!src/**/*.ts
+!scripts/**/*.ts

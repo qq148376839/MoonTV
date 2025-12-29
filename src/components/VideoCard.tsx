@@ -54,16 +54,21 @@ export default function VideoCard({
   items,
   type = '',
 }: VideoCardProps) {
-  // 【强制日志】确认组件被渲染
-  // eslint-disable-next-line no-console
-  console.error('🔴 [VideoCard] 组件渲染，props:', {
-    id,
-    source,
-    title,
-    from,
-    itemsLength: items?.length,
-    isAggregate: from === 'search' && !!items?.length,
-  });
+  // 【强制日志】确认组件被渲染（仅在开发环境或有问题时输出）
+  if (
+    process.env.NODE_ENV === 'development' &&
+    (!from || (!id && !source && !title && !items?.length))
+  ) {
+    // eslint-disable-next-line no-console
+    console.warn('🔴 [VideoCard] 组件渲染，props 可能不完整:', {
+      id,
+      source,
+      title,
+      from,
+      itemsLength: items?.length,
+      isAggregate: from === 'search' && !!items?.length,
+    });
+  }
 
   const [favorited, setFavorited] = useState(false);
   const [isLoading, setIsLoading] = useState(false);

@@ -3,6 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { PathUtils } from './path-utils';
 import { SearchResult } from './types';
 
 // 本地资源元数据接口
@@ -215,23 +216,11 @@ export class StorageManager {
 
       const indexEntry = index[key];
       // local_path 已经是完整路径（包含 source_id 目录）
-      // 如果是相对路径，转换为绝对路径（相对于项目根目录）
-      let resourcePath = indexEntry.local_path;
-      if (!path.isAbsolute(resourcePath)) {
-        // 如果路径以 data/videos 开头，说明是相对于项目根目录
-        if (
-          resourcePath.startsWith('data/videos') ||
-          resourcePath.startsWith('./data/videos')
-        ) {
-          resourcePath = path.resolve(
-            process.cwd(),
-            resourcePath.replace(/^\.\//, '')
-          );
-        } else {
-          // 否则相对于 storagePath
-          resourcePath = path.resolve(this.storagePath, resourcePath);
-        }
-      }
+      // 使用 PathUtils 统一处理路径解析
+      const resourcePath = PathUtils.resolveResourcePath(
+        indexEntry.local_path,
+        this.storagePath
+      );
 
       if (!fs.existsSync(resourcePath)) {
         console.log(
@@ -400,14 +389,17 @@ export class StorageManager {
     const key = `${source}_${id}`;
     const now = Date.now();
 
+    // 统一格式化存储路径（使用正斜杠，相对于项目根目录）
+    const formattedPath = PathUtils.formatForStorage(localPath);
+
     if (index[key]) {
       index[key].updated_at = now;
-      index[key].local_path = localPath;
+      index[key].local_path = formattedPath;
     } else {
       index[key] = {
         title,
         year,
-        local_path: localPath,
+        local_path: formattedPath,
         sources: [source],
         created_at: now,
         updated_at: now,

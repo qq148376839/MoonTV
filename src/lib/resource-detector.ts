@@ -8,6 +8,7 @@ import {
   LocalResourceMetadata,
   StorageManager,
 } from './local-storage';
+import { PathUtils } from './path-utils';
 
 // 本地资源检测结果
 export interface LocalResourceInfo {
@@ -54,21 +55,12 @@ export class ResourceDetector {
 
     const indexEntry = index[key];
     // local_path 已经是完整路径（包含 source_id 目录）
-    let localPath = indexEntry.local_path;
-
-    // 如果是相对路径，转换为绝对路径
-    if (!path.isAbsolute(localPath)) {
-      if (
-        localPath.startsWith('data/videos') ||
-        localPath.startsWith('./data/videos')
-      ) {
-        localPath = path.resolve(process.cwd(), localPath.replace(/^\.\//, ''));
-      } else {
-        // 否则相对于 storagePath
-        const storagePath = this.storageManager.getStoragePath();
-        localPath = path.resolve(storagePath || process.cwd(), localPath);
-      }
-    }
+    // 使用 PathUtils 统一处理路径解析
+    const storagePath = this.storageManager.getStoragePath();
+    const localPath = PathUtils.resolveResourcePath(
+      indexEntry.local_path,
+      storagePath
+    );
 
     // 检查目录是否存在
     if (!fs.existsSync(localPath)) {
@@ -88,15 +80,18 @@ export class ResourceDetector {
       if (path.isAbsolute(ep)) {
         // 绝对路径，直接使用
         filePath = ep;
-      } else if (
-        ep.startsWith('data/videos') ||
-        ep.startsWith('./data/videos')
-      ) {
-        // 相对路径，但以 data/videos 开头，相对于项目根目录解析
-        filePath = path.resolve(process.cwd(), ep.replace(/^\.\//, ''));
       } else {
-        // 其他相对路径，相对于 localPath
-        filePath = path.join(localPath, ep);
+        // 使用 PathUtils 检查路径前缀并解析
+        if (
+          PathUtils.startsWith(ep, 'data/videos') ||
+          PathUtils.startsWith(ep, './data/videos')
+        ) {
+          // 相对路径，但以 data/videos 开头，相对于项目根目录解析
+          filePath = PathUtils.resolveResourcePath(ep);
+        } else {
+          // 其他相对路径，相对于 localPath
+          filePath = path.join(localPath, ep);
+        }
       }
 
       if (ep.endsWith('.m3u8')) {

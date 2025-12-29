@@ -2,12 +2,12 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 const nextConfig = {
   output: 'standalone',
-  eslint: {
-    dirs: ['src'],
-  },
 
   reactStrictMode: false,
-  swcMinify: true,
+
+  // Next.js 16 默认使用 Turbopack，但项目中有 webpack 配置
+  // 设置空的 turbopack 配置以禁用 Turbopack，使用 webpack
+  turbopack: {},
 
   // Uncoment to add domain whitelist
   images: {
