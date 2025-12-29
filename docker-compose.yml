@@ -1,0 +1,38 @@
+version: '3.8'
+services:
+  moontv:
+    build: .
+    image: moontv:latest
+    container_name: moontv-container
+    restart: unless-stopped
+    ports:
+      - "1234:3000"
+    volumes:
+      - ./config.json:/app/config.json:rw
+      - ./data:/app/data  # 如果需要持久化数据
+      - ./data/videos:/data/videos
+    environment:
+      - LOCAL_STORAGE_ENABLED=true
+      - LOCAL_STORAGE_MAX_CONCURRENT=5
+      - LOCAL_STORAGE_TS_CONCURRENT=5
+      - LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT=2
+      - LOCAL_STORAGE_PATH=/data/videos
+      - NODE_ENV=production
+      - HOSTNAME=0.0.0.0
+      - PORT=3000
+      - DOCKER_ENV=true
+      - PASSWORD=rio
+      - SITE_NAME=腾小宝资源站
+      - NEXT_PUBLIC_DISABLE_YELLOW_FILTER=true
+      - NEXT_PUBLIC_BASE_URL=http://localhost:1234
+      # 如果需要数据库，添加数据库环境变量
+      # - DATABASE_URL=postgresql://...
+    user: "nextjs"
+    working_dir: /app
+    # 可选：健康检查
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

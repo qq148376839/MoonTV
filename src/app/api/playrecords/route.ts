@@ -6,7 +6,7 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { PlayRecord } from '@/lib/types';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 /**
  * 触发自动下载（异步，不阻塞）
@@ -22,13 +22,20 @@ async function triggerAutoDownload(
     );
 
     // 获取基础 URL（用于构建下载 API 路径）
+    // 服务器内部调用，优先使用容器内部地址
+    // NEXT_PUBLIC_BASE_URL 是客户端访问地址，服务器内部应该使用 localhost:3000
     const baseUrl =
-      process.env.NEXT_PUBLIC_BASE_URL ||
-      (process.env.VERCEL_URL
+      process.env.DOCKER_ENV === 'true'
+        ? 'http://localhost:3000' // Docker 环境使用容器内部地址
+        : process.env.VERCEL_URL
         ? `https://${process.env.VERCEL_URL}`
-        : 'http://localhost:51000');
+        : process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:51000';
 
-    console.log(`[PlayRecords] 下载 API 基础 URL: ${baseUrl}`);
+    console.log(`[PlayRecords] 下载 API 基础 URL: ${baseUrl}`, {
+      NEXT_PUBLIC_BASE_URL: process.env.NEXT_PUBLIC_BASE_URL,
+      VERCEL_URL: process.env.VERCEL_URL,
+      DOCKER_ENV: process.env.DOCKER_ENV,
+    });
 
     // 计算下载范围：当前集数 + 下2集
     const downloadNextEpisodes = parseInt(
@@ -168,6 +175,7 @@ export async function POST(request: NextRequest) {
 
     console.log('[PlayRecords] 检查自动下载触发条件:', {
       autoDownloadEnabled,
+      LOCAL_STORAGE_ENABLED: process.env.LOCAL_STORAGE_ENABLED,
       finalSource,
       finalId,
       shouldAutoDownload,
