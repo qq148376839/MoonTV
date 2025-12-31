@@ -138,9 +138,8 @@
       "name": "牛牛资源"
     },
     "789caiji": {
-      "api": "https://www.caiji.cyou/api.php/provide/vod",
-      "name": "789采集",
-      "official_parser": true
+      "api": "https://gfjx.riowang.win/api/v1/search",
+      "name": "789采集"
     }
   }
 }

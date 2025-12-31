@@ -62,3 +62,7 @@ data/videos/**
 local-storage-config.json.env.bak
 public/sw.js
 public/workbox-*.js
+
+# Wrangler build artifacts
+workers/.wrangler/
+**/.wrangler/

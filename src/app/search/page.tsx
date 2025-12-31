@@ -14,6 +14,7 @@ import {
 } from '@/lib/db.client';
 import { detailCacheManager } from '@/lib/detail-cache';
 import { searchCacheManager } from '@/lib/search-cache';
+import { getStreamSearchUrl } from '@/lib/search-config';
 import { SearchResult } from '@/lib/types';
 import { yellowWords } from '@/lib/yellow';
 
@@ -245,10 +246,9 @@ function SearchPageClient() {
       // eslint-disable-next-line no-console
       console.log('[DEBUG] 开始SSE流式搜索:', query);
 
-      // 使用 SSE 流式搜索
-      const eventSource = new EventSource(
-        `/api/search/stream?q=${encodeURIComponent(query.trim())}`
-      );
+      // 使用 SSE 流式搜索（支持 Cloudflare Worker 或本地 API）
+      const searchUrl = getStreamSearchUrl(query.trim());
+      const eventSource = new EventSource(searchUrl);
       const seenResults = new Set<string>();
       const accumulatedResults: SearchResult[] = [];
       let hasReceivedResults = false;

@@ -786,6 +786,7 @@ function PlayPageClient() {
     Map<string, { exists: boolean; localUrl?: string }>
   >(new Map());
 
+  // eslint-disable-next-line unused-imports/no-unused-vars
   class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
     constructor(config: any) {
       super(config);
@@ -2245,7 +2246,7 @@ function PlayPageClient() {
         year: detailRef.current?.year,
         cover: detailRef.current?.poster || '',
         index: currentEpisodeIndexRef.current + 1, // 转换为1基索引
-        total_episodes: detailRef.current?.episodes.length || 1,
+        total_episodes: detailRef.current?.episodes?.length || 1,
         play_time: Math.floor(currentTime),
         total_time: Math.floor(duration),
         save_time: Date.now(),
@@ -2497,6 +2498,7 @@ function PlayPageClient() {
     if (
       !detail ||
       !detail.episodes ||
+      !Array.isArray(detail.episodes) ||
       currentEpisodeIndex >= detail.episodes.length ||
       currentEpisodeIndex < 0
     ) {
@@ -2588,6 +2590,20 @@ function PlayPageClient() {
               return;
             }
 
+            // 拦截播放地址，通过代理清理广告（如果启用了去广告且不是本地资源）
+            // 注意：不代理本地资源 (localhost/127.0.0.1 或 /api/local-resource)
+            let playUrl = url;
+            if (
+              blockAdEnabled &&
+              !url.includes('localhost') &&
+              !url.includes('127.0.0.1') &&
+              !url.startsWith('/api/') &&
+              (url.startsWith('http://') || url.startsWith('https://'))
+            ) {
+              console.log('[Player] 使用代理清理广告:', url);
+              playUrl = `/api/proxy/m3u8?url=${encodeURIComponent(url)}`;
+            }
+
             if (video.hls) {
               video.hls.destroy();
             }
@@ -2602,16 +2618,14 @@ function PlayPageClient() {
               maxBufferSize: 60 * 1000 * 1000, // 约 60MB，超出后触发清理
 
               /* 自定义loader */
-              loader: blockAdEnabledRef.current
-                ? CustomHlsJsLoader
-                : Hls.DefaultConfig.loader,
+              loader: Hls.DefaultConfig.loader, // 使用默认loader，去广告逻辑已移至proxy
             });
 
-            hls.loadSource(url);
+            hls.loadSource(playUrl);
             hls.attachMedia(video);
             video.hls = hls;
 
-            ensureVideoSource(video, url);
+            ensureVideoSource(video, playUrl);
 
             hls.on(Hls.Events.ERROR, function (event: any, data: any) {
               console.error('HLS Error:', event, data);

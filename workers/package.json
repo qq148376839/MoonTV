@@ -1,35 +1,24 @@
 {
-  "name": "moontv-workers",
-  "version": "2.0.0",
-  "description": "MoonTV Cloudflare Workers API - 混合用户系统与视频数据存储",
-  "main": "src/index.js",
+  "name": "moontv-search-worker",
+  "version": "1.0.0",
+  "description": "MoonTV Search API on Cloudflare Workers",
+  "main": "index.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:production": "wrangler deploy --env production",
-    "db:init": "wrangler d1 execute moontv-database --file=./schema.sql",
-    "db:init:remote": "wrangler d1 execute moontv-database --file=./schema.sql --remote",
-    "db:create": "wrangler d1 create moontv-database",
-    "db:query": "wrangler d1 execute moontv-database --command",
-    "db:backup": "wrangler d1 export moontv-database --output=backup.sql",
-    "kv:create": "npm run kv:create:cache && npm run kv:create:task",
-    "kv:create:cache": "wrangler kv:namespace create \"CACHE\"",
-    "kv:create:task": "wrangler kv:namespace create \"TASK_STATUS\"",
-    "logs": "wrangler tail",
-    "test": "echo \"No tests specified\" && exit 0"
+    "deploy": "wrangler deploy"
   },
   "keywords": [
     "cloudflare",
     "workers",
-    "d1",
-    "video",
-    "streaming",
-    "api"
+    "search",
+    "sse"
   ],
   "author": "MoonTV Team",
   "license": "MIT",
   "devDependencies": {
-    "wrangler": "^3.88.0"
+    "wrangler": "^3.88.0",
+    "@cloudflare/workers-types": "^4.20241112.0",
+    "typescript": "^5.6.3"
   },
   "engines": {
     "node": ">=16.0.0"

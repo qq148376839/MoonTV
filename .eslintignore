@@ -11,6 +11,8 @@ build/
 # Wrangler temporary files
 workers/.wrangler/
 **/.wrangler/
+workers/.wrangler/**
+**/.wrangler/**
 
 # Environment files
 .env
