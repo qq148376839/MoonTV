@@ -96,6 +96,7 @@ export interface SearchResult {
   desc?: string;
   type_name?: string;
   douban_id?: number;
+  source_type?: 'official' | 'unofficial'; // 资源类型：官方或非官方
 }
 
 // 豆瓣数据结构

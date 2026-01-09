@@ -288,6 +288,10 @@ networks:
 | NEXT_PUBLIC_IMAGE_PROXY           | 默认的浏览器端图片代理                       | url prefix                       | (空)                                                                                                                       |
 | NEXT_PUBLIC_DOUBAN_PROXY          | 默认的浏览器端豆瓣数据代理                   | url prefix                       | (空)                                                                                                                       |
 | NEXT_PUBLIC_DISABLE_YELLOW_FILTER | 关闭色情内容过滤                             | true/false                       | false                                                                                                                      |
+| NEXT_PUBLIC_OFFICIAL_SEARCH_URL   | 官方资源搜索接口 URL                         | url                              | https://789jx.riowang.win                                                                                                  |
+| NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL | 非官方资源搜索接口 URL                       | url                              | https://ss.riowang.win                                                                                                     |
+| NEXT_PUBLIC_CF_SEARCH_WORKER_URL  | Cloudflare Worker 搜索接口 URL（可选）       | url                              | (空)                                                                                                                       |
+| NEXT_PUBLIC_PARSE_API_URL         | 官方资源解析 API URL                         | url                              | https://gfjx.riowang.win/api/v1/parse                                                                                      |
 
 ## 配置说明
 
@@ -315,7 +319,7 @@ networks:
 ```
 
 - `cache_time`：接口缓存时间（秒）。
-- `api_site`：你可以增删或替换任何资源站，字段说明：
+- `api_site`：你可以增删或替换任何资源站（**注意**：当前搜索功能已独立化，config.json 中的搜索源不再被使用，仅使用环境变量配置的官方和非官方资源搜索接口）。字段说明：
   - `key`：唯一标识，保持小写字母/数字。
   - `api`：资源站提供的 `vod` JSON API 根地址。
   - `name`：在人机界面中展示的名称。

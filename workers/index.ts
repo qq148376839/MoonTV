@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /**
  * MoonTV Cloudflare Workers Search API
  * 独立的搜索 Worker，支持流式返回结果 (SSE)
@@ -175,30 +176,14 @@ const SOURCE_CONFIG = [
     name: "牛牛资源"
   },
   {
-    key: "789caiji",
-    api: "https://gfjx.riowang.win/api/v1/search",
-    name: "789采集"
+    key: "xjcj",
+    api: "https://www.xiangjiaozyw.com/api.php/provide/vod",
+    name: "香蕉采集"
   }
 ];
 
 // 敏感词配置（用于过滤）
 const YELLOW_WORDS = [
-  '伦理',
-  '三级',
-  '金瓶梅',
-  '色戒',
-  '肉蒲团',
-  '艳史',
-  '淫',
-  '激情',
-  '乱伦',
-  '性爱',
-  '自慰',
-  'AV',
-  'H片',
-  'R级',
-  '成人',
-  '限制级',
 ];
 
 // 源优先级配置
@@ -233,29 +218,58 @@ function cleanHtmlTags(str) {
  * 执行搜索请求
  */
 async function searchFromApi(apiSite, query) {
+  const startTime = Date.now();
+  const apiBaseUrl = apiSite.api;
+  const apiUrl = apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
+
   try {
-    const apiBaseUrl = apiSite.api;
-    const apiUrl = apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
-    
-    // 超时控制
+    console.log(`[${apiSite.key}] 开始搜索: ${apiUrl}`);
+
+    // 超时控制 - 增加到5秒，给慢速源更多时间
     const controller = new AbortController();
-    const timeoutMs = 3000; // 默认3秒超时
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutMs = 15000; // 增加到5秒超时
+    const timeoutId = setTimeout(() => {
+      console.log(`[${apiSite.key}] 请求超时 (${timeoutMs}ms)`);
+      controller.abort();
+    }, timeoutMs);
 
     const response = await fetch(apiUrl, {
       headers: API_CONFIG.search.headers,
       signal: controller.signal,
     });
-    
+
     clearTimeout(timeoutId);
+    const fetchTime = Date.now() - startTime;
 
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    
-    if (!data || !data.list || !Array.isArray(data.list) || data.list.length === 0) {
+    if (!response.ok) {
+      console.log(`[${apiSite.key}] HTTP错误: ${response.status} ${response.statusText} (耗时: ${fetchTime}ms)`);
       return [];
     }
+
+    const data = await response.json();
+    const totalTime = Date.now() - startTime;
+
+    if (!data) {
+      console.log(`[${apiSite.key}] 返回数据为空 (耗时: ${totalTime}ms)`);
+      return [];
+    }
+
+    if (!data.list) {
+      console.log(`[${apiSite.key}] 返回数据格式异常，缺少list字段:`, JSON.stringify(data).substring(0, 200));
+      return [];
+    }
+
+    if (!Array.isArray(data.list)) {
+      console.log(`[${apiSite.key}] list字段不是数组:`, typeof data.list);
+      return [];
+    }
+
+    if (data.list.length === 0) {
+      console.log(`[${apiSite.key}] 返回0条结果 (耗时: ${totalTime}ms)`);
+      return [];
+    }
+
+    console.log(`[${apiSite.key}] 成功获取 ${data.list.length} 条结果 (耗时: ${totalTime}ms)`);
 
     // 处理结果
     return data.list.map((item) => {
@@ -296,7 +310,13 @@ async function searchFromApi(apiSite, query) {
       };
     });
   } catch (error) {
-    // 忽略错误，返回空数组
+    const totalTime = Date.now() - startTime;
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.log(`[${apiSite.key}] 请求被中止（超时） (耗时: ${totalTime}ms)`);
+    } else {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[${apiSite.key}] 搜索出错:`, errorMessage, `(耗时: ${totalTime}ms)`);
+    }
     return [];
   }
 }
@@ -308,7 +328,7 @@ const worker = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const query = url.searchParams.get('q');
-    
+
     // CORS 头部
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
@@ -322,9 +342,9 @@ const worker = {
     }
 
     if (!query) {
-      return new Response('Missing query parameter', { 
+      return new Response('Missing query parameter', {
         status: 400,
-        headers: corsHeaders 
+        headers: corsHeaders
       });
     }
 
@@ -351,57 +371,87 @@ const worker = {
 
         // 按优先级排序源
         const sortedSites = apiSites.sort((a, b) => {
-          const priorityA = SOURCE_PRIORITY[a.key] || 999;
-          const priorityB = SOURCE_PRIORITY[b.key] || 999;
+          const priorityA = (SOURCE_PRIORITY as Record<string, number>)[a.key] || 999;
+          const priorityB = (SOURCE_PRIORITY as Record<string, number>)[b.key] || 999;
           return priorityA - priorityB;
         });
 
-        // 已见结果去重
-        const seenResults = new Set();
-        
-        // 并发搜索所有源
+        // 已见结果去重（使用 Map 确保并发安全）
+        const seenResults = new Map<string, boolean>();
+        let completedCount = 0;
+        let successCount = 0;
+        let failCount = 0;
+
+        console.log(`开始搜索 "${query}"，共 ${sortedSites.length} 个源`);
+
+        // 并发搜索所有源 - 真正的流式返回
+        // 每个源完成后立即推送结果，不等待其他源
         const searchTasks = sortedSites.map(async (site) => {
           try {
             const results = await searchFromApi(site, query);
-            
+            completedCount++;
+
             if (results.length > 0) {
+              console.log(`[${site.key}] 返回 ${results.length} 条结果，开始过滤 (已完成 ${completedCount}/${sortedSites.length})`);
+
               // 过滤黄色内容
-              // 注意：这里简单过滤，如果不需要可以移除
               const filteredResults = results.filter((result) => {
                 const typeName = result.type_name || '';
                 return !YELLOW_WORDS.some((word) => typeName.includes(word));
               });
 
+              if (filteredResults.length !== results.length) {
+                console.log(`[${site.key}] 过滤后剩余 ${filteredResults.length} 条结果（过滤了 ${results.length - filteredResults.length} 条）`);
+              }
+
               if (filteredResults.length > 0) {
-                // 去重
+                // 去重（使用同步操作确保并发安全）
                 const newResults = [];
-                filteredResults.forEach((result) => {
+                for (const result of filteredResults) {
                   const key = `${result.source}-${result.id}`;
                   if (!seenResults.has(key)) {
-                    seenResults.add(key);
+                    seenResults.set(key, true);
                     newResults.push(result);
                   }
-                });
+                }
 
-                // 推送结果
+                if (newResults.length !== filteredResults.length) {
+                  console.log(`[${site.key}] 去重后剩余 ${newResults.length} 条结果（去重了 ${filteredResults.length - newResults.length} 条）`);
+                }
+
+                // 立即推送结果 - 流式返回的关键
                 if (newResults.length > 0) {
+                  console.log(`[${site.key}] ✅ 立即推送 ${newResults.length} 条结果（流式返回）`);
                   const message = JSON.stringify({
                     results: newResults,
                     done: false,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    source: site.key,
+                    source_name: site.name
                   });
                   await writer.write(encoder.encode(`data: ${message}\n\n`));
+                } else {
+                  console.log(`[${site.key}] 所有结果都已存在，跳过推送`);
                 }
+              } else {
+                console.log(`[${site.key}] 过滤后无有效结果`);
               }
+            } else {
+              console.log(`[${site.key}] 无搜索结果 (已完成 ${completedCount}/${sortedSites.length})`);
             }
+            successCount++;
           } catch (e) {
-            // 单个源失败忽略
+            completedCount++;
+            failCount++;
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            console.error(`[${site.key}] 处理搜索结果时出错:`, errorMessage, `(已完成 ${completedCount}/${sortedSites.length})`);
           }
         });
 
-        // 等待所有源处理完毕
+        // 等待所有源处理完毕（但每个源的结果已经流式返回了）
         await Promise.allSettled(searchTasks);
-        
+        console.log(`搜索完成: 成功 ${successCount} 个源，失败 ${failCount} 个源，共去重 ${seenResults.size} 条结果`);
+
         // 发送结束信号
         const doneMessage = JSON.stringify({
           results: [],

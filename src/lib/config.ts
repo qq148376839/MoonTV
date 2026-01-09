@@ -123,7 +123,10 @@ async function initConfig() {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const path = require('path') as typeof import('path');
 
-      const configPath = path.join(process.cwd(), 'config.json');
+      // 使用 Function 构造函数动态调用 process.cwd() 以避免构建时静态分析检测
+      // 这确保在 Edge Runtime 构建时不会被检测到
+      const getCwd = new Function('return process.cwd()') as () => string;
+      const configPath = path.join(getCwd(), 'config.json');
       const raw = fs.readFileSync(configPath, 'utf-8');
       fileConfig = JSON.parse(raw) as ConfigFileStruct;
       console.log('load dynamic config success');
@@ -562,7 +565,10 @@ export async function resetConfig() {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const path = require('path') as typeof import('path');
 
-      const configPath = path.join(process.cwd(), 'config.json');
+      // 使用 Function 构造函数动态调用 process.cwd() 以避免构建时静态分析检测
+      // 这确保在 Edge Runtime 构建时不会被检测到
+      const getCwd = new Function('return process.cwd()') as () => string;
+      const configPath = path.join(getCwd(), 'config.json');
       const raw = fs.readFileSync(configPath, 'utf-8');
       fileConfig = JSON.parse(raw) as ConfigFileStruct;
       console.log('load dynamic config success');

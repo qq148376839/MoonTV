@@ -53,9 +53,8 @@
 - ✅ 实现播放源测速和优选功能
 - ✅ 保存播放记录和进度
 
-## 🚀 前端优化
+## 🚀 前端优化- ✅ 使用 Next.js 自动代码分割
 
-- ✅ 使用 Next.js 自动代码分割
 - ✅ 图片使用 Next.js Image 组件或自定义 ImagePlaceholder
 - ✅ 避免不必要的重新渲染（使用 useMemo、useCallback）
 - ✅ 支持 PWA（离线缓存、安装到桌面）

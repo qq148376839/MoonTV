@@ -196,8 +196,7 @@ export async function searchFromApi(
 
             if (process.env.NODE_ENV === 'development') {
               console.log(
-                `[searchFromApi] 播放源${sourceIndex + 1}的剧集数量: ${
-                  episodeList.length
+                `[searchFromApi] 播放源${sourceIndex + 1}的剧集数量: ${episodeList.length
                 }`
               );
             }
@@ -291,10 +290,8 @@ export async function searchFromApi(
     // 【调试日志】记录总结果数
     if (process.env.NODE_ENV === 'development') {
       console.log(
-        `[searchFromApi] 源: ${apiSite.key}, 总结果数: ${
-          results.length
-        }, 有episodes的结果数: ${
-          results.filter((r: SearchResult) => r.episodes.length > 0).length
+        `[searchFromApi] 源: ${apiSite.key}, 总结果数: ${results.length
+        }, 有episodes的结果数: ${results.filter((r: SearchResult) => r.episodes.length > 0).length
         }`
       );
     }

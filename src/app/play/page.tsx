@@ -128,6 +128,8 @@ function PlayPageClient() {
   const localResourceCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
   // 用于跟踪是否正在初始化，避免重复调用 updateVideoUrl
   const isInitializingRef = useRef(false);
+  // 当前资源的类型（用于决定是否去广告）
+  const currentSourceTypeRef = useRef<'official' | 'unofficial' | null>(null);
 
   // 同步最新值到 refs
   useEffect(() => {
@@ -162,8 +164,9 @@ function PlayPageClient() {
     }>
   >([]);
 
-  // 总集数
-  const totalEpisodes = detail?.episodes?.length || 0;
+  // 总集数（SSR 安全：确保 detail 和 episodes 存在）
+  const totalEpisodes =
+    detail && Array.isArray(detail.episodes) ? detail.episodes.length : 0;
 
   // 用于记录是否需要在播放器 ready 后跳转到指定进度
   const resumeTimeRef = useRef<number | null>(null);
@@ -346,10 +349,8 @@ function PlayPageClient() {
     resultsWithScore.forEach((result, index) => {
       // eslint-disable-next-line no-console
       console.log(
-        `${index + 1}. ${
-          result.source.source_name
-        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${
-          result.testResult.loadSpeed
+        `${index + 1}. ${result.source.source_name
+        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${result.testResult.loadSpeed
         }, ${result.testResult.pingTime}ms)`
       );
     });
@@ -452,8 +453,7 @@ function PlayPageClient() {
       // 【本地资源检测】优先检查本地资源
       try {
         console.log(
-          `[updateVideoUrl] 检查本地资源: ${detailData.source}_${
-            detailData.id
+          `[updateVideoUrl] 检查本地资源: ${detailData.source}_${detailData.id
           }, 集数: ${episodeIndex + 1}`
         );
         const localResourceResponse = await fetch(
@@ -465,8 +465,7 @@ function PlayPageClient() {
         if (localResourceResponse.ok) {
           const localResourceData = await localResourceResponse.json();
           console.log(
-            `[updateVideoUrl] 本地资源检测结果: exists=${
-              localResourceData.exists
+            `[updateVideoUrl] 本地资源检测结果: exists=${localResourceData.exists
             }, hasMetadata=${!!localResourceData.metadata}`
           );
 
@@ -546,115 +545,190 @@ function PlayPageClient() {
       // 标记未使用本地资源（将使用在线资源）
       setIsUsingLocalResource(false);
 
-      // 检查是否是官方解析资源（SSR 安全）
-      const apiSite = Array.isArray(sourceConfig)
-        ? sourceConfig.find((s) => s && s.key === detailData.source)
-        : null;
-      const needsDecrypt = apiSite?.official_parser === true;
+      // 检查资源类型（优先使用 source_type 字段，兼容旧的 official_parser 配置）
+      const sourceType =
+        detailData.source_type ||
+        (Array.isArray(sourceConfig)
+          ? sourceConfig.find((s) => s && s.key === detailData.source)
+              ?.official_parser
+            ? 'official'
+            : 'unofficial'
+          : 'unofficial');
 
-      console.log('[updateVideoUrl] 检查官方解析:', {
+      console.log('[updateVideoUrl] 检查资源类型:', {
         source: detailData.source,
+        source_type: detailData.source_type,
         originalUrl: originalUrl.substring(0, 100),
-        sourceConfigLength: Array.isArray(sourceConfig)
-          ? sourceConfig.length
-          : 0,
-        isSourceConfigArray: Array.isArray(sourceConfig),
-        apiSite: apiSite
-          ? { key: apiSite.key, official_parser: apiSite.official_parser }
-          : null,
-        needsDecrypt,
+        sourceType,
       });
 
-      if (!needsDecrypt) {
-        // 普通资源，直接设置URL
-        console.log('[updateVideoUrl] 普通资源，直接使用URL');
+      // 更新当前资源类型
+      currentSourceTypeRef.current = sourceType as 'official' | 'unofficial';
+
+      if (sourceType === 'official') {
+        // 官方资源：使用新解析API
+        console.log('[updateVideoUrl] 官方资源，使用新解析API');
+
+        setDecrypting(true);
+        setDecryptError(null);
+
+        try {
+          const response = await fetch(
+            `/api/parse?url=${encodeURIComponent(originalUrl)}`
+          );
+
+          const result = await response.json();
+
+          console.log('[updateVideoUrl] 解析API响应:', {
+            success: result.success,
+            hasM3u8Url: !!result.data?.m3u8_url,
+            error: result.error,
+            m3u8Url: result.data?.m3u8_url
+              ? result.data.m3u8_url.substring(0, 100)
+              : null,
+          });
+
+          if (result.success && result.data?.m3u8_url) {
+            // 解析成功，使用解析后的m3u8_url（不去广告）
+            const parsedUrl = result.data.m3u8_url;
+            console.log(
+              '[updateVideoUrl] ✓ 官方资源解析成功，设置videoUrl:',
+              parsedUrl.substring(0, 100)
+            );
+            setVideoUrl(parsedUrl);
+            setDecrypting(false);
+            setDecryptError(null);
+            // 如果详情数据已就绪，立即设置loading为false，让播放器可以初始化
+            if (detailData && detailData.episodes && detailData.episodes.length > 0) {
+              console.log('[updateVideoUrl] 详情数据已就绪，设置loading为false');
+              setLoading(false);
+            }
+          } else {
+            // 解析失败
+            const errorMsg =
+              result.error || '视频解析失败，请稍后重试或切换其他资源';
+            console.error('[updateVideoUrl] ✗ 官方资源解析失败:', errorMsg);
+            setDecryptError(errorMsg);
+            setDecrypting(false);
+            // 不设置videoUrl，让用户选择是否切换
+          }
+        } catch (error) {
+          // 网络错误或其他错误
+          const errorMsg =
+            error instanceof Error
+              ? error.message
+              : '网络错误，请检查网络后重试';
+          console.error('[updateVideoUrl] ✗ 官方资源解析请求失败:', error);
+          setDecryptError(errorMsg);
+          setDecrypting(false);
+        }
+      } else {
+        // 非官方资源：直接使用m3u8地址（需要去广告，通过现有的去广告逻辑处理）
+        console.log('[updateVideoUrl] 非官方资源，直接使用m3u8地址');
         setVideoUrl(originalUrl);
         setDecrypting(false);
         setDecryptError(null);
-        return;
-      }
-
-      // 官方解析资源，需要解密
-      // 使用默认解析器URL（detail字段仅用于爬取详情页，不用于解析）
-      const parserUrl = 'https://jx.789jiexi.com';
-
-      console.log('[updateVideoUrl] 开始官方解析解密:', {
-        parserUrl,
-        videoUrl: originalUrl.substring(0, 100),
-      });
-
-      setDecrypting(true);
-      setDecryptError(null);
-
-      try {
-        const response = await fetch('/api/decrypt', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            parserUrl: parserUrl,
-            videoUrl: originalUrl,
-          }),
-        });
-
-        const result = await response.json();
-
-        console.log('[updateVideoUrl] 解密API响应:', {
-          success: result.success,
-          cached: result.cached,
-          error: result.error,
-          m3u8Url: result.m3u8Url ? result.m3u8Url.substring(0, 100) : null,
-        });
-
-        if (result.success && result.m3u8Url) {
-          // 解密成功，使用解密后的URL
-          const decryptedUrl = result.m3u8Url;
-          console.log(
-            '[updateVideoUrl] ✓ 官方解析解密成功，设置videoUrl:',
-            decryptedUrl.substring(0, 100)
-          );
-          setVideoUrl(decryptedUrl);
-          setDecrypting(false);
-          setDecryptError(null);
-        } else {
-          // 解密失败
-          const errorMsg =
-            result.error || '视频解析失败，请稍后重试或切换其他资源';
-          console.error('[updateVideoUrl] ✗ 官方解析解密失败:', errorMsg);
-          setDecryptError(errorMsg);
-          setDecrypting(false);
-          // 不设置videoUrl，让用户选择是否切换
-        }
-      } catch (error) {
-        // 网络错误或其他错误
-        const errorMsg =
-          error instanceof Error ? error.message : '网络错误，请检查网络后重试';
-        console.error('[updateVideoUrl] ✗ 官方解析解密请求失败:', error);
-        setDecryptError(errorMsg);
-        setDecrypting(false);
       }
     },
     [sourceConfig]
   );
 
-  const ensureVideoSource = (video: HTMLVideoElement | null, url: string) => {
-    if (!video || !url) return;
-    const sources = Array.from(video.getElementsByTagName('source'));
-    const existed = sources.some((s) => s.src === url);
-    if (!existed) {
-      // 移除旧的 source，保持唯一
-      sources.forEach((s) => s.remove());
-      const sourceEl = document.createElement('source');
-      sourceEl.src = url;
-      video.appendChild(sourceEl);
+  /**
+   * 检测URL是否是内网地址
+   * @param url 要检测的URL
+   * @returns 如果是内网地址返回true，否则返回false
+   */
+  const isPrivateIP = (url: string): boolean => {
+    try {
+      const urlObj = new URL(url);
+      const hostname = urlObj.hostname;
+      
+      // 检测内网地址模式
+      return (
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname.startsWith('192.168.') ||
+        hostname.startsWith('10.') ||
+        /^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname) ||
+        hostname.startsWith('169.254.') // 链路本地地址
+      );
+    } catch (e) {
+      // URL解析失败，返回false
+      return false;
+    }
+  };
+
+  /**
+   * 将URL转换为代理URL（如果需要）
+   * @param url 原始URL
+   * @param isOfficialResource 是否是官方资源
+   * @returns 转换后的URL（如果需要代理）或原始URL
+   */
+  const convertToProxyUrlIfNeeded = (
+    url: string,
+    isOfficialResource: boolean
+  ): string => {
+    // 如果已经是代理URL，直接返回
+    if (url.startsWith('/api/proxy/m3u8')) {
+      return url;
     }
 
-    // 始终允许远程播放（AirPlay / Cast）
-    video.disableRemotePlayback = false;
-    // 如果曾经有禁用属性，移除之
-    if (video.hasAttribute('disableRemotePlayback')) {
-      video.removeAttribute('disableRemotePlayback');
+    // 如果已经是本地API路径，直接返回
+    if (url.startsWith('/api/')) {
+      return url;
+    }
+
+    // 检测是否是内网地址或外部URL
+    const isPrivate = isPrivateIP(url);
+    const isExternalUrl =
+      url.startsWith('http://') || url.startsWith('https://');
+
+    // 如果是内网地址或外部URL，需要代理
+    if (isPrivate || (isExternalUrl && !url.includes('localhost') && !url.includes('127.0.0.1'))) {
+      const shouldBlockAd = blockAdEnabledRef.current && !isOfficialResource;
+      
+      if (shouldBlockAd) {
+        console.log('[Player] 非官方资源，使用代理清理广告:', url.substring(0, 100));
+      } else {
+        console.log('[Player] 使用代理解决CORS问题:', url.substring(0, 100));
+      }
+      
+      return `/api/proxy/m3u8?url=${encodeURIComponent(url)}`;
+    }
+
+    // 本地资源，直接返回
+    console.log('[Player] 本地资源，直接播放:', url.substring(0, 100));
+    return url;
+  };
+
+  const ensureVideoSource = (video: HTMLVideoElement | null, url: string) => {
+    // SSR 安全检查：确保只在客户端执行
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+    
+    if (!video || !url) return;
+    
+    try {
+      const sources = Array.from(video.getElementsByTagName('source'));
+      const existed = sources.some((s) => s.src === url);
+      if (!existed) {
+        // 移除旧的 source，保持唯一
+        sources.forEach((s) => s.remove());
+        const sourceEl = document.createElement('source');
+        sourceEl.src = url;
+        video.appendChild(sourceEl);
+      }
+
+      // 始终允许远程播放（AirPlay / Cast）
+      video.disableRemotePlayback = false;
+      // 如果曾经有禁用属性，移除之
+      if (video.hasAttribute('disableRemotePlayback')) {
+        video.removeAttribute('disableRemotePlayback');
+      }
+    } catch (error) {
+      // 静默处理错误，避免影响播放
+      console.warn('[ensureVideoSource] 错误:', error);
     }
   };
 
@@ -924,7 +998,12 @@ function PlayPageClient() {
             context: any
           ) {
             // 如果是m3u8文件，处理内容以移除广告分段
-            if (response.data && typeof response.data === 'string') {
+            // 只有非官方资源才去广告
+            if (
+              response.data &&
+              typeof response.data === 'string' &&
+              currentSourceTypeRef.current !== 'official'
+            ) {
               // 过滤掉广告段 - 实现更精确的广告过滤逻辑
               response.data = filterAdsFromM3U8(response.data);
             }
@@ -1074,13 +1153,167 @@ function PlayPageClient() {
           return [cachedDetail];
         }
 
-        // 缓存未命中，从API获取
+        // 【新增】优先从搜索结果中查找（适用于所有资源，特别是官方和非官方资源）
+        // 这些资源的搜索结果中已经包含了完整信息，不需要调用详情接口
+        // eslint-disable-next-line no-console
+        console.log(
+          `[fetchSourceDetail] 尝试从搜索结果中查找: ${source}:${id}`
+        );
+
+        // 从 availableSources 中查找
+        const foundInAvailable = availableSources.find(
+          (result) => result.source === source && result.id === id
+        );
+        if (foundInAvailable) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[fetchSourceDetail] 在 availableSources 中找到: ${source}:${id}`
+          );
+          detailCacheManager.cacheDetail(source, id, foundInAvailable);
+          setAvailableSources([foundInAvailable]);
+          return [foundInAvailable];
+        }
+
+        // 从搜索结果缓存中查找
+        const searchQuery = searchTitle || videoTitleRef.current || '';
+        let allSearchResults: SearchResult[] = [];
+        if (searchQuery) {
+          // 尝试从 sessionStorage 获取
+          try {
+            const cached = sessionStorage.getItem(
+              `search_results_${searchQuery.trim()}`
+            );
+            if (cached) {
+              const parsed = JSON.parse(cached);
+              if (parsed.results && Array.isArray(parsed.results)) {
+                allSearchResults = parsed.results;
+                const found = parsed.results.find(
+                  (result: SearchResult) =>
+                    result.source === source && result.id === id
+                );
+                if (found) {
+                  // eslint-disable-next-line no-console
+                  console.log(
+                    `[fetchSourceDetail] 在 sessionStorage 中找到: ${source}:${id}`
+                  );
+                  detailCacheManager.cacheDetail(source, id, found);
+                  setAvailableSources([found]);
+                  return [found];
+                }
+              }
+            }
+          } catch (e) {
+            // 忽略错误
+          }
+
+          // 尝试从搜索缓存获取
+          const cachedResults = searchCacheManager.getCachedResults(
+            searchQuery.trim()
+          );
+          if (cachedResults) {
+            allSearchResults = cachedResults;
+            const found = cachedResults.find(
+              (result: SearchResult) =>
+                result.source === source && result.id === id
+            );
+            if (found) {
+              // eslint-disable-next-line no-console
+              console.log(
+                `[fetchSourceDetail] 在搜索缓存中找到: ${source}:${id}`
+              );
+              detailCacheManager.cacheDetail(source, id, found);
+              setAvailableSources([found]);
+              return [found];
+            }
+          }
+        }
+
+        // 【修复】检查是否是官方/非官方资源
+        // 如果搜索结果中有官方/非官方资源，但当前 source 不在搜索结果中，
+        // 说明这个资源可能是官方/非官方资源，不应该调用详情接口
+        const hasOfficialOrUnofficialResults = allSearchResults.some(
+          (result: SearchResult) =>
+            result.source_type === 'official' ||
+            result.source_type === 'unofficial'
+        );
+        if (hasOfficialOrUnofficialResults) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[fetchSourceDetail] 官方/非官方资源未在搜索结果中找到，跳过 API 调用: ${source}:${id}`
+          );
+          throw new Error(
+            '官方/非官方资源应在搜索结果中已包含完整信息，但未找到该资源'
+          );
+        }
+
+        // 对于其他资源，从API获取
         // eslint-disable-next-line no-console
         console.log(`[DetailCache] 缓存未命中，从API获取: ${source}:${id}`);
         const detailResponse = await fetch(
           `/api/detail?source=${source}&id=${id}`
         );
         if (!detailResponse.ok) {
+          // 检查是否是"不在配置中"的错误
+          const errorData = await detailResponse.json().catch(() => ({}));
+          if (
+            errorData.error &&
+            errorData.error.includes('不在配置列表中')
+          ) {
+            // 对于不在配置中的源，尝试从搜索结果中查找
+            // eslint-disable-next-line no-console
+            console.log(
+              `[fetchSourceDetail] 源不在配置中，尝试从搜索结果查找: ${source}:${id}`
+            );
+            const searchQuery = searchTitle || videoTitleRef.current || '';
+            if (searchQuery) {
+              // 尝试从 sessionStorage 获取
+              try {
+                const cached = sessionStorage.getItem(
+                  `search_results_${searchQuery.trim()}`
+                );
+                if (cached) {
+                  const parsed = JSON.parse(cached);
+                  if (parsed.results && Array.isArray(parsed.results)) {
+                    const found = parsed.results.find(
+                      (result: SearchResult) =>
+                        result.source === source && result.id === id
+                    );
+                    if (found) {
+                      // eslint-disable-next-line no-console
+                      console.log(
+                        `[fetchSourceDetail] 在 sessionStorage 中找到: ${source}:${id}`
+                      );
+                      detailCacheManager.cacheDetail(source, id, found);
+                      setAvailableSources([found]);
+                      return [found];
+                    }
+                  }
+                }
+              } catch (e) {
+                // 忽略错误
+              }
+
+              // 尝试从搜索缓存获取
+              const cachedResults = searchCacheManager.getCachedResults(
+                searchQuery.trim()
+              );
+              if (cachedResults) {
+                const found = cachedResults.find(
+                  (result: SearchResult) =>
+                    result.source === source && result.id === id
+                );
+                if (found) {
+                  // eslint-disable-next-line no-console
+                  console.log(
+                    `[fetchSourceDetail] 在搜索缓存中找到: ${source}:${id}`
+                  );
+                  detailCacheManager.cacheDetail(source, id, found);
+                  setAvailableSources([found]);
+                  return [found];
+                }
+              }
+            }
+          }
           throw new Error('获取视频详情失败');
         }
         const detailData = (await detailResponse.json()) as SearchResult;
@@ -1130,13 +1363,13 @@ function PlayPageClient() {
               const currentYear = videoYearRef.current || '';
               return (
                 result.title.replaceAll(' ', '').toLowerCase() ===
-                  currentTitle.replaceAll(' ', '').toLowerCase() &&
+                currentTitle.replaceAll(' ', '').toLowerCase() &&
                 (currentYear
                   ? result.year.toLowerCase() === currentYear.toLowerCase()
                   : true) &&
                 (searchType
-                  ? (searchType === 'tv' && result.episodes.length > 1) ||
-                    (searchType === 'movie' && result.episodes.length === 1)
+                  ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
+                  (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
                   : true)
               );
             });
@@ -1171,13 +1404,13 @@ function PlayPageClient() {
           const currentYear = videoYearRef.current || '';
           return (
             result.title.replaceAll(' ', '').toLowerCase() ===
-              currentTitle.replaceAll(' ', '').toLowerCase() &&
+            currentTitle.replaceAll(' ', '').toLowerCase() &&
             (currentYear
               ? result.year.toLowerCase() === currentYear.toLowerCase()
               : true) &&
             (searchType
-              ? (searchType === 'tv' && result.episodes.length > 1) ||
-                (searchType === 'movie' && result.episodes.length === 1)
+              ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
+              (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
               : true)
           );
         });
@@ -1223,13 +1456,13 @@ function PlayPageClient() {
           const currentYear = videoYearRef.current || '';
           return (
             result.title.replaceAll(' ', '').toLowerCase() ===
-              currentTitle.replaceAll(' ', '').toLowerCase() &&
+            currentTitle.replaceAll(' ', '').toLowerCase() &&
             (currentYear
               ? result.year.toLowerCase() === currentYear.toLowerCase()
               : true) &&
             (searchType
-              ? (searchType === 'tv' && result.episodes.length > 1) ||
-                (searchType === 'movie' && result.episodes.length === 1)
+              ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
+              (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
               : true)
           );
         });
@@ -1611,8 +1844,8 @@ function PlayPageClient() {
           decision: shouldUseDirectly
             ? '直接使用指定源，绝不执行优选'
             : optimizationEnabled
-            ? '执行优选逻辑'
-            : '使用第一个源',
+              ? '执行优选逻辑'
+              : '使用第一个源',
         });
 
         // 【核心修复】如果有明确的 source 和 id，无论 prefer 参数如何，都直接使用，绝不执行优选
@@ -1834,13 +2067,13 @@ function PlayPageClient() {
                               .toLowerCase();
                           const yearMatch = videoYearRef.current
                             ? result.year.toLowerCase() ===
-                              videoYearRef.current.toLowerCase()
+                            videoYearRef.current.toLowerCase()
                             : true;
                           const typeMatch = searchType
                             ? (searchType === 'tv' &&
-                                result.episodes.length > 1) ||
-                              (searchType === 'movie' &&
-                                result.episodes.length === 1)
+                              Array.isArray(result.episodes) && result.episodes.length > 1) ||
+                            (searchType === 'movie' &&
+                              Array.isArray(result.episodes) && result.episodes.length === 1)
                             : true;
 
                           return titleMatch && yearMatch && typeMatch;
@@ -2469,7 +2702,7 @@ function PlayPageClient() {
           cover: detailRef.current?.poster || '',
           total_episodes:
             detailRef.current?.episodes &&
-            Array.isArray(detailRef.current.episodes)
+              Array.isArray(detailRef.current.episodes)
               ? detailRef.current.episodes.length
               : 1,
           save_time: Date.now(),
@@ -2519,10 +2752,10 @@ function PlayPageClient() {
 
     // 非WebKit浏览器且播放器已存在，使用switch方法切换
     if (!isWebkit && artPlayerRef.current) {
+      console.log('[Player] 非WebKit浏览器，使用switch方法切换URL:', videoUrl.substring(0, 100));
       artPlayerRef.current.switch = videoUrl;
-      artPlayerRef.current.title = `${videoTitle} - 第${
-        currentEpisodeIndex + 1
-      }集`;
+      artPlayerRef.current.title = `${videoTitle} - 第${currentEpisodeIndex + 1
+        }集`;
       artPlayerRef.current.poster = videoCover;
       if (artPlayerRef.current?.video) {
         ensureVideoSource(
@@ -2535,6 +2768,7 @@ function PlayPageClient() {
 
     // WebKit浏览器或首次创建：销毁之前的播放器实例并创建新的
     if (artPlayerRef.current) {
+      console.log('[Player] 销毁旧播放器实例，准备创建新实例');
       if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
         artPlayerRef.current.video.hls.destroy();
       }
@@ -2544,6 +2778,7 @@ function PlayPageClient() {
     }
 
     try {
+      console.log('[Player] 创建新播放器实例，URL:', videoUrl.substring(0, 100));
       // 创建新的播放器实例
       Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
       Artplayer.USE_RAF = true;
@@ -2590,19 +2825,16 @@ function PlayPageClient() {
               return;
             }
 
-            // 拦截播放地址，通过代理清理广告（如果启用了去广告且不是本地资源）
-            // 注意：不代理本地资源 (localhost/127.0.0.1 或 /api/local-resource)
-            let playUrl = url;
-            if (
-              blockAdEnabled &&
-              !url.includes('localhost') &&
-              !url.includes('127.0.0.1') &&
-              !url.startsWith('/api/') &&
-              (url.startsWith('http://') || url.startsWith('https://'))
-            ) {
-              console.log('[Player] 使用代理清理广告:', url);
-              playUrl = `/api/proxy/m3u8?url=${encodeURIComponent(url)}`;
-            }
+            // 拦截播放地址，通过代理解决CORS问题和清理广告
+            // 规则：
+            // 1. 如果URL已经是代理URL（/api/proxy/m3u8开头），直接使用
+            // 2. 如果URL是本地API路径（/api/开头），直接使用
+            // 3. 如果是内网地址（192.168.x.x、10.x.x.x等），转换为代理URL
+            // 4. 如果是外部URL（http://或https://开头），转换为代理URL
+            // 5. 非官方资源 + 去广告开关开启 → 代理时清理广告
+            // 6. 官方资源 → 代理时不去广告（仅解决CORS问题）
+            const isOfficialResource = currentSourceTypeRef.current === 'official';
+            const playUrl = convertToProxyUrlIfNeeded(url, isOfficialResource);
 
             if (video.hls) {
               video.hls.destroy();
@@ -2621,14 +2853,19 @@ function PlayPageClient() {
               loader: Hls.DefaultConfig.loader, // 使用默认loader，去广告逻辑已移至proxy
             });
 
+            console.log('[Player] HLS加载源:', playUrl.substring(0, 100));
             hls.loadSource(playUrl);
             hls.attachMedia(video);
             video.hls = hls;
 
             ensureVideoSource(video, playUrl);
 
+            hls.on(Hls.Events.MANIFEST_PARSED, function () {
+              console.log('[Player] HLS清单解析完成，准备播放');
+            });
+
             hls.on(Hls.Events.ERROR, function (event: any, data: any) {
-              console.error('HLS Error:', event, data);
+              console.error('[Player] HLS Error:', event, data);
               if (data.fatal) {
                 switch (data.type) {
                   case Hls.ErrorTypes.NETWORK_ERROR:
@@ -2841,7 +3078,7 @@ function PlayPageClient() {
           skipConfigRef.current.outro_time < 0 &&
           duration > 0 &&
           currentTime >
-            artPlayerRef.current.duration + skipConfigRef.current.outro_time
+          artPlayerRef.current.duration + skipConfigRef.current.outro_time
         ) {
           if (
             currentEpisodeIndexRef.current <
@@ -2951,30 +3188,27 @@ function PlayPageClient() {
             <div className='mb-6 w-80 mx-auto'>
               <div className='flex justify-center space-x-2 mb-4'>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
-                    loadingStage === 'searching' || loadingStage === 'fetching'
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'searching' || loadingStage === 'fetching'
                       ? 'bg-green-500 scale-125'
                       : loadingStage === 'preferring' ||
                         loadingStage === 'ready'
-                      ? 'bg-green-500'
-                      : 'bg-gray-300'
-                  }`}
+                        ? 'bg-green-500'
+                        : 'bg-gray-300'
+                    }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
-                    loadingStage === 'preferring'
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'preferring'
                       ? 'bg-green-500 scale-125'
                       : loadingStage === 'ready'
-                      ? 'bg-green-500'
-                      : 'bg-gray-300'
-                  }`}
+                        ? 'bg-green-500'
+                        : 'bg-gray-300'
+                    }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
-                    loadingStage === 'ready'
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'ready'
                       ? 'bg-green-500 scale-125'
                       : 'bg-gray-300'
-                  }`}
+                    }`}
                 ></div>
               </div>
 
@@ -2985,11 +3219,11 @@ function PlayPageClient() {
                   style={{
                     width:
                       loadingStage === 'searching' ||
-                      loadingStage === 'fetching'
+                        loadingStage === 'fetching'
                         ? '33%'
                         : loadingStage === 'preferring'
-                        ? '66%'
-                        : '100%',
+                          ? '66%'
+                          : '100%',
                   }}
                 ></div>
               </div>
@@ -3103,9 +3337,8 @@ function PlayPageClient() {
               }
             >
               <svg
-                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${
-                  isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'
-                }`}
+                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'
+                  }`}
                 fill='none'
                 stroke='currentColor'
                 viewBox='0 0 24 24'
@@ -3123,27 +3356,24 @@ function PlayPageClient() {
 
               {/* 精致的状态指示点 */}
               <div
-                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full transition-all duration-200 ${
-                  isEpisodeSelectorCollapsed
+                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full transition-all duration-200 ${isEpisodeSelectorCollapsed
                     ? 'bg-orange-400 animate-pulse'
                     : 'bg-green-400'
-                }`}
+                  }`}
               ></div>
             </button>
           </div>
 
           <div
-            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${
-              isEpisodeSelectorCollapsed
+            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
                 ? 'grid-cols-1'
                 : 'grid-cols-1 md:grid-cols-4'
-            }`}
+              }`}
           >
             {/* 播放器 */}
             <div
-              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${
-                isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
-              }`}
+              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
+                }`}
             >
               <div className='relative w-full h-[300px] lg:h-full'>
                 <div
@@ -3183,8 +3413,8 @@ function PlayPageClient() {
                           {decrypting
                             ? '🔐 正在解析视频...'
                             : videoLoadingStage === 'sourceChanging'
-                            ? '🔄 切换播放源...'
-                            : '🔄 视频加载中...'}
+                              ? '🔄 切换播放源...'
+                              : '🔄 视频加载中...'}
                         </p>
                         {decryptError && (
                           <div className='mt-4 p-4 bg-red-500/20 border border-red-500/50 rounded-lg'>
@@ -3242,11 +3472,10 @@ function PlayPageClient() {
 
             {/* 选集和换源 - 在移动端始终显示，在 lg 及以上可折叠 */}
             <div
-              className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${
-                isEpisodeSelectorCollapsed
+              className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
                   ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
                   : 'md:col-span-1 lg:opacity-100 lg:scale-100'
-              }`}
+                }`}
             >
               <EpisodeSelector
                 totalEpisodes={totalEpisodes}

@@ -54,7 +54,7 @@ async function fetchDoubanData(
   }
 }
 
-export const runtime = 'edge';
+export const runtime = 'nodejs'; // 需要使用 config.ts，改为 Node.js runtime
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);

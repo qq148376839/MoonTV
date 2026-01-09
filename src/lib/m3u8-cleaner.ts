@@ -1,8 +1,7 @@
-import { URL } from 'url';
-
 /**
  * M3U8 Cleaner Utility
  * Ports the Python logic to TypeScript and handles relative URL resolution
+ * Uses Web API URL (available in Edge Runtime) instead of Node.js url module
  */
 export class M3U8Cleaner {
   // Patterns to clean (regex strings)
@@ -43,7 +42,10 @@ export class M3U8Cleaner {
       
       // Find the max count
       let maxCount = 0;
-      for (const count of domainCounts.values()) {
+      // Use Array.from() to avoid downlevelIteration issue
+      const counts = Array.from(domainCounts.values());
+      for (let i = 0; i < counts.length; i++) {
+        const count = counts[i];
         if (count > maxCount) maxCount = count;
       }
       

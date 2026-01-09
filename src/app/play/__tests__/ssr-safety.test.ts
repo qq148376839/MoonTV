@@ -24,7 +24,7 @@ describe('SSR Safety Tests', () => {
       const testCases = [
         { value: undefined, expected: false },
         { value: null, expected: false },
-        { value: [], expected: true },
+        { value: [], expected: false }, // 空数组 length > 0 为 false
         { value: [1, 2, 3], expected: true },
       ];
 

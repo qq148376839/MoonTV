@@ -1,7 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,no-console */
 
-import Hls from 'hls.js';
-
 /**
  * 获取图片代理 URL 设置
  */
@@ -100,6 +98,9 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
   pingTime: number; // 网络延迟（毫秒）
 }> {
   try {
+    // 固定使用hls.js加载（动态导入，避免服务端代码导入客户端库）
+    const Hls = (await import('hls.js')).default;
+    
     // 直接使用m3u8 URL作为视频源，避免CORS问题
     return new Promise((resolve, reject) => {
       const video = document.createElement('video');
@@ -159,14 +160,14 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
               width >= 3840
                 ? '4K' // 4K: 3840x2160
                 : width >= 2560
-                ? '2K' // 2K: 2560x1440
-                : width >= 1920
-                ? '1080p' // 1080p: 1920x1080
-                : width >= 1280
-                ? '720p' // 720p: 1280x720
-                : width >= 854
-                ? '480p'
-                : 'SD'; // 480p: 854x480
+                  ? '2K' // 2K: 2560x1440
+                  : width >= 1920
+                    ? '1080p' // 1080p: 1920x1080
+                    : width >= 1280
+                      ? '720p' // 720p: 1280x720
+                      : width >= 854
+                        ? '480p'
+                        : 'SD'; // 480p: 854x480
 
             resolve({
               quality,
@@ -239,8 +240,7 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
     });
   } catch (error) {
     throw new Error(
-      `Error getting video resolution: ${
-        error instanceof Error ? error.message : String(error)
+      `Error getting video resolution: ${error instanceof Error ? error.message : String(error)
       }`
     );
   }

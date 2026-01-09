@@ -260,12 +260,24 @@ function SearchPageClient() {
       eventSource.onopen = () => {
         setShowResults(true);
         // eslint-disable-next-line no-console
-        console.log('[SSE] 连接已打开');
+        console.log('[SSE] ✅ 连接已打开，ReadyState:', eventSource.readyState);
       };
 
       eventSource.onmessage = (event) => {
         try {
+          // 【调试】记录原始消息
+          console.log('[SSE] 收到原始消息:', event.data);
+          
           const data = JSON.parse(event.data);
+          
+          // 【调试】记录解析后的数据
+          console.log('[SSE] 解析后的数据:', {
+            done: data.done,
+            resultsCount: data.results?.length || 0,
+            source: data.source,
+            source_name: data.source_name,
+            timestamp: data.timestamp
+          });
 
           if (data.done) {
             // eslint-disable-next-line no-console
@@ -328,6 +340,8 @@ function SearchPageClient() {
             Array.isArray(data.results) &&
             data.results.length > 0
           ) {
+            console.log(`[SSE] 📥 收到 ${data.results.length} 个结果，来源: ${data.source || 'unknown'}`);
+            
             const newResults = data.results.filter(
               (result: SearchResult) =>
                 !seenResults.has(`${result.source}-${result.id}`)
@@ -335,7 +349,7 @@ function SearchPageClient() {
 
             if (newResults.length > 0) {
               // eslint-disable-next-line no-console
-              console.log('[SSE] 收到', newResults.length, '个新结果');
+              console.log(`[SSE] ✅ 过滤后剩余 ${newResults.length} 个新结果（去重了 ${data.results.length - newResults.length} 个）`);
               newResults.forEach((result: SearchResult) => {
                 seenResults.add(`${result.source}-${result.id}`);
                 accumulatedResults.push(result);
@@ -401,30 +415,52 @@ function SearchPageClient() {
                     );
                   });
               }
+            } else {
+              console.log(`[SSE] ⚠️ 所有 ${data.results.length} 个结果都已存在（重复），跳过更新`);
+            }
+          } else {
+            // 【调试】记录为什么没有处理结果
+            if (!data.results) {
+              console.log('[SSE] ⚠️ 消息中没有 results 字段');
+            } else if (!Array.isArray(data.results)) {
+              console.log('[SSE] ⚠️ results 不是数组:', typeof data.results);
+            } else if (data.results.length === 0) {
+              console.log('[SSE] ⚠️ results 数组为空');
             }
           }
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.error('[SSE] Error parsing SSE message:', err, event.data);
+          console.error('[SSE] ❌ Error parsing SSE message:', err, '原始数据:', event.data);
         }
       };
 
       eventSource.onerror = (error) => {
         // eslint-disable-next-line no-console
         console.error(
-          '[SSE] Connection error:',
+          '[SSE] ❌ Connection error:',
           error,
           'ReadyState:',
-          eventSource.readyState
+          eventSource.readyState,
+          'URL:',
+          searchUrl
         );
-        // 只有在连接失败时才关闭
+        
+        // 检查连接状态
         if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('[SSE] 🔴 连接已关闭');
           eventSource.close();
           setIsLoading(false);
+          
+          // 如果还没有收到任何结果，可能是连接失败
+          if (!hasReceivedResults && accumulatedResults.length === 0) {
+            console.warn('[SSE] ⚠️ 连接关闭且未收到任何结果，可能存在问题');
+          }
         } else if (eventSource.readyState === EventSource.CONNECTING) {
           // 连接中，可能是暂时断线，保持流式更新
           // eslint-disable-next-line no-console
-          console.log('[SSE] 连接中断，尝试重连...');
+          console.log('[SSE] 🔄 连接中断，尝试重连...');
+        } else if (eventSource.readyState === EventSource.OPEN) {
+          console.log('[SSE] ✅ 连接正常打开');
         }
       };
     } catch (error) {

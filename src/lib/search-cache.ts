@@ -218,12 +218,56 @@ class SearchCacheManager {
   }
 
   /**
-   * 清空所有缓存
+   * 清空所有缓存（包括 localStorage）
    */
   public clearCache(): void {
     this.cache = {};
     this.saveToStorage();
     // 搜索缓存已清空
+  }
+
+  /**
+   * 清空指定查询的缓存
+   */
+  public clearCacheForQuery(query: string): void {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (this.cache[normalizedQuery]) {
+      delete this.cache[normalizedQuery];
+      this.saveToStorage();
+    }
+  }
+
+  /**
+   * 清空所有 sessionStorage 中的搜索缓存
+   */
+  public static clearSessionStorageCache(): void {
+    if (typeof window === 'undefined') return;
+
+    try {
+      // 清空所有 search_results_* 的缓存
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key && (key.startsWith('search_results_') || key.startsWith('sse_status_'))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((key) => sessionStorage.removeItem(key));
+      console.log(`[SearchCache] 已清理 ${keysToRemove.length} 个 sessionStorage 缓存项`);
+    } catch (error) {
+      console.warn('[SearchCache] 清理 sessionStorage 缓存失败:', error);
+    }
+  }
+
+  /**
+   * 清理所有搜索缓存（包括 localStorage 和 sessionStorage）
+   * 可以在浏览器控制台调用：window.clearAllSearchCache()
+   */
+  public static clearAllCache(): void {
+    const instance = SearchCacheManager.getInstance();
+    instance.clearCache();
+    SearchCacheManager.clearSessionStorageCache();
+    console.log('[SearchCache] ✅ 所有搜索缓存已清理');
   }
 
   /**
@@ -255,4 +299,13 @@ class SearchCacheManager {
 }
 
 export const searchCacheManager = SearchCacheManager.getInstance();
+
+// 在浏览器环境中，将清理函数暴露到全局，方便调试
+if (typeof window !== 'undefined') {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (window as any).clearAllSearchCache = () => {
+    SearchCacheManager.clearAllCache();
+  };
+}
+
 export default SearchCacheManager;

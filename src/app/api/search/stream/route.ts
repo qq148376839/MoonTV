@@ -1,204 +1,14 @@
 /* eslint-disable no-console */
 import { getConfig } from '@/lib/config';
-import { searchFromApi } from '@/lib/downstream';
+import {
+  searchOfficialResources,
+  searchUnofficialResources,
+} from '@/lib/search-independent';
 import { SearchResult } from '@/lib/types';
 import { yellowWords } from '@/lib/yellow';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs'; // 需要使用 config.ts，改为 Node.js runtime
 
-// 源优先级配置 - 响应快的源优先
-const SOURCE_PRIORITY = {
-  bfzy: 1, // 暴风资源 - 通常较快
-  tyyszy: 2, // 天涯资源 - 稳定
-  zy360: 3, // 360资源 - 较快
-  wolong: 4, // 卧龙资源 - 中等
-  jisu: 5, // 极速资源 - 较快
-  dbzy: 6, // 豆瓣资源 - 中等
-} as const;
-
-/**
- * 动态超时管理器
- * 根据环境特征和实时性能自适应调整超时时间
- */
-class AdaptiveTimeoutManager {
-  private static instance: AdaptiveTimeoutManager;
-  private networkLatency = 0; // 网络延迟（毫秒）
-  private lastHealthCheck = 0; // 上次健康检查时间
-  private readonly HEALTH_CHECK_INTERVAL = 60000; // 健康检查间隔：60秒
-
-  // 私有构造函数，确保单例模式
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  private constructor() {}
-
-  static getInstance(): AdaptiveTimeoutManager {
-    if (!AdaptiveTimeoutManager.instance) {
-      AdaptiveTimeoutManager.instance = new AdaptiveTimeoutManager();
-    }
-    return AdaptiveTimeoutManager.instance;
-  }
-
-  /**
-   * 检测网络环境并更新延迟
-   * 使用轻量级健康检查来评估网络状况
-   */
-  async detectNetworkEnvironment(): Promise<void> {
-    const now = Date.now();
-
-    // 如果距离上次检查时间太短，跳过检查（避免频繁请求）
-    if (now - this.lastHealthCheck < this.HEALTH_CHECK_INTERVAL) {
-      return;
-    }
-
-    try {
-      const testStartTime = now;
-
-      // 【优化】使用轻量级的健康检查端点
-      // 选择一个响应快且稳定的服务进行测试
-      // 使用Cloudflare的DNS服务作为测试目标（通常响应很快）
-      const testUrl =
-        'https://cloudflare-dns.com/dns-query?name=example.com&type=A';
-      const controller = new AbortController();
-
-      // 创建超时Promise（兼容Edge Runtime）
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-      const timeoutPromise = new Promise<void>((resolve) => {
-        if (typeof setTimeout !== 'undefined') {
-          timeoutId = setTimeout(() => {
-            controller.abort();
-            resolve();
-          }, 1500); // 1.5秒超时，足够检测网络延迟
-        }
-      });
-
-      try {
-        // 使用Promise.race同时执行请求和超时
-        await Promise.race([
-          fetch(testUrl, {
-            method: 'GET',
-            signal: controller.signal,
-            headers: {
-              Accept: 'application/dns-json',
-            },
-            cache: 'no-store',
-          }).then(() => {
-            if (timeoutId !== null && typeof clearTimeout !== 'undefined') {
-              clearTimeout(timeoutId);
-            }
-          }),
-          timeoutPromise,
-        ]);
-
-        const latency = Date.now() - testStartTime;
-
-        // 【优化】使用平滑算法更新延迟（避免单次测量波动）
-        if (this.networkLatency === 0) {
-          this.networkLatency = latency;
-        } else {
-          // 加权平均：新值占30%，旧值占70%
-          this.networkLatency = Math.round(
-            this.networkLatency * 0.7 + latency * 0.3
-          );
-        }
-
-        this.lastHealthCheck = now;
-      } catch {
-        // 测试失败，使用默认延迟值或保持上次的值
-        if (this.networkLatency === 0) {
-          this.networkLatency = 1000; // 默认1秒延迟
-        }
-        // 如果已有延迟值，保持不变（网络可能是暂时性问题）
-        this.lastHealthCheck = now;
-      } finally {
-        if (timeoutId !== null && typeof clearTimeout !== 'undefined') {
-          clearTimeout(timeoutId);
-        }
-      }
-    } catch {
-      // 健康检查失败，使用默认值或保持上次的值
-      if (this.networkLatency === 0) {
-        this.networkLatency = 1000;
-      }
-      this.lastHealthCheck = now;
-    }
-  }
-
-  /**
-   * 根据环境和实时性能计算动态超时时间
-   * @param baseTimeout 基础超时时间（毫秒）
-   * @param isHighPriority 是否高优先级源
-   * @returns 调整后的超时时间
-   */
-  calculateDynamicTimeout(
-    baseTimeout: number,
-    isHighPriority: boolean
-  ): number {
-    // 1. 环境因子
-    const isProduction =
-      process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
-    const environmentFactor = isProduction ? 1.5 : 1.0; // 生产环境增加50%
-
-    // 2. 网络延迟因子（基于健康检查结果）
-    // 如果检测到的延迟 > 500ms，认为网络较慢，增加超时时间
-    const latencyFactor = this.networkLatency > 500 ? 1.3 : 1.0;
-
-    // 3. 优先级因子（高优先级源可以稍短一些，但也要保证成功率）
-    const priorityFactor = isHighPriority ? 0.9 : 1.0;
-
-    // 4. Edge Runtime 因子（Edge环境可能需要更长时间）
-    const edgeFactor = 1.2; // Edge Runtime 通常需要更多时间
-
-    // 综合计算
-    const dynamicTimeout = Math.ceil(
-      baseTimeout *
-        environmentFactor *
-        latencyFactor *
-        priorityFactor *
-        edgeFactor
-    );
-
-    // 设置合理的上下限
-    const minTimeout = isHighPriority ? 2000 : 3000; // 最少2-3秒
-    const maxTimeout = isHighPriority ? 10000 : 15000; // 最多10-15秒
-
-    return Math.max(minTimeout, Math.min(maxTimeout, dynamicTimeout));
-  }
-
-  /**
-   * 获取当前网络延迟（用于调试）
-   */
-  getNetworkLatency(): number {
-    return this.networkLatency;
-  }
-}
-
-// 带自定义超时的搜索函数
-async function searchFromApiWithTimeout(
-  site: { key: string; api: string; name: string; detail?: string },
-  query: string,
-  timeoutMs: number
-): Promise<SearchResult[]> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const result = await searchFromApi(site, query);
-    clearTimeout(timeoutId);
-    return result;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    // 【修复】记录错误信息，但不在console中打印（Edge Runtime限制）
-    // 可以通过返回特殊标记来追踪错误
-    // 搜索失败时返回空数组，但在内部记录错误信息
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    // 只在开发环境记录详细错误
-    if (process.env.NODE_ENV === 'development') {
-      // eslint-disable-next-line no-console
-      console.error(`[SSE] 搜索失败 [${site.key}]:`, errorMsg);
-    }
-    return [];
-  }
-}
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -208,25 +18,42 @@ export async function GET(request: Request) {
     return new Response('Missing query parameter', { status: 400 });
   }
 
+  // 【优化】如果配置了 Cloudflare Worker URL，直接转发流式数据
+  const cfWorkerUrl = process.env.NEXT_PUBLIC_CF_SEARCH_WORKER_URL;
+  if (cfWorkerUrl && cfWorkerUrl.trim()) {
+    const workerUrl = `${cfWorkerUrl.replace(/\/$/, '')}?q=${encodeURIComponent(query)}`;
+    console.log('[SSE] 使用 Cloudflare Worker，转发流式数据:', workerUrl);
+    
+    try {
+      const workerResponse = await fetch(workerUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Accept: 'text/event-stream',
+        },
+      });
+
+      if (!workerResponse.ok) {
+        throw new Error(`Worker returned ${workerResponse.status}`);
+      }
+
+      // 直接转发 Worker 的流式响应
+      return new Response(workerResponse.body, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'Transfer-Encoding': 'chunked',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    } catch (error) {
+      console.error('[SSE] Worker 转发失败，回退到本地搜索:', error);
+      // 如果 Worker 失败，继续使用本地搜索逻辑
+    }
+  }
+
   const config = await getConfig();
-  const apiSites = config.SourceConfig.filter((site) => !site.disabled);
-
-  // 按优先级排序源，优先请求快速源
-  const sortedSites = apiSites.sort((a, b) => {
-    const priorityA =
-      SOURCE_PRIORITY[a.key as keyof typeof SOURCE_PRIORITY] || 999;
-    const priorityB =
-      SOURCE_PRIORITY[b.key as keyof typeof SOURCE_PRIORITY] || 999;
-    return priorityA - priorityB;
-  });
-
-  // 初始化动态超时管理器
-  const timeoutManager = AdaptiveTimeoutManager.getInstance();
-
-  // 异步检测网络环境（不阻塞主流程）
-  timeoutManager.detectNetworkEnvironment().catch(() => {
-    // 静默处理健康检查失败
-  });
 
   // 创建 SSE 流
   const stream = new ReadableStream({
@@ -235,8 +62,6 @@ export async function GET(request: Request) {
       const seenResults = new Set<string>(); // 用于去重
       let isClosed = false; // 跟踪流是否已关闭
 
-      // 【优化】记录响应时间用于后续优化
-      const responseTimes: number[] = [];
       const searchStartTime = Date.now();
 
       // 封装消息推送函数 - 立即推送结果
@@ -294,6 +119,9 @@ export async function GET(request: Request) {
           results: filteredResults,
           done,
           timestamp: Date.now(),
+          // 【修复】将 source 和 source_name 放在顶层，方便前端解析
+          source: debugInfo?.source,
+          source_name: debugInfo?.sourceName,
           debug:
             process.env.NODE_ENV === 'development'
               ? {
@@ -330,97 +158,331 @@ export async function GET(request: Request) {
         }
       };
 
-      // 并发搜索所有源 - 每个源完成后立即推送
-      const searchTasks = sortedSites.map(async (site, index) => {
-        const taskStartTime = Date.now();
+      // 并发搜索官方和非官方资源 - 每个搜索完成后立即推送
+      // 注意：不再使用 config.json 中的搜索源，仅使用环境变量配置的官方和非官方资源搜索接口
+      console.log('[SSE] 开始创建官方资源搜索任务');
+      const officialSearchTask = (async () => {
         try {
-          // 【优化】使用动态超时管理器计算超时时间
-          const isHighPriority = index < 6;
-          const baseTimeout = isHighPriority ? 2000 : 3000;
-          const dynamicTimeout = timeoutManager.calculateDynamicTimeout(
-            baseTimeout,
-            isHighPriority
-          );
-
-          // 在开发环境记录超时信息
-          if (process.env.NODE_ENV === 'development') {
-            // eslint-disable-next-line no-console
-            console.log(
-              `[SSE] [${
-                site.key
-              }] 使用动态超时: ${dynamicTimeout}ms (网络延迟: ${timeoutManager.getNetworkLatency()}ms)`
-            );
-          }
-
-          console.log(`[SSE] 开始搜索源: ${site.key} (${site.name})`);
-
-          const results = await searchFromApiWithTimeout(
-            site,
-            query,
-            dynamicTimeout
-          );
-
-          // 记录响应时间
-          const responseTime = Date.now() - taskStartTime;
-          responseTimes.push(responseTime);
-
-          console.log(
-            `[SSE] 源 ${site.key} 搜索完成 - 耗时: ${responseTime}ms, 结果数: ${results.length}`
-          );
-          if (results.length > 0) {
-            console.log(
-              `[SSE] 源 ${site.key} 结果详情:`,
-              results.map((r) => ({
-                title: r.title,
-                episodesCount: r.episodes.length,
-                source: r.source,
-              }))
-            );
-          }
-
-          // 去重并推送新结果 - 立即推送，不等待其他源
-          if (results.length > 0) {
-            // 同步处理去重
-            const newResults: SearchResult[] = [];
-            results.forEach((result) => {
-              const key = `${result.source}-${result.id}`;
-              if (!seenResults.has(key)) {
-                seenResults.add(key);
-                newResults.push(result);
-              }
+          console.log('[SSE] 官方资源搜索任务开始执行');
+          
+          // 【优化】如果配置了官方资源搜索URL，直接流式处理SSE响应
+          const officialSearchUrl =
+            process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL ||
+            'https://789jx.riowang.win';
+          
+          const apiUrl = `${officialSearchUrl}/?q=${encodeURIComponent(query)}`;
+          console.log(`[SSE] 官方资源搜索URL: ${apiUrl}`);
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
+          
+          try {
+            const response = await fetch(apiUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: 'application/json, text/event-stream',
+              },
+              signal: controller.signal,
             });
 
-            // 立即推送结果
-            if (newResults.length > 0) {
-              console.log(
-                `[SSE Stream] 推送 ${newResults.length} 个结果，来源: ${site.key}`
-              );
-              pushResult(newResults, false, {
-                source: site.key,
-                sourceName: site.name,
-                duration: responseTime,
-                resultCount: results.length,
-                newResultCount: newResults.length,
-              });
-            }
-          }
+            clearTimeout(timeoutId);
 
-          return true;
-        } catch (error) {
-          // 【修复】在开发环境记录详细错误信息
-          if (process.env.NODE_ENV === 'development') {
-            // eslint-disable-next-line no-console
-            console.error(`[SSE] 搜索任务失败 [${site.key}]:`, error);
+            if (!response.ok) {
+              throw new Error(`官方资源搜索返回错误状态: ${response.status}`);
+            }
+
+            const contentType = response.headers.get('content-type') || '';
+            
+            // 如果是SSE格式，流式处理
+            if (contentType.includes('text/event-stream') || response.body) {
+              console.log('[SSE] 检测到SSE格式，开始流式处理');
+              
+              const reader = response.body?.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+              
+              if (!reader) {
+                throw new Error('无法获取响应流');
+              }
+
+              // eslint-disable-next-line no-constant-condition
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // 保留最后不完整的行
+
+                for (const line of lines) {
+                  const trimmedLine = line.trim();
+                  if (trimmedLine.startsWith('data:')) {
+                    try {
+                      const jsonStr = trimmedLine.substring(5).trim();
+                      const sseData = JSON.parse(jsonStr);
+
+                      // 处理结果
+                      if (sseData.results && Array.isArray(sseData.results) && sseData.results.length > 0) {
+                        const newResults: SearchResult[] = [];
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        sseData.results.forEach((item: any) => {
+                          if (item.episodes && Array.isArray(item.episodes)) {
+                            const key = `${item.source_type || 'official'}-${item.id}`;
+                            if (!seenResults.has(key)) {
+                              seenResults.add(key);
+                              newResults.push({
+                                id: item.id || item.vod_id?.toString() || '',
+                                title: item.title || item.vod_name || '',
+                                poster: item.poster || item.vod_pic || '',
+                                episodes: item.episodes,
+                                source: item.source || 'official',
+                                source_name: item.source_name || '官方资源',
+                                class: item.class || item.vod_class || '',
+                                year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+                                desc: item.desc || item.vod_content || '',
+                                type_name: item.type_name,
+                                douban_id: item.douban_id || item.vod_douban_id,
+                                source_type: 'official',
+                              });
+                            }
+                          }
+                        });
+
+                        if (newResults.length > 0) {
+                          console.log(`[SSE Stream] 流式推送 ${newResults.length} 个官方资源结果`);
+                          pushResult(newResults, false, {
+                            source: 'official',
+                            sourceName: '官方资源',
+                            newResultCount: newResults.length,
+                          });
+                        }
+                      }
+
+                      // 如果done为true，停止处理
+                      if (sseData.done === true) {
+                        break;
+                      }
+                    } catch (e) {
+                      // 忽略解析错误，继续处理下一行
+                      console.warn('[SSE] SSE行解析失败:', trimmedLine.substring(0, 100));
+                    }
+                  }
+                }
+              }
+              
+              console.log('[SSE] 官方资源搜索流式处理完成');
+              return true;
+            } else {
+              // 如果不是SSE格式，回退到原来的方法
+              console.log('[SSE] 非SSE格式，使用原有方法');
+              const officialResults = await searchOfficialResources(query, undefined);
+              console.log(`[SSE] 官方资源搜索完成，结果数: ${officialResults.length}`);
+              if (officialResults.length > 0) {
+                const newResults: SearchResult[] = [];
+                officialResults.forEach((result) => {
+                  const key = `${result.source_type}-${result.id}`;
+                  if (!seenResults.has(key)) {
+                    seenResults.add(key);
+                    newResults.push(result);
+                  }
+                });
+
+                if (newResults.length > 0) {
+                  console.log(
+                    `[SSE Stream] 推送 ${newResults.length} 个官方资源结果`
+                  );
+                  pushResult(newResults, false, {
+                    source: 'official',
+                    sourceName: '官方资源',
+                    resultCount: officialResults.length,
+                    newResultCount: newResults.length,
+                  });
+                }
+              }
+              return true;
+            }
+          } catch (fetchError) {
+            clearTimeout(timeoutId);
+            throw fetchError;
           }
-          // 单个源失败不影响其他源
+        } catch (error) {
+          console.error('[SSE] 官方资源搜索失败:', error);
+          if (error instanceof Error) {
+            console.error('[SSE] 官方资源搜索错误详情:', {
+              message: error.message,
+              stack: error.stack,
+              name: error.name,
+            });
+          }
           return false;
         }
-      });
+      })();
+      console.log('[SSE] 官方资源搜索任务已创建');
 
-      // 等待所有搜索任务完成，然后发送完成标志
-      Promise.allSettled(searchTasks)
+      console.log('[SSE] 开始创建非官方资源搜索任务');
+      const unofficialSearchTask = (async () => {
+        try {
+          console.log('[SSE] 非官方资源搜索任务开始执行');
+          
+          // 【优化】如果配置了非官方资源搜索URL，直接流式处理SSE响应
+          const unofficialSearchUrl =
+            process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL ||
+            process.env.NEXT_PUBLIC_CF_SEARCH_WORKER_URL ||
+            'https://ss.riowang.win';
+          
+          const apiUrl = `${unofficialSearchUrl}/?q=${encodeURIComponent(query)}`;
+          console.log(`[SSE] 非官方资源搜索URL: ${apiUrl}`);
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
+          
+          try {
+            const response = await fetch(apiUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: 'application/json, text/event-stream',
+              },
+              signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+              throw new Error(`非官方资源搜索返回错误状态: ${response.status}`);
+            }
+
+            const contentType = response.headers.get('content-type') || '';
+            
+            // 如果是SSE格式，流式处理
+            if (contentType.includes('text/event-stream') || response.body) {
+              console.log('[SSE] 检测到SSE格式，开始流式处理');
+              
+              const reader = response.body?.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+              
+              if (!reader) {
+                throw new Error('无法获取响应流');
+              }
+
+              // eslint-disable-next-line no-constant-condition
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // 保留最后不完整的行
+
+                for (const line of lines) {
+                  const trimmedLine = line.trim();
+                  if (trimmedLine.startsWith('data:')) {
+                    try {
+                      const jsonStr = trimmedLine.substring(5).trim();
+                      const sseData = JSON.parse(jsonStr);
+
+                      // 处理结果
+                      if (sseData.results && Array.isArray(sseData.results) && sseData.results.length > 0) {
+                        const newResults: SearchResult[] = [];
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        sseData.results.forEach((item: any) => {
+                          if (item.episodes && Array.isArray(item.episodes)) {
+                            const key = `${item.source_type || 'unofficial'}-${item.id}`;
+                            if (!seenResults.has(key)) {
+                              seenResults.add(key);
+                              newResults.push({
+                                id: item.id || item.vod_id?.toString() || '',
+                                title: item.title || item.vod_name || '',
+                                poster: item.poster || item.vod_pic || '',
+                                episodes: item.episodes,
+                                source: item.source || 'unofficial',
+                                source_name: item.source_name || '非官方资源',
+                                class: item.class || item.vod_class || '',
+                                year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+                                desc: item.desc || item.vod_content || '',
+                                type_name: item.type_name,
+                                douban_id: item.douban_id || item.vod_douban_id,
+                                source_type: 'unofficial',
+                              });
+                            }
+                          }
+                        });
+
+                        if (newResults.length > 0) {
+                          console.log(`[SSE Stream] 流式推送 ${newResults.length} 个非官方资源结果`);
+                          pushResult(newResults, false, {
+                            source: 'unofficial',
+                            sourceName: '非官方资源',
+                            newResultCount: newResults.length,
+                          });
+                        }
+                      }
+
+                      // 如果done为true，停止处理
+                      if (sseData.done === true) {
+                        break;
+                      }
+                    } catch (e) {
+                      // 忽略解析错误，继续处理下一行
+                      console.warn('[SSE] SSE行解析失败:', trimmedLine.substring(0, 100));
+                    }
+                  }
+                }
+              }
+              
+              console.log('[SSE] 非官方资源搜索流式处理完成');
+              return true;
+            } else {
+              // 如果不是SSE格式，回退到原来的方法
+              console.log('[SSE] 非SSE格式，使用原有方法');
+              const unofficialResults = await searchUnofficialResources(query, undefined);
+              console.log(`[SSE] 非官方资源搜索完成，结果数: ${unofficialResults.length}`);
+              if (unofficialResults.length > 0) {
+                const newResults: SearchResult[] = [];
+                unofficialResults.forEach((result) => {
+                  const key = `${result.source_type}-${result.id}`;
+                  if (!seenResults.has(key)) {
+                    seenResults.add(key);
+                    newResults.push(result);
+                  }
+                });
+
+                if (newResults.length > 0) {
+                  console.log(
+                    `[SSE Stream] 推送 ${newResults.length} 个非官方资源结果`
+                  );
+                  pushResult(newResults, false, {
+                    source: 'unofficial',
+                    sourceName: '非官方资源',
+                    resultCount: unofficialResults.length,
+                    newResultCount: newResults.length,
+                  });
+                }
+              }
+              return true;
+            }
+          } catch (fetchError) {
+            clearTimeout(timeoutId);
+            throw fetchError;
+          }
+        } catch (error) {
+          if (process.env.NODE_ENV === 'development') {
+            console.error('[SSE] 非官方资源搜索失败:', error);
+          }
+          return false;
+        }
+      })();
+
+      // 等待所有搜索任务完成（仅官方和非官方资源搜索），然后发送完成标志
+      console.log('[SSE] 开始等待所有搜索任务完成');
+      Promise.allSettled([officialSearchTask, unofficialSearchTask])
         .then((results) => {
           // 【优化】记录搜索性能统计
+          console.log('[SSE] 所有搜索任务完成，结果统计:', {
+            total: results.length,
+            officialTaskStatus: results[0]?.status,
+            unofficialTaskStatus: results[1]?.status,
+          });
           const successCount = results.filter(
             (r) => r.status === 'fulfilled'
           ).length;
@@ -429,19 +491,10 @@ export async function GET(request: Request) {
           ).length;
           const totalTime = Date.now() - searchStartTime;
 
-          // 计算平均响应时间
-          const avgResponseTime =
-            responseTimes.length > 0
-              ? Math.round(
-                  responseTimes.reduce((a, b) => a + b, 0) /
-                    responseTimes.length
-                )
-              : 0;
-
           if (process.env.NODE_ENV === 'development') {
             // eslint-disable-next-line no-console
             console.log(
-              `[SSE] 搜索完成: 成功 ${successCount}, 失败 ${failureCount}, 总耗时 ${totalTime}ms, 平均响应时间 ${avgResponseTime}ms`
+              `[SSE] 搜索完成: 成功 ${successCount}, 失败 ${failureCount}, 总耗时 ${totalTime}ms`
             );
           }
 
