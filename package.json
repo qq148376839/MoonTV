@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev --webpack -H 0.0.0.0 -p 51000",
-    "build": "pnpm gen:runtime && pnpm gen:manifest && next build",
+    "build": "NODE_OPTIONS='--max-old-space-size=6144' pnpm gen:runtime && pnpm gen:manifest && NODE_OPTIONS='--max-old-space-size=6144' next build",
+    "build:skip-typecheck": "NODE_OPTIONS='--max-old-space-size=4096' pnpm gen:runtime && pnpm gen:manifest && NODE_OPTIONS='--max-old-space-size=4096' SKIP_TYPE_CHECK=true next build",
     "start": "next start",
     "lint": "next lint",
     "lint:fix": "eslint src --fix && pnpm format",

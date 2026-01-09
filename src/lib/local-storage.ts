@@ -58,19 +58,36 @@ export class StorageManager {
     this.indexPath = path.join(this.storagePath, 'index.json');
 
     // 检查环境变量：如果未设置或设置为 'true'，则启用；只有明确设置为 'false' 时才禁用
+    // 在 Docker 环境中，如果 DOCKER_ENV=true 且 LOCAL_STORAGE_ENABLED 未设置，默认启用
     const envEnabled = process.env.LOCAL_STORAGE_ENABLED;
-    this.enabled = envEnabled !== 'false';
+    const isDockerEnv = process.env.DOCKER_ENV === 'true';
+
+    if (isDockerEnv && envEnabled === undefined) {
+      // Docker 环境中，如果未明确设置，默认启用
+      this.enabled = true;
+      console.log(
+        '[StorageManager] Docker 环境检测到，LOCAL_STORAGE_ENABLED 未设置，默认启用'
+      );
+    } else {
+      // 其他情况：如果未设置或设置为 'true'，则启用；只有明确设置为 'false' 时才禁用
+      this.enabled = envEnabled !== 'false';
+    }
 
     console.log('[StorageManager] 初始化配置:', {
       storagePath: this.storagePath,
       enabled: this.enabled,
       envEnabled: envEnabled,
       envEnabledType: typeof envEnabled,
+      isDockerEnv: isDockerEnv,
       cwd: process.cwd(),
       allLocalStorageEnvVars: {
         LOCAL_STORAGE_ENABLED: process.env.LOCAL_STORAGE_ENABLED,
         LOCAL_STORAGE_PATH: process.env.LOCAL_STORAGE_PATH,
         LOCAL_STORAGE_MAX_CONCURRENT: process.env.LOCAL_STORAGE_MAX_CONCURRENT,
+        LOCAL_STORAGE_TS_CONCURRENT: process.env.LOCAL_STORAGE_TS_CONCURRENT,
+        LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT:
+          process.env.LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT,
+        DOCKER_ENV: process.env.DOCKER_ENV,
       },
     });
 
@@ -83,7 +100,7 @@ export class StorageManager {
    */
   private initStorage(): void {
     if (!this.enabled) {
-      console.log('[StorageManager] 本地存储功能已禁用');
+      console.log('[StorageManager] 本地存储功能已禁用（环境变量检查）');
       return;
     }
 
@@ -91,8 +108,26 @@ export class StorageManager {
       // 检查存储路径是否存在
       if (!fs.existsSync(this.storagePath)) {
         // 创建存储目录
-        fs.mkdirSync(this.storagePath, { recursive: true });
-        console.log(`[StorageManager] 创建存储目录: ${this.storagePath}`);
+        try {
+          fs.mkdirSync(this.storagePath, { recursive: true });
+          console.log(`[StorageManager] ✓ 创建存储目录: ${this.storagePath}`);
+        } catch (mkdirErr) {
+          console.error(
+            `[StorageManager] ✗ 创建存储目录失败: ${this.storagePath}`,
+            mkdirErr instanceof Error
+              ? {
+                  message: mkdirErr.message,
+                  code: (mkdirErr as NodeJS.ErrnoException).code,
+                  errno: (mkdirErr as NodeJS.ErrnoException).errno,
+                  syscall: (mkdirErr as NodeJS.ErrnoException).syscall,
+                }
+              : mkdirErr
+          );
+          this.enabled = false;
+          return;
+        }
+      } else {
+        console.log(`[StorageManager] ✓ 存储目录已存在: ${this.storagePath}`);
       }
 
       // 检查存储路径是否可写
@@ -112,6 +147,11 @@ export class StorageManager {
                 code: (err as NodeJS.ErrnoException).code,
                 errno: (err as NodeJS.ErrnoException).errno,
                 syscall: (err as NodeJS.ErrnoException).syscall,
+                path: this.storagePath,
+                cwd: process.cwd(),
+                user: process.env.USER || process.env.USERNAME || 'unknown',
+                uid: process.getuid ? process.getuid() : 'unknown',
+                gid: process.getgid ? process.getgid() : 'unknown',
               }
             : err
         );
@@ -122,11 +162,14 @@ export class StorageManager {
       // 初始化索引文件
       if (!fs.existsSync(this.indexPath)) {
         this.writeIndex({});
+        console.log(`[StorageManager] ✓ 初始化索引文件: ${this.indexPath}`);
+      } else {
+        console.log(`[StorageManager] ✓ 索引文件已存在: ${this.indexPath}`);
       }
 
-      console.log(`[StorageManager] 初始化成功: ${this.storagePath}`);
+      console.log(`[StorageManager] ✓ 初始化成功: ${this.storagePath}`);
     } catch (err) {
-      console.error('[StorageManager] 初始化失败:', err);
+      console.error('[StorageManager] ✗ 初始化失败:', err);
       this.enabled = false;
     }
   }
