@@ -73,28 +73,35 @@ export class ResourceDetector {
       return { exists: false };
     }
 
-    // 验证文件是否存在
-    const filesExist = metadata.episodes.every((ep) => {
+    // 验证文件是否存在（允许“部分下载/占位”）
+    // 口径：
+    // - metadata 存在且资源目录存在
+    // - episodes 中任意一个“非空路径”对应文件存在 => 认为资源存在（部分下载也应视为 exists=true）
+    const episodesArr = Array.isArray(metadata.episodes) ? metadata.episodes : [];
+    const filesExist = episodesArr.some((ep) => {
+      if (typeof ep !== 'string') return false;
+      const trimmedEp = ep.trim();
+      if (!trimmedEp) return false; // 占位/缺集
       let filePath: string;
 
-      if (path.isAbsolute(ep)) {
+      if (path.isAbsolute(trimmedEp)) {
         // 绝对路径，直接使用
-        filePath = ep;
+        filePath = trimmedEp;
       } else {
         // 使用 PathUtils 检查路径前缀并解析
         if (
-          PathUtils.startsWith(ep, 'data/videos') ||
-          PathUtils.startsWith(ep, './data/videos')
+          PathUtils.startsWith(trimmedEp, 'data/videos') ||
+          PathUtils.startsWith(trimmedEp, './data/videos')
         ) {
           // 相对路径，但以 data/videos 开头，相对于项目根目录解析
-          filePath = PathUtils.resolveResourcePath(ep);
+          filePath = PathUtils.resolveResourcePath(trimmedEp);
         } else {
           // 其他相对路径，相对于 localPath
-          filePath = path.join(localPath, ep);
+          filePath = path.join(localPath, trimmedEp);
         }
       }
 
-      if (ep.endsWith('.m3u8')) {
+      if (trimmedEp.endsWith('.m3u8')) {
         // M3U8 文件，检查文件本身和目录
         const episodeDir = path.dirname(filePath);
         return fs.existsSync(filePath) && fs.existsSync(episodeDir);

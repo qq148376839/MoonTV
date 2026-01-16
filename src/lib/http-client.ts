@@ -21,6 +21,24 @@ export interface HttpRequestOptions {
   headers?: Record<string, string>;
   timeout?: number;
   method?: string;
+  /**
+   * Retry count on transient failures (network errors, timeouts, and 5xx/429 responses).
+   * Total attempts = 1 + retries.
+   */
+  retries?: number;
+  /**
+   * Base delay between retries (ms). Actual delay uses simple exponential backoff.
+   */
+  retryDelayMs?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function shouldRetryStatus(status: number): boolean {
+  // 429 (rate limit) + transient upstream/server errors
+  return status === 429 || (status >= 500 && status <= 599);
 }
 
 /**
@@ -35,92 +53,122 @@ export async function httpRequest(
   url: string,
   options: HttpRequestOptions = {}
 ): Promise<HttpResponse> {
-  return new Promise((resolve, reject) => {
-    let urlObj: URL;
-    try {
-      urlObj = new URL(url);
-    } catch (error) {
-      reject(new Error(`Invalid URL: ${url}`));
-      return;
-    }
+  const retries = Math.max(0, options.retries ?? 0);
+  const retryDelayMs = Math.max(0, options.retryDelayMs ?? 400);
 
-    const isHttps = urlObj.protocol === 'https:';
-    const client = isHttps ? https : http;
+  const requestOnce = async (): Promise<HttpResponse> =>
+    new Promise((resolve, reject) => {
+      let urlObj: URL;
+      try {
+        urlObj = new URL(url);
+      } catch (error) {
+        reject(new Error(`Invalid URL: ${url}`));
+        return;
+      }
 
-    const port = urlObj.port 
-      ? parseInt(urlObj.port, 10) 
-      : (isHttps ? 443 : 80);
+      const isHttps = urlObj.protocol === 'https:';
+      const client = isHttps ? https : http;
 
-    const requestOptions: http.RequestOptions = {
-      hostname: urlObj.hostname,
-      port: port,
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || 'GET',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        ...options.headers,
-      },
-      // 设置超时时间（默认30秒）
-      timeout: options.timeout || 30000,
-    };
+      const port = urlObj.port ? parseInt(urlObj.port, 10) : isHttps ? 443 : 80;
 
-    // 对于内网地址，确保使用正确的网络接口
-    // 如果 hostname 是 IP 地址，直接使用，避免 DNS 解析问题
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(urlObj.hostname)) {
-      // IP 地址，不需要 DNS 解析
-      requestOptions.hostname = urlObj.hostname;
-    }
+      const requestOptions: http.RequestOptions = {
+        hostname: urlObj.hostname,
+        port: port,
+        path: urlObj.pathname + urlObj.search,
+        method: options.method || 'GET',
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          ...options.headers,
+        },
+        // 设置超时时间（默认30秒）
+        timeout: options.timeout || 30000,
+      };
 
-    const req = client.request(requestOptions, (res) => {
-      const chunks: Buffer[] = [];
-      const headers: Record<string, string> = {};
+      // 对于内网地址，确保使用正确的网络接口
+      // 如果 hostname 是 IP 地址，直接使用，避免 DNS 解析问题
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(urlObj.hostname)) {
+        // IP 地址，不需要 DNS 解析
+        requestOptions.hostname = urlObj.hostname;
+      }
 
-      // 收集响应头
-      Object.keys(res.headers).forEach((key) => {
-        const value = res.headers[key];
-        if (value) {
-          headers[key] = Array.isArray(value) ? value.join(', ') : value;
-        }
-      });
+      const req = client.request(requestOptions, (res) => {
+        const chunks: Buffer[] = [];
+        const headers: Record<string, string> = {};
 
-      res.on('data', (chunk: Buffer) => {
-        chunks.push(chunk);
-      });
+        // 收集响应头
+        Object.keys(res.headers).forEach((key) => {
+          const value = res.headers[key];
+          if (value) {
+            headers[key] = Array.isArray(value) ? value.join(', ') : value;
+          }
+        });
 
-      res.on('end', () => {
-        const body = Buffer.concat(chunks);
-        const status = res.statusCode || 200;
-        
-        resolve({
-          status,
-          statusText: res.statusMessage || '',
-          headers,
-          body,
-          ok: status >= 200 && status < 300,
+        res.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+
+        res.on('end', () => {
+          const body = Buffer.concat(chunks);
+          const status = res.statusCode || 200;
+
+          resolve({
+            status,
+            statusText: res.statusMessage || '',
+            headers,
+            body,
+            ok: status >= 200 && status < 300,
+          });
         });
       });
+
+      req.on('error', (error: Error) => {
+        // 提供更详细的错误信息
+        const errorMessage = error.message || String(error);
+        const enhancedError = new Error(
+          `HTTP request failed: ${errorMessage} (URL: ${url.substring(0, 100)})`
+        );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (enhancedError as any).originalError = error;
+        reject(enhancedError);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        reject(
+          new Error(
+            `Request timeout after ${requestOptions.timeout}ms (URL: ${url.substring(0, 100)})`
+          )
+        );
+      });
+
+      // 发送请求
+      req.end();
     });
 
-    req.on('error', (error: Error) => {
-      // 提供更详细的错误信息
-      const errorMessage = error.message || String(error);
-      const enhancedError = new Error(
-        `HTTP request failed: ${errorMessage} (URL: ${url.substring(0, 100)})`
-      );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (enhancedError as any).originalError = error;
-      reject(enhancedError);
-    });
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await requestOnce();
+      if (attempt < retries && shouldRetryStatus(res.status)) {
+        const delay = retryDelayMs * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < retries) {
+        const delay = retryDelayMs * Math.pow(2, attempt);
+        await sleep(delay);
+        continue;
+      }
+      throw e;
+    }
+  }
 
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error(`Request timeout after ${requestOptions.timeout}ms (URL: ${url.substring(0, 100)})`));
-    });
-
-    // 发送请求
-    req.end();
-  });
+  // unreachable, but keeps TS happy
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /**

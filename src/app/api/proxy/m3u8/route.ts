@@ -5,6 +5,38 @@ import { M3U8Cleaner } from '@/lib/m3u8-cleaner';
 
 export const runtime = 'nodejs'; // 需要访问内网地址，使用 Node.js runtime
 
+function rewriteExtXUriLine(
+  line: string,
+  baseUrl: string,
+  proxyBaseUrl: string
+): string {
+  // Rewrite URI="..." or URI='...' inside EXT-X-KEY / EXT-X-MAP, etc.
+  // Example:
+  //   #EXT-X-KEY:METHOD=AES-128,URI="https://a/b.key",IV=0x...
+  const uriAttrRegex = /URI=(?:"([^"]+)"|'([^']+)')/;
+  const m = line.match(uriAttrRegex);
+  if (!m) return line;
+
+  const rawUri = m[1] ?? m[2];
+  if (!rawUri) return line;
+
+  // Already proxied or local API path: keep as-is
+  if (rawUri.startsWith('/api/')) return line;
+
+  let absoluteUrl = rawUri;
+  try {
+    // If rawUri is relative, resolve it against baseUrl (the playlist url)
+    absoluteUrl = new URL(rawUri, baseUrl).href;
+  } catch {
+    // If resolution fails, keep original
+    return line;
+  }
+
+  const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteUrl)}`;
+  // Always rewrite to double-quoted URI to keep a consistent format
+  return line.replace(uriAttrRegex, `URI="${proxiedUrl}"`);
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const url = searchParams.get('url');
@@ -26,15 +58,28 @@ export async function GET(request: NextRequest) {
     }
 
     const contentType = response.headers['content-type'] || '';
-    
-    // 检查是否是TS片段文件（.ts文件）
-    const isTsFile = url.endsWith('.ts') || contentType.includes('video/mp2t') || contentType.includes('application/octet-stream');
-    
-    if (isTsFile) {
-      // TS文件是二进制文件，使用Buffer
-      return new NextResponse(response.body, {
+
+    // Treat TS / KEY (and generic octet-stream) as binary.
+    // NOTE: Some upstreams return AES keys with application/octet-stream.
+    let pathname = '';
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      pathname = url;
+    }
+
+    const isBinaryFile =
+      pathname.endsWith('.ts') ||
+      pathname.endsWith('.key') ||
+      contentType.includes('video/mp2t') ||
+      contentType.includes('application/octet-stream');
+
+    if (isBinaryFile) {
+      // Binary passthrough (TS / KEY / etc)
+      // NextResponse body typing doesn't accept Node.js Buffer; convert to Uint8Array (BodyInit-compatible)
+      return new NextResponse(new Uint8Array(response.body), {
         headers: {
-          'Content-Type': contentType || 'video/mp2t',
+          'Content-Type': contentType || 'application/octet-stream',
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
           'Access-Control-Allow-Headers': '*',
@@ -42,7 +87,7 @@ export async function GET(request: NextRequest) {
         },
       });
     }
-    
+
     // M3U8文件是文本文件，使用text
     const content = response.body.toString('utf-8');
 
@@ -54,12 +99,12 @@ export async function GET(request: NextRequest) {
     ) {
       // Clean the M3U8 content
       let cleanedContent = M3U8Cleaner.clean(content, url);
-      
+
       // 将m3u8文件中的所有TS片段URL也转换为代理URL，解决CORS问题
       // 获取当前请求的origin，用于构建代理URL
       // 优先使用 Host 头，避免使用 0.0.0.0 这样的无效地址
       let origin = request.headers.get('origin');
-      
+
       if (!origin) {
         // 如果没有 origin 头，尝试从 Host 头构建
         const host = request.headers.get('host');
@@ -76,19 +121,29 @@ export async function GET(request: NextRequest) {
           }
         }
       }
-      
+
       const proxyBaseUrl = `${origin}/api/proxy/m3u8`;
-      
+
       // 替换m3u8文件中的所有URL为代理URL
       const lines = cleanedContent.split('\n');
       const proxiedLines = lines.map((line) => {
         const trimmedLine = line.trim();
-        // 跳过注释和空行
-        if (trimmedLine.startsWith('#') || trimmedLine.length === 0) {
-          return line;
+        // Empty line
+        if (trimmedLine.length === 0) return line;
+
+        // Rewrite EXT-X-KEY / EXT-X-MAP URI inside tag lines to avoid CORS on key/map fetch.
+        if (
+          trimmedLine.startsWith('#EXT-X-KEY:') ||
+          trimmedLine.startsWith('#EXT-X-MAP:') ||
+          trimmedLine.startsWith('#EXT-X-I-FRAME-STREAM-INF:')
+        ) {
+          return rewriteExtXUriLine(line, url, proxyBaseUrl);
         }
-        
-        // 如果是URL行（不以#开头且不是空行）
+
+        // Keep other comment/tag lines as-is
+        if (trimmedLine.startsWith('#')) return line;
+
+        // If it's a URL line
         if (trimmedLine.startsWith('http://') || trimmedLine.startsWith('https://')) {
           // 已经是绝对URL，转换为代理URL
           const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(trimmedLine)}`;
@@ -105,7 +160,7 @@ export async function GET(request: NextRequest) {
           }
         }
       });
-      
+
       cleanedContent = proxiedLines.join('\n');
 
       return new NextResponse(cleanedContent, {
@@ -128,23 +183,23 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('[proxy] Proxy error:', error);
-    
+
     // 提供更详细的错误信息
     const errorMessage = error instanceof Error ? error.message : String(error);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const originalError = (error as any)?.originalError;
     const originalErrorMessage = originalError instanceof Error ? originalError.message : '';
-    
+
     // 检测网络错误类型
-    const isNetworkError = 
-      errorMessage.includes('ECONNREFUSED') || 
+    const isNetworkError =
+      errorMessage.includes('ECONNREFUSED') ||
       errorMessage.includes('ENOTFOUND') ||
       errorMessage.includes('ETIMEDOUT') ||
       errorMessage.includes('timeout') ||
       originalErrorMessage.includes('ECONNREFUSED') ||
       originalErrorMessage.includes('ENOTFOUND') ||
       originalErrorMessage.includes('ETIMEDOUT');
-    
+
     if (isNetworkError) {
       // eslint-disable-next-line no-console
       console.error(`[proxy] 网络错误，无法访问目标URL: ${url}`);
@@ -155,7 +210,7 @@ export async function GET(request: NextRequest) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         code: (originalError as any)?.code,
       });
-      
+
       return new NextResponse(
         JSON.stringify({
           error: '无法访问目标URL',
@@ -172,7 +227,7 @@ export async function GET(request: NextRequest) {
         }
       );
     }
-    
+
     return new NextResponse(
       JSON.stringify({
         error: '代理请求失败',

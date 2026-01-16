@@ -114,31 +114,8 @@ async function initConfig() {
     return;
   }
 
-  if (process.env.DOCKER_ENV === 'true') {
-    try {
-      // 动态导入 Node.js 模块（仅在 Node.js runtime 中执行）
-      // 使用 require 而不是 eval('require')，避免 Edge Runtime 构建错误
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require('fs') as typeof import('fs');
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const path = require('path') as typeof import('path');
-
-      // 使用 Function 构造函数动态调用 process.cwd() 以避免构建时静态分析检测
-      // 这确保在 Edge Runtime 构建时不会被检测到
-      const getCwd = new Function('return process.cwd()') as () => string;
-      const configPath = path.join(getCwd(), 'config.json');
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      fileConfig = JSON.parse(raw) as ConfigFileStruct;
-      console.log('load dynamic config success');
-    } catch (error) {
-      // 如果读取失败，使用编译时配置
-      console.warn('Failed to load config.json, using runtime config:', error);
-      fileConfig = runtimeConfig as unknown as ConfigFileStruct;
-    }
-  } else {
-    // 默认使用编译时生成的配置
-    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
-  }
+  // 不再依赖 config.json：Node runtime 也只使用编译时生成的 runtime 配置
+  fileConfig = runtimeConfig as unknown as ConfigFileStruct;
   const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
   if (storageType !== 'localstorage') {
     // 数据库存储，读取并补全管理员配置
@@ -553,34 +530,8 @@ export async function resetConfig() {
     }
   }
 
-  // Edge Runtime 中直接使用编译时配置，不读取文件
-  if (isEdgeRuntime()) {
-    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
-  } else if (process.env.DOCKER_ENV === 'true') {
-    try {
-      // 动态导入 Node.js 模块（仅在 Node.js runtime 中执行）
-      // 使用 require 而不是 eval('require')，避免 Edge Runtime 构建错误
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require('fs') as typeof import('fs');
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const path = require('path') as typeof import('path');
-
-      // 使用 Function 构造函数动态调用 process.cwd() 以避免构建时静态分析检测
-      // 这确保在 Edge Runtime 构建时不会被检测到
-      const getCwd = new Function('return process.cwd()') as () => string;
-      const configPath = path.join(getCwd(), 'config.json');
-      const raw = fs.readFileSync(configPath, 'utf-8');
-      fileConfig = JSON.parse(raw) as ConfigFileStruct;
-      console.log('load dynamic config success');
-    } catch (error) {
-      // 如果读取失败，使用编译时配置
-      console.warn('Failed to load config.json, using runtime config:', error);
-      fileConfig = runtimeConfig as unknown as ConfigFileStruct;
-    }
-  } else {
-    // 默认使用编译时生成的配置
-    fileConfig = runtimeConfig as unknown as ConfigFileStruct;
-  }
+  // 不再依赖 config.json：reset 也统一使用编译时生成的 runtime 配置
+  fileConfig = runtimeConfig as unknown as ConfigFileStruct;
 
   const apiSiteEntries = Object.entries(fileConfig.api_site);
   const customCategories = fileConfig.custom_category || [];

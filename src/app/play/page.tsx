@@ -470,12 +470,13 @@ function PlayPageClient() {
           );
 
           if (localResourceData.exists && localResourceData.metadata) {
-            // 本地资源存在，使用本地资源播放
+            // 本地资源存在：
+            // - 若当前集已下载：走本地播放
+            // - 若当前集未下载：不回退第1集；走在线/混合代理（本地优先缺失回源）
             const episodeNumber = episodeIndex + 1;
-            // 获取剧集文件路径（可能是相对路径或绝对路径）
+            const rawEpisodePath = localResourceData.metadata.episodes?.[episodeIndex];
             const episodePath =
-              localResourceData.metadata.episodes[episodeIndex] ||
-              localResourceData.metadata.episodes[0];
+              typeof rawEpisodePath === 'string' ? rawEpisodePath.trim() : '';
 
             console.log(
               `[updateVideoUrl] 剧集路径: episodeIndex=${episodeIndex}, episodePath=${episodePath}, totalEpisodes=${localResourceData.metadata.episodes.length}`
@@ -519,10 +520,29 @@ function PlayPageClient() {
               setDecrypting(false);
               setDecryptError(null);
               return;
-            } else {
-              console.warn(
-                `[updateVideoUrl] ⚠️ 本地资源存在但未找到剧集路径: episodeIndex=${episodeIndex}`
-              );
+            }
+
+            // 本地资源存在但当前集未下载：不回退第1集
+            console.warn(
+              `[updateVideoUrl] ⚠️ 本地资源存在但当前集未下载：episodeIndex=${episodeIndex}，将使用在线/混合代理`
+            );
+
+            // 如果原始 URL 是可用的 m3u8，启用混合代理：TS/KEY 本地优先、缺失回源
+            // 这样可实现“无缝越来越本地”，并避免切集/缺集误回退
+            const canHybrid =
+              typeof originalUrl === 'string' &&
+              (originalUrl.includes('.m3u8') || originalUrl.toLowerCase().includes('m3u8'));
+            if (canHybrid) {
+              const hybridUrl = `/api/local-hybrid/m3u8?source=${encodeURIComponent(
+                detailData.source
+              )}&id=${encodeURIComponent(detailData.id)}&episode=${encodeURIComponent(
+                String(episodeNumber)
+              )}&url=${encodeURIComponent(originalUrl)}`;
+              setVideoUrl(hybridUrl);
+              setIsUsingLocalResource(false);
+              setDecrypting(false);
+              setDecryptError(null);
+              return;
             }
           } else {
             console.log(
@@ -546,14 +566,52 @@ function PlayPageClient() {
       setIsUsingLocalResource(false);
 
       // 检查资源类型（优先使用 source_type 字段，兼容旧的 official_parser 配置）
+      // 不再依赖 SourceConfig：当 episodes 是站外播放页（如 *.html / youku/iqiyi/qq 等）时，自动走解析 API
+      const looksLikeWebPage = (() => {
+        try {
+          if (!originalUrl || typeof originalUrl !== 'string') return false;
+          if (
+            !(
+              originalUrl.startsWith('http://') ||
+              originalUrl.startsWith('https://')
+            )
+          ) {
+            return false;
+          }
+          const u = new URL(originalUrl);
+          const host = u.hostname.toLowerCase();
+          const p = u.pathname.toLowerCase();
+          const isHtml =
+            p.endsWith('.html') || originalUrl.toLowerCase().includes('.html#');
+          const isKnownVideoPageHost =
+            host.includes('youku.com') ||
+            host.includes('iqiyi.com') ||
+            host.includes('v.qq.com') ||
+            host.includes('mgtv.com') ||
+            host.includes('bilibili.com');
+          return isHtml || isKnownVideoPageHost;
+        } catch {
+          return false;
+        }
+      })();
+
+      // 规则（不再依赖 config.json）：
+      // 1) 若 search-independent / search stream 已标注 source_type，则以它为准
+      // 2) 若 source 直接是 official/unofficial，则以它为准
+      // 3) 兼容旧 official_parser 配置（若仍有 SourceConfig）
+      // 4) 兜底：站外播放页（*.html / youku 等）认为需要解析（official）
       const sourceType =
         detailData.source_type ||
-        (Array.isArray(sourceConfig)
-          ? sourceConfig.find((s) => s && s.key === detailData.source)
+        (detailData.source === 'official'
+          ? 'official'
+          : detailData.source === 'unofficial'
+            ? 'unofficial'
+            : sourceConfig.find((s) => s && s.key === detailData.source)
               ?.official_parser
-            ? 'official'
-            : 'unofficial'
-          : 'unofficial');
+              ? 'official'
+              : looksLikeWebPage
+                ? 'official'
+                : 'unofficial');
 
       console.log('[updateVideoUrl] 检查资源类型:', {
         source: detailData.source,
@@ -595,7 +653,10 @@ function PlayPageClient() {
               '[updateVideoUrl] ✓ 官方资源解析成功，设置videoUrl:',
               parsedUrl.substring(0, 100)
             );
-            setVideoUrl(parsedUrl);
+            // 重要：解析结果可能不是以 .m3u8 结尾（例如 /api/v1/m3u8/{id}），
+            // 此时 Artplayer 不一定会触发 customType.m3u8，导致浏览器直接跨域请求。
+            // 统一在这里强制转换为同源代理 URL，彻底规避 CORS。
+            setVideoUrl(convertToProxyUrlIfNeeded(parsedUrl, true));
             setDecrypting(false);
             setDecryptError(null);
             // 如果详情数据已就绪，立即设置loading为false，让播放器可以初始化
@@ -625,7 +686,8 @@ function PlayPageClient() {
       } else {
         // 非官方资源：直接使用m3u8地址（需要去广告，通过现有的去广告逻辑处理）
         console.log('[updateVideoUrl] 非官方资源，直接使用m3u8地址');
-        setVideoUrl(originalUrl);
+        // 同上：不依赖 URL 后缀识别，统一走同源代理，避免 CORS。
+        setVideoUrl(convertToProxyUrlIfNeeded(originalUrl, false));
         setDecrypting(false);
         setDecryptError(null);
       }
@@ -642,7 +704,7 @@ function PlayPageClient() {
     try {
       const urlObj = new URL(url);
       const hostname = urlObj.hostname;
-      
+
       // 检测内网地址模式
       return (
         hostname === 'localhost' ||
@@ -686,13 +748,13 @@ function PlayPageClient() {
     // 如果是内网地址或外部URL，需要代理
     if (isPrivate || (isExternalUrl && !url.includes('localhost') && !url.includes('127.0.0.1'))) {
       const shouldBlockAd = blockAdEnabledRef.current && !isOfficialResource;
-      
+
       if (shouldBlockAd) {
         console.log('[Player] 非官方资源，使用代理清理广告:', url.substring(0, 100));
       } else {
         console.log('[Player] 使用代理解决CORS问题:', url.substring(0, 100));
       }
-      
+
       return `/api/proxy/m3u8?url=${encodeURIComponent(url)}`;
     }
 
@@ -706,9 +768,9 @@ function PlayPageClient() {
     if (typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
-    
+
     if (!video || !url) return;
-    
+
     try {
       const sources = Array.from(video.getElementsByTagName('source'));
       const existed = sources.some((s) => s.src === url);
@@ -1061,10 +1123,9 @@ function PlayPageClient() {
   // 注意：只有当sourceConfig加载完成后才调用updateVideoUrl
   useEffect(() => {
     // SSR 安全检查：确保 sourceConfig 是数组
-    if (!Array.isArray(sourceConfig) || sourceConfig.length === 0) {
-      console.log('[PlayPage] sourceConfig未加载完成，跳过updateVideoUrl', {
+    if (!Array.isArray(sourceConfig)) {
+      console.log('[PlayPage] sourceConfig 非数组，跳过updateVideoUrl', {
         isArray: Array.isArray(sourceConfig),
-        length: sourceConfig?.length,
         sourceConfig,
       });
       return;
@@ -1085,20 +1146,8 @@ function PlayPageClient() {
       return;
     }
 
-    // 如果已经有 videoUrl 且正在使用本地资源，避免重复调用
-    if (
-      isUsingLocalResource &&
-      videoUrl &&
-      videoUrl.includes('/api/local-video')
-    ) {
-      console.log(
-        '[PlayPage] 已使用本地资源且 videoUrl 已设置，跳过updateVideoUrl',
-        {
-          videoUrl: videoUrl.substring(0, 100),
-        }
-      );
-      return;
-    }
+    // 注意：本地资源模式下也必须允许切集触发 updateVideoUrl，
+    // 否则会出现“无法切换剧集/一直停留在上一集”的问题。
 
     console.log('[PlayPage] 调用updateVideoUrl:', {
       detailSource: detail?.source,
@@ -1962,12 +2011,9 @@ function PlayPageClient() {
 
             if (localResourceData.exists && localResourceData.metadata) {
               // 本地资源存在，立即切换到本地资源
-              console.log(
-                `[PlayPage] ✓ 初始化时检测到本地资源，将优先使用本地资源播放`
-              );
-              setIsUsingLocalResource(true);
+              console.log(`[PlayPage] ✓ 初始化时检测到本地资源（将按当前集决定本地/混合/在线）`);
 
-              // 触发 updateVideoUrl 以设置本地资源 URL
+              // 触发 updateVideoUrl（内部会决定：本地 or 混合 or 在线）
               // 注意：这里需要确保 currentEpisodeIndex 已设置
               const episodeIndex = currentEpisodeIndex || 0;
               await updateVideoUrl(detailData, episodeIndex);
@@ -2499,7 +2545,9 @@ function PlayPageClient() {
       await savePlayRecord(
         currentSourceRef.current,
         currentIdRef.current,
-        playRecord
+        playRecord,
+        // 传入当前详情（episodes 等），用于 localStorage 模式下的自动下载，避免服务端依赖 config.json 拉取详情
+        detailRef.current
       );
 
       lastSaveTimeRef.current = Date.now();
@@ -2567,9 +2615,9 @@ function PlayPageClient() {
           const localResourceData = await localResourceResponse.json();
 
           if (localResourceData.exists && localResourceData.metadata) {
+            const rawEpisodePath = localResourceData.metadata.episodes?.[episodeIndex];
             const episodePath =
-              localResourceData.metadata.episodes[episodeIndex] ||
-              localResourceData.metadata.episodes[0];
+              typeof rawEpisodePath === 'string' ? rawEpisodePath.trim() : '';
 
             if (episodePath) {
               // 处理路径：episodePath 可能是绝对路径或相对路径
@@ -2605,9 +2653,11 @@ function PlayPageClient() {
                 `[PlayPage] ✓ 检测到本地资源已下载完成，切换到本地资源: ${currentSource}_${currentId}, 集数: ${episodeNumber}`
               );
 
-              // 更新视频URL
-              setVideoUrl(localPlayUrl);
+              // 更新视频URL：走统一 updateVideoUrl/播放器重建链路，避免残留状态导致切源黑屏
               setIsUsingLocalResource(true);
+              setVideoUrl(localPlayUrl);
+              // 统一走 updateVideoUrl 触发的播放链路（其中会处理本地/混合/在线）
+              // 这里不再直接调用 Artplayer.switch，确保稳定性
 
               // 清理定时器
               if (localResourceCheckIntervalRef.current) {
@@ -2745,28 +2795,7 @@ function PlayPageClient() {
     }
     console.log(videoUrl);
 
-    // 检测是否为WebKit浏览器
-    const isWebkit =
-      typeof window !== 'undefined' &&
-      typeof (window as any).webkitConvertPointFromNodeToPage === 'function';
-
-    // 非WebKit浏览器且播放器已存在，使用switch方法切换
-    if (!isWebkit && artPlayerRef.current) {
-      console.log('[Player] 非WebKit浏览器，使用switch方法切换URL:', videoUrl.substring(0, 100));
-      artPlayerRef.current.switch = videoUrl;
-      artPlayerRef.current.title = `${videoTitle} - 第${currentEpisodeIndex + 1
-        }集`;
-      artPlayerRef.current.poster = videoCover;
-      if (artPlayerRef.current?.video) {
-        ensureVideoSource(
-          artPlayerRef.current.video as HTMLVideoElement,
-          videoUrl
-        );
-      }
-      return;
-    }
-
-    // WebKit浏览器或首次创建：销毁之前的播放器实例并创建新的
+    // 稳定优先：切集/切源统一“销毁并重建”播放器与 Hls，避免 switchUrl 残留导致黑屏/不更新
     if (artPlayerRef.current) {
       console.log('[Player] 销毁旧播放器实例，准备创建新实例');
       if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
@@ -3038,8 +3067,7 @@ function PlayPageClient() {
           if (
             Math.abs(
               artPlayerRef.current.playbackRate - lastPlaybackRateRef.current
-            ) > 0.01 &&
-            isWebkit
+            ) > 0.01
           ) {
             artPlayerRef.current.playbackRate = lastPlaybackRateRef.current;
           }
@@ -3189,25 +3217,25 @@ function PlayPageClient() {
               <div className='flex justify-center space-x-2 mb-4'>
                 <div
                   className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'searching' || loadingStage === 'fetching'
-                      ? 'bg-green-500 scale-125'
-                      : loadingStage === 'preferring' ||
-                        loadingStage === 'ready'
-                        ? 'bg-green-500'
-                        : 'bg-gray-300'
+                    ? 'bg-green-500 scale-125'
+                    : loadingStage === 'preferring' ||
+                      loadingStage === 'ready'
+                      ? 'bg-green-500'
+                      : 'bg-gray-300'
                     }`}
                 ></div>
                 <div
                   className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'preferring'
-                      ? 'bg-green-500 scale-125'
-                      : loadingStage === 'ready'
-                        ? 'bg-green-500'
-                        : 'bg-gray-300'
+                    ? 'bg-green-500 scale-125'
+                    : loadingStage === 'ready'
+                      ? 'bg-green-500'
+                      : 'bg-gray-300'
                     }`}
                 ></div>
                 <div
                   className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'ready'
-                      ? 'bg-green-500 scale-125'
-                      : 'bg-gray-300'
+                    ? 'bg-green-500 scale-125'
+                    : 'bg-gray-300'
                     }`}
                 ></div>
               </div>
@@ -3357,8 +3385,8 @@ function PlayPageClient() {
               {/* 精致的状态指示点 */}
               <div
                 className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full transition-all duration-200 ${isEpisodeSelectorCollapsed
-                    ? 'bg-orange-400 animate-pulse'
-                    : 'bg-green-400'
+                  ? 'bg-orange-400 animate-pulse'
+                  : 'bg-green-400'
                   }`}
               ></div>
             </button>
@@ -3366,8 +3394,8 @@ function PlayPageClient() {
 
           <div
             className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
-                ? 'grid-cols-1'
-                : 'grid-cols-1 md:grid-cols-4'
+              ? 'grid-cols-1'
+              : 'grid-cols-1 md:grid-cols-4'
               }`}
           >
             {/* 播放器 */}
@@ -3473,8 +3501,8 @@ function PlayPageClient() {
             {/* 选集和换源 - 在移动端始终显示，在 lg 及以上可折叠 */}
             <div
               className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
-                  ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
-                  : 'md:col-span-1 lg:opacity-100 lg:scale-100'
+                ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
+                : 'md:col-span-1 lg:opacity-100 lg:scale-100'
                 }`}
             >
               <EpisodeSelector

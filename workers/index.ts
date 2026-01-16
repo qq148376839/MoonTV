@@ -183,8 +183,7 @@ const SOURCE_CONFIG = [
 ];
 
 // 敏感词配置（用于过滤）
-const YELLOW_WORDS = [
-];
+const YELLOW_WORDS: string[] = [];
 
 // 源优先级配置
 const SOURCE_PRIORITY = {
@@ -209,15 +208,56 @@ const API_CONFIG = {
 };
 
 // 辅助函数：清理HTML标签
-function cleanHtmlTags(str) {
+function cleanHtmlTags(str: string | null | undefined): string {
   if (!str) return '';
   return str.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
 }
 
+type ApiSiteConfig = {
+  key: string;
+  api: string;
+  name: string;
+  detail?: string;
+};
+
+type VodListItem = {
+  vod_id?: string | number;
+  vod_name?: string;
+  vod_pic?: string;
+  vod_play_url?: string;
+  vod_class?: string;
+  vod_year?: string | number;
+  vod_content?: string;
+  type_name?: string;
+  vod_douban_id?: string | number;
+};
+
+type VodApiResponse = {
+  list?: unknown;
+};
+
+type SearchResult = {
+  id: string;
+  title: string;
+  poster?: string;
+  episodes: string[];
+  source: string;
+  source_name: string;
+  class?: string;
+  year: string;
+  desc: string;
+  type_name?: string;
+  douban_id?: string | number;
+};
+
+type ExecutionContextLike = {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
 /**
  * 执行搜索请求
  */
-async function searchFromApi(apiSite, query) {
+async function searchFromApi(apiSite: ApiSiteConfig, query: string): Promise<SearchResult[]> {
   const startTime = Date.now();
   const apiBaseUrl = apiSite.api;
   const apiUrl = apiBaseUrl + API_CONFIG.search.path + encodeURIComponent(query);
@@ -246,7 +286,7 @@ async function searchFromApi(apiSite, query) {
       return [];
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as VodApiResponse;
     const totalTime = Date.now() - startTime;
 
     if (!data) {
@@ -254,7 +294,7 @@ async function searchFromApi(apiSite, query) {
       return [];
     }
 
-    if (!data.list) {
+    if (!('list' in data) || data.list == null) {
       console.log(`[${apiSite.key}] 返回数据格式异常，缺少list字段:`, JSON.stringify(data).substring(0, 200));
       return [];
     }
@@ -264,16 +304,18 @@ async function searchFromApi(apiSite, query) {
       return [];
     }
 
-    if (data.list.length === 0) {
+    const list = data.list as VodListItem[];
+
+    if (list.length === 0) {
       console.log(`[${apiSite.key}] 返回0条结果 (耗时: ${totalTime}ms)`);
       return [];
     }
 
-    console.log(`[${apiSite.key}] 成功获取 ${data.list.length} 条结果 (耗时: ${totalTime}ms)`);
+    console.log(`[${apiSite.key}] 成功获取 ${list.length} 条结果 (耗时: ${totalTime}ms)`);
 
     // 处理结果
-    return data.list.map((item) => {
-      let episodes = [];
+    return list.map((item: VodListItem): SearchResult => {
+      let episodes: string[] = [];
 
       if (item.vod_play_url) {
         // 使用正则表达式从 vod_play_url 提取 m3u8 链接
@@ -281,14 +323,14 @@ async function searchFromApi(apiSite, query) {
         // 先用 $$$ 分割
         const vod_play_url_array = item.vod_play_url.split('$$$');
         // 对每个分片做匹配，取匹配到最多的作为结果
-        vod_play_url_array.forEach((url) => {
+        vod_play_url_array.forEach((url: string) => {
           const matches = url.match(m3u8Regex) || [];
           if (matches.length > episodes.length) {
             episodes = matches;
           }
         });
 
-        episodes = Array.from(new Set(episodes)).map((link) => {
+        episodes = Array.from(new Set(episodes)).map((link: string) => {
           link = link.substring(1); // 去掉开头的 $
           const parenIndex = link.indexOf('(');
           return parenIndex > 0 ? link.substring(0, parenIndex) : link;
@@ -296,14 +338,14 @@ async function searchFromApi(apiSite, query) {
       }
 
       return {
-        id: item.vod_id.toString(),
-        title: item.vod_name.trim().replace(/\s+/g, ' '),
+        id: item.vod_id != null ? String(item.vod_id) : '',
+        title: (item.vod_name ?? '').trim().replace(/\s+/g, ' '),
         poster: item.vod_pic,
         episodes,
         source: apiSite.key,
         source_name: apiSite.name,
         class: item.vod_class,
-        year: item.vod_year ? item.vod_year.match(/\d{4}/)?.[0] || '' : 'unknown',
+        year: item.vod_year != null ? String(item.vod_year).match(/\d{4}/)?.[0] || '' : 'unknown',
         desc: cleanHtmlTags(item.vod_content || ''),
         type_name: item.type_name,
         douban_id: item.vod_douban_id,
@@ -325,7 +367,7 @@ async function searchFromApi(apiSite, query) {
  * Cloudflare Worker 主逻辑
  */
 const worker = {
-  async fetch(request, env, ctx) {
+  async fetch(request: Request, env: unknown, ctx: ExecutionContextLike) {
     const url = new URL(request.url);
     const query = url.searchParams.get('q');
 
@@ -406,7 +448,7 @@ const worker = {
 
               if (filteredResults.length > 0) {
                 // 去重（使用同步操作确保并发安全）
-                const newResults = [];
+                const newResults: SearchResult[] = [];
                 for (const result of filteredResults) {
                   const key = `${result.source}-${result.id}`;
                   if (!seenResults.has(key)) {

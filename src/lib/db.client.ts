@@ -512,7 +512,17 @@ export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
 export async function savePlayRecord(
   source: string,
   id: string,
-  record: PlayRecord
+  record: PlayRecord,
+  resource?: {
+    source: string;
+    id: string;
+    title?: string;
+    year?: string;
+    poster?: string;
+    source_name?: string;
+    source_type?: 'official' | 'unofficial';
+    episodes?: string[];
+  }
 ): Promise<void> {
   const key = generateStorageKey(source, id);
 
@@ -576,7 +586,8 @@ export async function savePlayRecord(
       triggerAutoDownloadForLocalStorage(
         record.source,
         record.id,
-        record.index
+        record.index,
+        resource
       ).catch((error) => {
         console.warn('[LocalStorage] 自动下载触发失败:', error);
       });
@@ -594,7 +605,17 @@ export async function savePlayRecord(
 async function triggerAutoDownloadForLocalStorage(
   source: string,
   id: string,
-  currentIndex: number
+  currentIndex: number,
+  resource?: {
+    source: string;
+    id: string;
+    title?: string;
+    year?: string;
+    poster?: string;
+    source_name?: string;
+    source_type?: 'official' | 'unofficial';
+    episodes?: string[];
+  }
 ): Promise<void> {
   try {
     console.log(
@@ -614,6 +635,8 @@ async function triggerAutoDownloadForLocalStorage(
         source,
         id,
         auto_download: false,
+        // 优先传入当前播放页已获取到的详情，避免服务端依赖 config.json 拉取详情失败
+        resource,
         episode_range: {
           start: currentIndex,
           end: currentIndex + downloadNextEpisodes,

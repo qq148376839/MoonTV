@@ -27,7 +27,15 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { source, id, episodes, auto_download, episode_range } = body;
+    const {
+      source,
+      id,
+      episodes,
+      auto_download,
+      episode_range,
+      // 可选：由前端直接传入完整详情（用于不依赖 config.json / 非标准源导致的详情拉取失败）
+      resource: resourceFromClient,
+    } = body;
 
     console.log('[Download API] 请求参数:', {
       source,
@@ -45,30 +53,67 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 获取资源详情
-    const apiSites = await getAvailableApiSites();
-    const apiSite = apiSites.find((s) => s.key === source);
-
-    if (!apiSite) {
-      return NextResponse.json(
-        { error: '未找到对应的源配置' },
-        { status: 404 }
-      );
-    }
-
     let resource: SearchResult;
-    try {
-      resource = await getDetailFromApi(apiSite, id);
-    } catch (error) {
-      console.error('[Download API] 获取资源详情失败:', error);
-      return NextResponse.json({ error: '获取资源详情失败' }, { status: 500 });
+    // 1) 优先使用前端传入的详情（避免依赖 config.json）
+    if (
+      resourceFromClient &&
+      typeof resourceFromClient === 'object' &&
+      (resourceFromClient as SearchResult).source === source &&
+      (resourceFromClient as SearchResult).id === id &&
+      Array.isArray((resourceFromClient as SearchResult).episodes) &&
+      (resourceFromClient as SearchResult).episodes.length > 0
+    ) {
+      const raw = resourceFromClient as SearchResult;
+      const safeEpisodes = raw.episodes.filter(
+        (u) =>
+          typeof u === 'string' &&
+          (u.startsWith('http://') || u.startsWith('https://'))
+      );
+      resource = {
+        ...raw,
+        episodes: safeEpisodes,
+      };
+    } else {
+      // 2) 回退：从配置中找源并拉取详情（兼容旧部署）
+      const apiSites = await getAvailableApiSites();
+      const apiSite = apiSites.find((s) => s.key === source);
+
+      if (!apiSite) {
+        return NextResponse.json(
+          {
+            error:
+              '未找到对应的源配置，且未提供 resource 详情（请从播放页/搜索结果传入 detail 后重试）',
+          },
+          { status: 400 }
+        );
+      }
+
+      try {
+        resource = await getDetailFromApi(apiSite, id, request.url);
+      } catch (error) {
+        console.error('[Download API] 获取资源详情失败:', error);
+        return NextResponse.json(
+          {
+            error: '获取资源详情失败',
+            details: error instanceof Error ? error.message : String(error),
+          },
+          { status: 500 }
+        );
+      }
     }
 
-    // 确定要下载的剧集
+    // 确定要下载的剧集 + 对应“真实集号”（1-based）
     let episodesToDownload: string[] = [];
+    let episodeNumbers: number[] = [];
     if (episodes && Array.isArray(episodes) && episodes.length > 0) {
       // 使用提供的剧集列表
       episodesToDownload = episodes;
+      // 尝试映射到 resource.episodes 中的真实集号
+      const urlToNo = new Map<string, number>();
+      resource.episodes.forEach((u, idx) => {
+        if (!urlToNo.has(u)) urlToNo.set(u, idx + 1);
+      });
+      episodeNumbers = episodesToDownload.map((u, i) => urlToNo.get(u) ?? i + 1);
     } else if (episode_range && typeof episode_range === 'object') {
       // 使用剧集范围（用于自动下载）
       const { start, end } = episode_range;
@@ -79,15 +124,18 @@ export async function POST(request: NextRequest) {
         end || resource.episodes.length
       );
       episodesToDownload = resource.episodes.slice(startIndex, endIndex);
+      episodeNumbers = episodesToDownload.map((_, i) => startIndex + i + 1);
       console.log(
         `[Download API] episode_range 处理: start=${start}, end=${end}, startIndex=${startIndex}, endIndex=${endIndex}, 总剧集数=${resource.episodes.length}, 将下载=${episodesToDownload.length}集`
       );
     } else if (auto_download) {
       // 自动下载所有剧集
       episodesToDownload = resource.episodes;
+      episodeNumbers = episodesToDownload.map((_, i) => i + 1);
     } else {
       // 默认下载第一集
       episodesToDownload = resource.episodes.slice(0, 1);
+      episodeNumbers = [1];
     }
 
     if (episodesToDownload.length === 0) {
@@ -99,7 +147,7 @@ export async function POST(request: NextRequest) {
     );
 
     // 创建下载任务（内部会检查是否有重复任务或已完全下载）
-    const task = downloadService.createTask(resource, episodesToDownload);
+    const task = downloadService.createTask(resource, episodesToDownload, episodeNumbers);
 
     // 检查任务状态
     let message = '下载任务已创建';
@@ -140,6 +188,7 @@ export async function POST(request: NextRequest) {
         task_id: task.id,
         status: task.status,
         progress: task.progress,
+        episode_numbers: episodeNumbers,
         message,
         is_existing: isExistingTask,
         is_already_downloaded: isAlreadyDownloaded,
@@ -202,6 +251,12 @@ export async function GET(request: NextRequest) {
             task_id: task.id,
             source: task.source,
             id: task.resourceId,
+            title: task.resource?.title,
+            year: task.resource?.year,
+            poster: task.resource?.poster,
+            episode_numbers: Array.isArray(task.episodeNumbers)
+              ? task.episodeNumbers
+              : undefined,
             status: task.status,
             progress: task.progress,
             error: task.error,
@@ -257,5 +312,65 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error('[Download API] 取消任务失败:', error);
     return NextResponse.json({ error: '取消任务失败' }, { status: 500 });
+  }
+}
+
+/**
+ * PATCH /api/download - 任务暂停/恢复
+ * body: { task_id: string, action: "pause" | "resume" }
+ */
+export async function PATCH(request: NextRequest) {
+  try {
+    const downloadService = getDownloadService();
+
+    if (!downloadService.isEnabled()) {
+      return NextResponse.json(
+        { error: '本地存储功能未启用' },
+        { status: 503 }
+      );
+    }
+
+    const body = await request.json();
+    const taskId = body?.task_id;
+    const action = body?.action;
+
+    if (!taskId || (action !== 'pause' && action !== 'resume')) {
+      return NextResponse.json(
+        { error: '缺少必要参数: task_id / action(pause|resume)' },
+        { status: 400 }
+      );
+    }
+
+    const ok =
+      action === 'pause'
+        ? downloadService.pauseTask(taskId)
+        : downloadService.resumeTask(taskId);
+
+    if (!ok) {
+      return NextResponse.json(
+        { error: '任务不存在或当前状态不允许该操作' },
+        { status: 400 }
+      );
+    }
+
+    const task = downloadService.getTask(taskId);
+    return NextResponse.json(
+      {
+        success: true,
+        task_id: taskId,
+        status: task?.status,
+        progress: task?.progress,
+      },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error('[Download API] PATCH 任务操作失败:', error);
+    return NextResponse.json(
+      {
+        error: '任务操作失败',
+        details: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 }
+    );
   }
 }

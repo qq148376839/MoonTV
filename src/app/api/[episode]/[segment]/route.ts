@@ -35,7 +35,8 @@ export async function GET(
 
     // 验证参数格式
     const episodePattern = /^episode_\d+$/;
-    const segmentPattern = /^segment_\d+\.ts$/;
+    // 支持 TS 与 KEY（本地下载器会将 EXT-X-KEY URI 改写为 episode_XX/key_000.key）
+    const segmentPattern = /^(segment_\d+\.ts|key_\d+\.key)$/;
 
     if (!episodePattern.test(episode) || !segmentPattern.test(segment)) {
       return NextResponse.json({ error: '无效的路径格式' }, { status: 400 });
@@ -348,8 +349,9 @@ export async function GET(
       return NextResponse.json({ error: '路径不是文件' }, { status: 400 });
     }
 
-    // 处理 Range 请求（支持视频拖拽播放）
-    const range = request.headers.get('range');
+    const isKey = segment.toLowerCase().endsWith('.key');
+    // 处理 Range 请求（支持视频拖拽播放，仅 TS 需要）
+    const range = !isKey ? request.headers.get('range') : null;
     const fileSize = stats.size;
 
     // 读取文件
@@ -385,13 +387,18 @@ export async function GET(
     }
 
     // 设置 MIME 类型
-    headers['Content-Type'] = 'video/mp2t';
+    headers['Content-Type'] = isKey ? 'application/octet-stream' : 'video/mp2t';
 
-    // 读取文件片段
-    const fileBuffer = Buffer.alloc(end - start + 1);
-    const fileDescriptor = fs.openSync(resolvedPath, 'r');
-    fs.readSync(fileDescriptor, fileBuffer, 0, fileBuffer.length, start);
-    fs.closeSync(fileDescriptor);
+    // 读取文件片段（key 不做 range）
+    const fileBuffer = isKey ? fs.readFileSync(resolvedPath) : Buffer.alloc(end - start + 1);
+    if (!isKey) {
+      const fileDescriptor = fs.openSync(resolvedPath, 'r');
+      fs.readSync(fileDescriptor, fileBuffer, 0, fileBuffer.length, start);
+      fs.closeSync(fileDescriptor);
+    } else {
+      // key 全量返回，覆盖 Content-Length
+      headers['Content-Length'] = String(fileBuffer.length);
+    }
 
     // 返回响应
     return new NextResponse(fileBuffer, {

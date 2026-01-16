@@ -2,11 +2,6 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 const nextConfig = {
   output: 'standalone',
-  eslint: {
-    dirs: ['src'],
-    // 构建时忽略 ESLint 错误，减少内存消耗
-    ignoreDuringBuilds: false,
-  },
   typescript: {
     // 构建时忽略 TypeScript 错误，减少内存消耗
     // 建议在 CI/CD 中单独运行类型检查
@@ -15,11 +10,10 @@ const nextConfig = {
   },
 
   reactStrictMode: false,
-  swcMinify: true,
 
   // Next.js 16 默认使用 Turbopack，但项目中有 webpack 配置
-  // 设置空的 turbopack 配置以禁用 Turbopack，使用 webpack
-  turbopack: {},
+  // 固定 Turbopack 根目录，避免在存在多个 lockfile 时被错误推断为上级目录
+  turbopack: { root: __dirname },
 
   // 优化构建性能
   experimental: {

@@ -505,9 +505,15 @@ export class StorageManager {
       return relativePath.replace(/\\/g, '/');
     };
 
-    // 规范化所有路径
-    const normalizedEpisodes = episodes.map(normalizePath);
+    // 规范化所有路径（允许占位：''）
+    const normalizedEpisodes = Array.isArray(episodes)
+      ? episodes.map((p) => (typeof p === 'string' ? normalizePath(p) : ''))
+      : [];
     const normalizedLocalPath = normalizePath(localPath);
+
+    const downloadedCount = normalizedEpisodes.filter(
+      (p) => typeof p === 'string' && p.trim().length > 0
+    ).length;
 
     const metadata: LocalResourceMetadata = {
       id: `local_${resource.source}_${resource.id}`,
@@ -524,12 +530,17 @@ export class StorageManager {
       local_path: normalizedLocalPath,
       download_time: Date.now(),
       file_size: fileSize,
-      episode_count: episodes.length,
-      episodes_info: normalizedEpisodes.map((ep, index) => ({
-        index: index + 1,
-        file_path: ep,
-        file_size: 0, // 将在下载完成后更新
-      })),
+      // 语义：已下载集数（与 /api/local-library/detail 的口径一致）
+      episode_count: downloadedCount,
+      // 仅记录已下载的集（避免占位污染）
+      episodes_info: normalizedEpisodes
+        .map((ep, index) => ({ ep, index }))
+        .filter((x) => typeof x.ep === 'string' && x.ep.trim().length > 0)
+        .map((x) => ({
+          index: x.index + 1,
+          file_path: x.ep,
+          file_size: 0, // 将在下载完成后更新
+        })),
     };
 
     // 写入元数据文件
