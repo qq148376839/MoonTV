@@ -10,15 +10,20 @@ export const runtime = 'nodejs';
 
 /**
  * 触发自动下载（异步，不阻塞）
+ * @param source 资源源标识
+ * @param id 资源ID
+ * @param currentIndex 当前集数（从1开始，PlayRecord格式）
+ * @param totalEpisodes 总集数（用于判断是电影还是连续剧）
  */
 async function triggerAutoDownload(
   source: string,
   id: string,
-  currentIndex: number
+  currentIndex: number,
+  totalEpisodes: number
 ): Promise<void> {
   try {
     console.log(
-      `[PlayRecords] 开始触发自动下载: ${source}_${id}, 当前集数: ${currentIndex}`
+      `[PlayRecords] 开始触发自动下载: ${source}_${id}, 当前集数: ${currentIndex}, 总集数: ${totalEpisodes}`
     );
 
     // 获取基础 URL（用于构建下载 API 路径）
@@ -37,21 +42,45 @@ async function triggerAutoDownload(
       DOCKER_ENV: process.env.DOCKER_ENV,
     });
 
-    // 计算下载范围：当前集数 + 下2集
-    const downloadNextEpisodes = parseInt(
-      process.env.LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT || '2',
-      10
-    );
+    // 判断是电影还是连续剧
+    // 电影：total_episodes === 1，只下载当前集
+    // 连续剧：total_episodes > 1，下载当前集 + 下2集
+    const isMovie = totalEpisodes === 1;
+    
+    // PlayRecord.index 是从1开始的，需要转换为0-based（episodes数组索引）
+    const episodeIndex = currentIndex - 1;
+    
+    let episodeRange: { start: number; end: number };
+    if (isMovie) {
+      // 电影：只下载当前集
+      episodeRange = {
+        start: episodeIndex,
+        end: episodeIndex,
+      };
+      console.log(
+        `[PlayRecords] 检测到电影，只下载当前集: ${episodeIndex}`
+      );
+    } else {
+      // 连续剧：下载当前集 + 下2集
+      const downloadNextEpisodes = parseInt(
+        process.env.LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT || '2',
+        10
+      );
+      episodeRange = {
+        start: episodeIndex,
+        end: episodeIndex + downloadNextEpisodes,
+      };
+      console.log(
+        `[PlayRecords] 检测到连续剧，下载范围: ${episodeRange.start} - ${episodeRange.end}`
+      );
+    }
 
     const downloadUrl = `${baseUrl}/api/download`;
     const requestBody = {
       source,
       id,
       auto_download: false, // 不自动下载所有，只下载指定范围
-      episode_range: {
-        start: currentIndex,
-        end: currentIndex + downloadNextEpisodes,
-      },
+      episode_range: episodeRange,
     };
 
     console.log(`[PlayRecords] 调用下载 API: ${downloadUrl}`, requestBody);
@@ -184,14 +213,18 @@ export async function POST(request: NextRequest) {
 
     if (shouldAutoDownload) {
       console.log(
-        `[PlayRecords] 触发自动下载: ${finalSource}_${finalId}, 集数: ${finalRecord.index}`
+        `[PlayRecords] 触发自动下载: ${finalSource}_${finalId}, 集数: ${finalRecord.index}, 总集数: ${finalRecord.total_episodes}`
       );
       // 异步触发下载，不等待结果
-      triggerAutoDownload(finalSource, finalId, finalRecord.index).catch(
-        (error) => {
-          console.error('[PlayRecords] 自动下载触发失败:', error);
-        }
-      );
+      // 传入 total_episodes 用于判断是电影还是连续剧
+      triggerAutoDownload(
+        finalSource,
+        finalId,
+        finalRecord.index,
+        finalRecord.total_episodes
+      ).catch((error) => {
+        console.error('[PlayRecords] 自动下载触发失败:', error);
+      });
     } else {
       console.log('[PlayRecords] 跳过自动下载:', {
         reason: !autoDownloadEnabled
