@@ -33,6 +33,9 @@ export async function POST(request: NextRequest) {
       episodes,
       auto_download,
       episode_range,
+      episode_numbers,
+      auto_download_next,
+      current_episode,
       // 可选：由前端直接传入完整详情（用于不依赖 config.json / 非标准源导致的详情拉取失败）
       resource: resourceFromClient,
     } = body;
@@ -43,6 +46,9 @@ export async function POST(request: NextRequest) {
       hasEpisodes: !!episodes,
       auto_download,
       episode_range,
+      hasEpisodeNumbers: Array.isArray(episode_numbers) && episode_numbers.length > 0,
+      auto_download_next,
+      current_episode,
     });
 
     if (!source || !id) {
@@ -105,7 +111,20 @@ export async function POST(request: NextRequest) {
     // 确定要下载的剧集 + 对应“真实集号”（1-based）
     let episodesToDownload: string[] = [];
     let episodeNumbers: number[] = [];
-    if (episodes && Array.isArray(episodes) && episodes.length > 0) {
+    if (Array.isArray(episode_numbers) && episode_numbers.length > 0) {
+      // 使用原始集号（1-based）
+      const nums = episode_numbers
+        .map((n: unknown) => Number(n))
+        .filter((n) => Number.isFinite(n) && n >= 1)
+        .map((n) => Math.floor(n))
+        .filter((n) => n <= resource.episodes.length);
+
+      const uniqueSorted = Array.from(new Set(nums)).sort((a, b) => a - b);
+      episodesToDownload = uniqueSorted
+        .map((n) => resource.episodes[n - 1])
+        .filter(Boolean);
+      episodeNumbers = uniqueSorted;
+    } else if (episodes && Array.isArray(episodes) && episodes.length > 0) {
       // 使用提供的剧集列表
       episodesToDownload = episodes;
       // 尝试映射到 resource.episodes 中的真实集号
@@ -128,6 +147,33 @@ export async function POST(request: NextRequest) {
       console.log(
         `[Download API] episode_range 处理: start=${start}, end=${end}, startIndex=${startIndex}, endIndex=${endIndex}, 总剧集数=${resource.episodes.length}, 将下载=${episodesToDownload.length}集`
       );
+    } else if (auto_download_next) {
+      const n = Math.max(
+        0,
+        Math.min(
+          50,
+          Number(process.env.LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT || '2') || 2
+        )
+      );
+      const cur = Math.max(1, Number(current_episode || 1));
+      const startNo = cur + 1;
+      const endNo = Math.min(resource.episodes.length, cur + n);
+
+      if (n <= 0) {
+        return NextResponse.json(
+          { error: '自动下载后续集数配置无效（LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT）' },
+          { status: 400 }
+        );
+      }
+      if (startNo > resource.episodes.length) {
+        return NextResponse.json(
+          { error: '当前已是最后一集，没有可下载的后续剧集' },
+          { status: 400 }
+        );
+      }
+
+      episodesToDownload = resource.episodes.slice(startNo - 1, endNo);
+      episodeNumbers = episodesToDownload.map((_, i) => startNo + i);
     } else if (auto_download) {
       // 自动下载所有剧集
       episodesToDownload = resource.episodes;
@@ -171,7 +217,7 @@ export async function POST(request: NextRequest) {
     } else if (Date.now() - task.createdAt > 1000) {
       // 现有任务
       isExistingTask = true;
-      message = '已存在相同下载任务，返回现有任务';
+      message = '下载任务进行中，可在「离线」查看进度';
       console.log(
         `[Download API] ⚠️ 返回现有下载任务: ${task.id}, 状态: ${task.status}`
       );

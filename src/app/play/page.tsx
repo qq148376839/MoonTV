@@ -4,7 +4,7 @@
 
 import Artplayer from 'artplayer';
 import Hls from 'hls.js';
-import { Heart } from 'lucide-react';
+import { Download, Heart } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
@@ -27,6 +27,7 @@ import { searchCacheManager } from '@/lib/search-cache';
 import { SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 
+import DownloadConfirmDialog from '@/components/DownloadConfirmDialog';
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
 
@@ -115,6 +116,13 @@ function PlayPageClient() {
   }, [needPrefer]);
   // 集数相关
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(0);
+
+  type EpisodeDownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded' | 'failed';
+  const [episodeStatusMap, setEpisodeStatusMap] = useState<Record<number, EpisodeDownloadStatus>>(
+    {}
+  );
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [downloadButtonText, setDownloadButtonText] = useState('下载');
 
   const currentSourceRef = useRef(currentSource);
   const currentIdRef = useRef(currentId);
@@ -1198,7 +1206,13 @@ function PlayPageClient() {
         if (cachedDetail) {
           // eslint-disable-next-line no-console
           console.log(`[DetailCache] 缓存命中: ${source}:${id}`);
-          setAvailableSources([cachedDetail]);
+          // 不要把换源列表“缩成 1 个”，只在必要时合并/补齐
+          setAvailableSources((prev) => {
+            const arr = Array.isArray(prev) ? prev : [];
+            const key = `${cachedDetail.source}-${cachedDetail.id}`;
+            const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+            return existed ? arr : [...arr, cachedDetail];
+          });
           return [cachedDetail];
         }
 
@@ -1219,7 +1233,13 @@ function PlayPageClient() {
             `[fetchSourceDetail] 在 availableSources 中找到: ${source}:${id}`
           );
           detailCacheManager.cacheDetail(source, id, foundInAvailable);
-          setAvailableSources([foundInAvailable]);
+          // 保持换源列表，不要缩成单个
+          setAvailableSources((prev) => {
+            const arr = Array.isArray(prev) ? prev : [];
+            const key = `${foundInAvailable.source}-${foundInAvailable.id}`;
+            const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+            return existed ? arr : [...arr, foundInAvailable];
+          });
           return [foundInAvailable];
         }
 
@@ -1246,7 +1266,12 @@ function PlayPageClient() {
                     `[fetchSourceDetail] 在 sessionStorage 中找到: ${source}:${id}`
                   );
                   detailCacheManager.cacheDetail(source, id, found);
-                  setAvailableSources([found]);
+                  setAvailableSources((prev) => {
+                    const arr = Array.isArray(prev) ? prev : [];
+                    const key = `${found.source}-${found.id}`;
+                    const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                    return existed ? arr : [...arr, found];
+                  });
                   return [found];
                 }
               }
@@ -1271,7 +1296,12 @@ function PlayPageClient() {
                 `[fetchSourceDetail] 在搜索缓存中找到: ${source}:${id}`
               );
               detailCacheManager.cacheDetail(source, id, found);
-              setAvailableSources([found]);
+              setAvailableSources((prev) => {
+                const arr = Array.isArray(prev) ? prev : [];
+                const key = `${found.source}-${found.id}`;
+                const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                return existed ? arr : [...arr, found];
+              });
               return [found];
             }
           }
@@ -1333,7 +1363,12 @@ function PlayPageClient() {
                         `[fetchSourceDetail] 在 sessionStorage 中找到: ${source}:${id}`
                       );
                       detailCacheManager.cacheDetail(source, id, found);
-                      setAvailableSources([found]);
+                      setAvailableSources((prev) => {
+                        const arr = Array.isArray(prev) ? prev : [];
+                        const key = `${found.source}-${found.id}`;
+                        const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                        return existed ? arr : [...arr, found];
+                      });
                       return [found];
                     }
                   }
@@ -1357,7 +1392,12 @@ function PlayPageClient() {
                     `[fetchSourceDetail] 在搜索缓存中找到: ${source}:${id}`
                   );
                   detailCacheManager.cacheDetail(source, id, found);
-                  setAvailableSources([found]);
+                  setAvailableSources((prev) => {
+                    const arr = Array.isArray(prev) ? prev : [];
+                    const key = `${found.source}-${found.id}`;
+                    const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                    return existed ? arr : [...arr, found];
+                  });
                   return [found];
                 }
               }
@@ -1370,7 +1410,12 @@ function PlayPageClient() {
         // 缓存详情供下次使用
         detailCacheManager.cacheDetail(source, id, detailData);
 
-        setAvailableSources([detailData]);
+        setAvailableSources((prev) => {
+          const arr = Array.isArray(prev) ? prev : [];
+          const key = `${detailData.source}-${detailData.id}`;
+          const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+          return existed ? arr : [...arr, detailData];
+        });
         return [detailData];
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -1645,6 +1690,43 @@ function PlayPageClient() {
             setVideoTitle(finalTitle);
             setVideoCover(cachedDetail.poster);
 
+            // 【关键修复】优先从 search_results_{stitle} 恢复多源（非聚合场景）
+            // 之前只读 video_sources_*（仅聚合写入），导致换源必然只有一个源
+            if (typeof window !== 'undefined') {
+              try {
+                const q = (urlSearchTitle || urlTitle || '').trim();
+                if (q) {
+                  const cached = sessionStorage.getItem(`search_results_${q}`);
+                  if (cached) {
+                    const parsed = JSON.parse(cached);
+                    const isExpired =
+                      Number.isFinite(parsed?.timestamp) &&
+                      Date.now() - parsed.timestamp > 5 * 60 * 1000;
+                    const raw = !isExpired && Array.isArray(parsed?.results) ? parsed.results : [];
+                    const targetTitle = (cachedDetail.title || urlTitle || '').replaceAll(' ', '').toLowerCase();
+                    const targetYear = (cachedDetail.year || urlYear || '').toLowerCase();
+                    const filtered = raw.filter((r: SearchResult) => {
+                      if (!r || !Array.isArray(r.episodes)) return false;
+                      const titleOk =
+                        (r.title || '').replaceAll(' ', '').toLowerCase() === targetTitle;
+                      const yearOk = targetYear ? (r.year || '').toLowerCase() === targetYear : true;
+                      const typeOk = searchType
+                        ? (searchType === 'tv' && r.episodes.length > 1) ||
+                          (searchType === 'movie' && r.episodes.length === 1)
+                        : true;
+                      return titleOk && yearOk && typeOk;
+                    });
+                    if (filtered.length > 0) {
+                      setAvailableSources(filtered);
+                      sourcesInfo = filtered;
+                    }
+                  }
+                }
+              } catch {
+                // ignore
+              }
+            }
+
             // 【新增】尝试从 sessionStorage 读取聚合的源数据（仅在客户端）
             if (typeof window !== 'undefined') {
               try {
@@ -1683,7 +1765,10 @@ function PlayPageClient() {
                     sourcesInfo = parsed.items; // 更新 sourcesInfo 以便后续处理
                   } else {
                     console.warn('[PlayPage] 聚合数据格式不正确');
-                    setAvailableSources([cachedDetail]);
+                    // 若前面已从 search_results 恢复过多源，则不要回退成单源
+                    if (!Array.isArray(sourcesInfo) || sourcesInfo.length <= 1) {
+                      setAvailableSources([cachedDetail]);
+                    }
                   }
                 } else {
                   console.log(
@@ -1691,11 +1776,16 @@ function PlayPageClient() {
                       ', '
                     )}`
                   );
-                  setAvailableSources([cachedDetail]);
+                  // 若前面已从 search_results 恢复过多源，则不要回退成单源
+                  if (!Array.isArray(sourcesInfo) || sourcesInfo.length <= 1) {
+                    setAvailableSources([cachedDetail]);
+                  }
                 }
               } catch (err) {
                 console.warn('[PlayPage] 读取聚合数据失败，使用单个源:', err);
-                setAvailableSources([cachedDetail]);
+                if (!Array.isArray(sourcesInfo) || sourcesInfo.length <= 1) {
+                  setAvailableSources([cachedDetail]);
+                }
               }
             }
 
@@ -2376,6 +2466,103 @@ function PlayPageClient() {
       setCurrentEpisodeIndex(episodeNumber);
     }
   };
+
+  // ---------------------------------------------------------------------------
+  // 下载状态轮询（播放页轻量轮询）
+  // ---------------------------------------------------------------------------
+  const downloadPollRef = useRef<number | null>(null);
+
+  const refreshEpisodeDownloadStatus = useCallback(async () => {
+    try {
+      if (!currentSourceRef.current || !currentIdRef.current || !detailRef.current) return;
+      const source = currentSourceRef.current;
+      const id = currentIdRef.current;
+      const total = detailRef.current?.episodes?.length || 0;
+      if (!total) return;
+
+      // 1) 拉取相关下载任务
+      const taskRes = await fetch('/api/download', { cache: 'no-store' });
+      const taskJson = taskRes.ok ? await taskRes.json() : null;
+      const tasks = Array.isArray(taskJson?.tasks) ? taskJson.tasks : [];
+      const related = tasks.filter((t: any) => t?.source === source && t?.id === id);
+
+      const hasActiveTask = related.some((t: any) =>
+        ['pending', 'downloading', 'paused'].includes(String(t?.status))
+      );
+
+      // 2) 若本地资源存在，拉取每集文件存在性（最可靠）
+      const localRes = await fetch(
+        `/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
+        { cache: 'no-store' }
+      );
+      const localJson = localRes.ok ? await localRes.json() : null;
+      let downloadedSet = new Set<number>();
+      if (localJson?.exists) {
+        const detailRes = await fetch(
+          `/api/local-library/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
+          { cache: 'no-store' }
+        );
+        const detailJson = detailRes.ok ? await detailRes.json() : null;
+        const episodeStatusArr = Array.isArray(detailJson?.episode_status)
+          ? detailJson.episode_status
+          : [];
+        downloadedSet = new Set<number>(
+          episodeStatusArr.filter((e: any) => e?.downloaded).map((e: any) => Number(e?.episode))
+        );
+      }
+
+      // 3) 组装状态 map（key 为 1-based 集号）
+      const nextMap: Record<number, EpisodeDownloadStatus> = {};
+      for (let ep = 1; ep <= total; ep++) {
+        nextMap[ep] = downloadedSet.has(ep) ? 'downloaded' : 'not_downloaded';
+      }
+
+      for (const t of related) {
+        const status = String(t?.status || '');
+        const eps = Array.isArray(t?.episode_numbers) ? t.episode_numbers : [];
+        for (const raw of eps) {
+          const ep = Number(raw);
+          if (!Number.isFinite(ep) || ep < 1 || ep > total) continue;
+          // 已下载优先展示 downloaded
+          if (nextMap[ep] === 'downloaded') continue;
+          if (status === 'failed') nextMap[ep] = 'failed';
+          else if (status === 'pending' || status === 'downloading' || status === 'paused')
+            nextMap[ep] = 'downloading';
+        }
+      }
+
+      setEpisodeStatusMap(nextMap);
+
+      const downloadedCount = Object.values(nextMap).filter((s) => s === 'downloaded').length;
+      if (downloadedCount >= total && total > 0) setDownloadButtonText('已下载');
+      else if (Object.values(nextMap).some((s) => s === 'downloading')) setDownloadButtonText('下载中');
+      else setDownloadButtonText('下载');
+
+      // 调整轮询：有进行中任务才轮询；否则停止
+      if (hasActiveTask) {
+        if (!downloadPollRef.current) {
+          downloadPollRef.current = window.setInterval(refreshEpisodeDownloadStatus, 2000);
+        }
+      } else {
+        if (downloadPollRef.current) {
+          window.clearInterval(downloadPollRef.current);
+          downloadPollRef.current = null;
+        }
+      }
+    } catch {
+      // ignore（轻量轮询失败不阻塞播放）
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshEpisodeDownloadStatus();
+    return () => {
+      if (downloadPollRef.current) {
+        window.clearInterval(downloadPollRef.current);
+        downloadPollRef.current = null;
+      }
+    };
+  }, [currentSource, currentId, detail, refreshEpisodeDownloadStatus]);
 
   const handlePreviousEpisode = () => {
     const d = detailRef.current;
@@ -3404,6 +3591,17 @@ function PlayPageClient() {
                 }`}
             >
               <div className='relative w-full h-[300px] lg:h-full'>
+                {/* 播放器右上角：下载入口 */}
+                {detail && currentSource && currentId && (
+                  <button
+                    onClick={() => setDownloadDialogOpen(true)}
+                    className='absolute top-3 right-3 z-[550] px-3 py-2 rounded-lg bg-black/40 hover:bg-black/60 text-white text-sm backdrop-blur border border-white/20 flex items-center gap-2'
+                    title='下载'
+                  >
+                    <Download className='w-4 h-4' />
+                    {downloadButtonText}
+                  </button>
+                )}
                 <div
                   ref={artRef}
                   className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
@@ -3517,6 +3715,7 @@ function PlayPageClient() {
                 sourceSearchLoading={sourceSearchLoading}
                 sourceSearchError={sourceSearchError}
                 precomputedVideoInfo={precomputedVideoInfo}
+                episodeStatusMap={episodeStatusMap}
               />
             </div>
           </div>
@@ -3539,6 +3738,19 @@ function PlayPageClient() {
                 >
                   <FavoriteIcon filled={favorited} />
                 </button>
+                {/* 详情区下载入口（第二入口，贴近“详情页 CTA”心智） */}
+                {detail && currentSource && currentId && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDownloadDialogOpen(true);
+                    }}
+                    className='ml-3 px-3 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm flex items-center gap-2'
+                  >
+                    <Download className='w-4 h-4' />
+                    下载
+                  </button>
+                )}
               </h1>
 
               {/* 关键信息行 */}
@@ -3590,6 +3802,16 @@ function PlayPageClient() {
           </div>
         </div>
       </div>
+
+      {/* 下载确认弹窗 */}
+      {detail && (
+        <DownloadConfirmDialog
+          open={downloadDialogOpen}
+          onClose={() => setDownloadDialogOpen(false)}
+          detail={detail}
+          currentEpisodeIndex={currentEpisodeIndex}
+        />
+      )}
     </PageLayout>
   );
 }

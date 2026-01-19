@@ -3,7 +3,7 @@
 
 import { ChevronUp, Search, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   addSearchHistory,
@@ -40,6 +40,45 @@ function SearchPageClient() {
   const [isLoading, setIsLoading] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+
+  // -----------------------------------------------------------------------------
+  // SSE 连接管理：避免“sessionStorage isActive 卡死”导致一直加载
+  // -----------------------------------------------------------------------------
+  const sseRef = useRef<EventSource | null>(null);
+  const sseQueryRef = useRef<string>('');
+  const sseWatchdogRef = useRef<number | null>(null);
+  const sseLastMessageAtRef = useRef<number>(0);
+
+  const setSseStatus = (q: string, isActive: boolean) => {
+    try {
+      sessionStorage.setItem(
+        `sse_status_${q}`,
+        JSON.stringify({ isActive, query: q, timestamp: Date.now() })
+      );
+    } catch {
+      // ignore
+    }
+  };
+
+  const cleanupSse = (q?: string) => {
+    try {
+      if (sseWatchdogRef.current) {
+        window.clearTimeout(sseWatchdogRef.current);
+        sseWatchdogRef.current = null;
+      }
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      const key = (q ?? sseQueryRef.current)?.trim();
+      if (key) setSseStatus(key, false);
+    } catch {
+      // ignore
+    } finally {
+      sseQueryRef.current = '';
+      sseLastMessageAtRef.current = 0;
+    }
+  };
 
   // 获取默认聚合设置：只读取用户本地设置，默认为 true
   const getDefaultAggregate = () => {
@@ -160,6 +199,10 @@ function SearchPageClient() {
     const query = searchParams.get('q');
     if (query) {
       setSearchQuery(query);
+      // query 变化时，清理旧 SSE（避免跨 query 复用导致卡死）
+      if (sseQueryRef.current && sseQueryRef.current !== query.trim()) {
+        cleanupSse(sseQueryRef.current);
+      }
       fetchSearchResultsStream(query); // 使用流式搜索
 
       // 保存到搜索历史 (事件监听会自动更新界面)
@@ -169,21 +212,49 @@ function SearchPageClient() {
     }
   }, [searchParams]);
 
+  // 组件卸载时，确保关闭 SSE 并释放 sessionStorage 状态
+  useEffect(() => {
+    return () => {
+      if (sseQueryRef.current) cleanupSse(sseQueryRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 流式搜索函数 - 使用 SSE 实时返回结果
   const fetchSearchResultsStream = async (query: string) => {
+    const q = query.trim().replace(/\s+/g, ' ');
+    // 若已有同 query 的真实 SSE 在跑，则直接复用（不做 sessionStorage 的“硬拦截”）
+    if (sseRef.current && sseQueryRef.current === q) {
+      // eslint-disable-next-line no-console
+      console.log('[Search] ⏸️ SSE仍在进行中，跳过重复调用:', q);
+      return;
+    }
+
     // 【修复】防止重复调用：检查是否已有进行中的SSE连接
     if (typeof window !== 'undefined') {
       const existingStatus = sessionStorage.getItem(
-        `sse_status_${query.trim()}`
+        `sse_status_${q}`
       );
       if (existingStatus) {
         try {
           const parsed = JSON.parse(existingStatus);
-          if (parsed.isActive) {
+          const isActive = !!parsed?.isActive;
+          const ts = Number(parsed?.timestamp || 0);
+          const isStale = !Number.isFinite(ts) || Date.now() - ts > 30_000;
+
+          // 只有当“本组件内确实有 SSE 在跑”时才跳过；否则认为是 stale，清掉状态并继续发起搜索
+          if (isActive && !isStale) {
+            // 这里不 return：因为 sessionStorage 可能来自上一次页面崩溃/HMR/刷新
             // eslint-disable-next-line no-console
-            console.log('[Search] ⏸️ SSE仍在进行中，跳过重复调用:', query);
-            return;
+            console.warn('[Search] ⚠️ 检测到 sessionStorage 残留 isActive=true，已忽略并重建 SSE:', {
+              q,
+              ts,
+            });
+          } else if (isActive && isStale) {
+            // eslint-disable-next-line no-console
+            console.warn('[Search] ⚠️ 检测到 stale SSE 状态，清理后重试:', { q, ts });
           }
+          if (isActive) setSseStatus(q, false);
         } catch (err) {
           // 忽略解析错误
         }
@@ -244,14 +315,41 @@ function SearchPageClient() {
       }
 
       // eslint-disable-next-line no-console
-      console.log('[DEBUG] 开始SSE流式搜索:', query);
+      console.log('[DEBUG] 开始SSE流式搜索:', q);
 
       // 使用 SSE 流式搜索（支持 Cloudflare Worker 或本地 API）
-      const searchUrl = getStreamSearchUrl(query.trim());
+      const searchUrl = getStreamSearchUrl(q);
+
+      // 开始新 SSE 前，确保关闭旧连接
+      if (sseQueryRef.current && sseQueryRef.current !== q) {
+        cleanupSse(sseQueryRef.current);
+      }
+
       const eventSource = new EventSource(searchUrl);
+      sseRef.current = eventSource;
+      sseQueryRef.current = q;
+      sseLastMessageAtRef.current = Date.now();
+      setSseStatus(q, true);
+
       const seenResults = new Set<string>();
       const accumulatedResults: SearchResult[] = [];
       let hasReceivedResults = false;
+
+      // Watchdog：若长时间无任何消息，自动关闭并允许用户重试
+      if (sseWatchdogRef.current) window.clearTimeout(sseWatchdogRef.current);
+      sseWatchdogRef.current = window.setTimeout(() => {
+        const idleMs = Date.now() - (sseLastMessageAtRef.current || 0);
+        if (idleMs >= 20_000 && sseQueryRef.current === q) {
+          // eslint-disable-next-line no-console
+          console.warn('[SSE] ⏱️ 长时间未收到消息，自动中止本次搜索以避免卡死:', {
+            q,
+            idleMs,
+            url: searchUrl,
+          });
+          cleanupSse(q);
+          setIsLoading(false);
+        }
+      }, 20_000);
 
       // 【调试日志】记录SSE连接
       console.log('[Search] SSE连接已建立，开始接收搜索结果');
@@ -265,6 +363,7 @@ function SearchPageClient() {
 
       eventSource.onmessage = (event) => {
         try {
+          sseLastMessageAtRef.current = Date.now();
           // 【调试】记录原始消息
           console.log('[SSE] 收到原始消息:', event.data);
           
@@ -286,30 +385,22 @@ function SearchPageClient() {
               accumulatedResults.length,
               '个结果'
             );
-            eventSource.close();
+            cleanupSse(q);
             // 缓存完整结果
             if (accumulatedResults.length > 0) {
-              searchCacheManager.cacheResults(query, accumulatedResults);
+              searchCacheManager.cacheResults(q, accumulatedResults);
 
               // 【新增】搜索完成时，最终保存到 sessionStorage
               try {
                 sessionStorage.setItem(
-                  `search_results_${query.trim()}`,
+                  `search_results_${q}`,
                   JSON.stringify({
-                    query: query.trim(),
+                    query: q,
                     results: accumulatedResults,
                     timestamp: Date.now(),
                   })
                 );
-                // 【新增】标记SSE已完成
-                sessionStorage.setItem(
-                  `sse_status_${query.trim()}`,
-                  JSON.stringify({
-                    isActive: false,
-                    query: query.trim(),
-                    timestamp: Date.now(),
-                  })
-                );
+                // status 由 cleanupSse 统一落盘
               } catch (err) {
                 // eslint-disable-next-line no-console
                 console.warn(
@@ -367,27 +458,15 @@ function SearchPageClient() {
                 console.log('[SSE] ✓ 已收到第一个结果，用户可以立即点击播放');
               }
 
-              // 【新增】标记SSE仍在进行中，供后续使用
-              try {
-                sessionStorage.setItem(
-                  `sse_status_${query.trim()}`,
-                  JSON.stringify({
-                    isActive: true,
-                    query: query.trim(),
-                    timestamp: Date.now(),
-                  })
-                );
-              } catch (err) {
-                // sessionStorage可能已满，静默处理
-              }
+              // status 由 watchdog + cleanup 统一维护；这里不重复写 isActive
 
               // 【新增】每次更新结果时，保存到 sessionStorage，供播放页面使用
               if (accumulatedResults.length > 0) {
                 try {
                   sessionStorage.setItem(
-                    `search_results_${query.trim()}`,
+                    `search_results_${q}`,
                     JSON.stringify({
-                      query: query.trim(),
+                      query: q,
                       results: accumulatedResults,
                       timestamp: Date.now(),
                     })
@@ -448,7 +527,7 @@ function SearchPageClient() {
         // 检查连接状态
         if (eventSource.readyState === EventSource.CLOSED) {
           console.log('[SSE] 🔴 连接已关闭');
-          eventSource.close();
+          cleanupSse(q);
           setIsLoading(false);
           
           // 如果还没有收到任何结果，可能是连接失败
@@ -466,6 +545,7 @@ function SearchPageClient() {
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Search error:', error);
+      cleanupSse(q);
       setIsLoading(false);
       setSearchResults([]);
     }
@@ -482,8 +562,7 @@ function SearchPageClient() {
     setShowResults(true);
 
     router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-    // 直接发请求 - 使用流式搜索
-    fetchSearchResultsStream(trimmed);
+    // 注意：router.push 会触发上面的 searchParams effect 来发起搜索
 
     // 保存到搜索历史 (事件监听会自动更新界面)
     addSearchHistory(trimmed);
@@ -570,11 +649,8 @@ function SearchPageClient() {
                           <VideoCard
                             from='search'
                             items={group}
-                            query={
-                              searchQuery.trim() !== group[0]?.title
-                                ? searchQuery.trim()
-                                : ''
-                            }
+                            // 始终透传用户的搜索词，确保 Play 页能用 stitle 读取 search_results_{query} 来展示多源换源
+                            query={searchQuery.trim()}
                           />
                         </div>
                       );
@@ -586,17 +662,15 @@ function SearchPageClient() {
                       >
                         <VideoCard
                           id={item.id}
-                          title={item.title + ' ' + item.type_name}
+                          // Play 页依赖 title/year/stitle 做多源恢复与匹配；这里必须传“干净标题”
+                          title={item.title}
                           poster={item.poster}
                           episodes={item.episodes.length}
                           source={item.source}
                           source_name={item.source_name}
                           douban_id={item.douban_id?.toString()}
-                          query={
-                            searchQuery.trim() !== item.title
-                              ? searchQuery.trim()
-                              : ''
-                          }
+                          // 始终透传用户的搜索词，确保 Play 页能用 stitle 读取 search_results_{query} 来展示多源换源
+                          query={searchQuery.trim()}
                           year={item.year}
                           from='search'
                           type={item.episodes.length > 1 ? 'tv' : 'movie'}

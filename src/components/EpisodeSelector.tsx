@@ -40,6 +40,8 @@ interface EpisodeSelectorProps {
   sourceSearchError?: string | null;
   /** 预计算的测速结果，避免重复测速 */
   precomputedVideoInfo?: Map<string, VideoInfo>;
+  /** 每集下载状态（key 为 1-based 集号） */
+  episodeStatusMap?: Record<number, 'not_downloaded' | 'downloading' | 'downloaded' | 'failed'>;
 }
 
 /**
@@ -58,6 +60,7 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   sourceSearchLoading = false,
   sourceSearchError = null,
   precomputedVideoInfo,
+  episodeStatusMap,
 }) => {
   const router = useRouter();
   const pageCount = Math.ceil(totalEpisodes / episodesPerPage);
@@ -400,17 +403,29 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
               return episodes;
             })().map((episodeNumber) => {
               const isActive = episodeNumber === value;
+              const status = episodeStatusMap?.[episodeNumber] ?? 'not_downloaded';
+              const dotClass =
+                status === 'downloaded'
+                  ? 'bg-green-500'
+                  : status === 'downloading'
+                  ? 'bg-yellow-500 animate-pulse'
+                  : status === 'failed'
+                  ? 'bg-red-500'
+                  : 'bg-transparent';
               return (
                 <button
                   key={episodeNumber}
                   onClick={() => handleEpisodeClick(episodeNumber - 1)}
-                  className={`h-10 flex items-center justify-center text-sm font-medium rounded-md transition-all duration-200 
+                  className={`relative h-10 flex items-center justify-center text-sm font-medium rounded-md transition-all duration-200 
                     ${
                       isActive
                         ? 'bg-green-500 text-white shadow-lg shadow-green-500/25 dark:bg-green-600'
                         : 'bg-gray-200 text-gray-700 hover:bg-gray-300 hover:scale-105 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/20'
                     }`.trim()}
                 >
+                  {dotClass !== 'bg-transparent' && (
+                    <span className={`absolute top-1 right-1 w-2 h-2 rounded-full ${dotClass}`} />
+                  )}
                   {episodeNumber}
                 </button>
               );

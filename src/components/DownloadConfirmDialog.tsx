@@ -75,6 +75,8 @@ export default function DownloadConfirmDialog({
       const body: {
         source: string;
         id: string;
+        // 由前端传入完整详情，避免服务端依赖 config.json / 特殊源导致的详情拉取失败
+        resource?: SearchResult;
         episode_numbers?: number[];
         episode_range?: { start: number; end: number };
         auto_download_next?: boolean;
@@ -82,6 +84,7 @@ export default function DownloadConfirmDialog({
       } = {
         source: detail.source,
         id: detail.id,
+        resource: detail,
       };
 
       if (mode === 'current') {
