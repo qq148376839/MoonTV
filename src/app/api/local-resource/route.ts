@@ -45,7 +45,13 @@ export async function GET(request: NextRequest) {
         local_path: resourceInfo.localPath,
         sources: resourceInfo.sources,
       },
-      { status: 200 }
+      {
+        status: 200,
+        headers: {
+          // 确保播放页/调试时每次都拿到最新的 metadata（避免浏览器/中间层缓存）
+          'Cache-Control': 'no-store',
+        },
+      }
     );
   } catch (error) {
     console.error('[Local Resource API] 检测资源失败:', error);

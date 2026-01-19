@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev --webpack -H 0.0.0.0 -p 51000",
+    "dev": "pnpm gen:runtime && pnpm gen:manifest && next dev -H 0.0.0.0 -p 51000",
+    "dev:webpack": "pnpm gen:runtime && pnpm gen:manifest && next dev --webpack -H 0.0.0.0 -p 51000",
     "build": "cross-env NODE_OPTIONS=--max-old-space-size=6144 pnpm gen:runtime && cross-env NODE_OPTIONS=--max-old-space-size=6144 pnpm gen:manifest && cross-env NODE_OPTIONS=--max-old-space-size=6144 next build",
     "build:skip-typecheck": "cross-env NODE_OPTIONS=--max-old-space-size=4096 pnpm gen:runtime && cross-env NODE_OPTIONS=--max-old-space-size=4096 pnpm gen:manifest && cross-env NODE_OPTIONS=--max-old-space-size=4096 SKIP_TYPE_CHECK=true next build",
     "start": "next start",

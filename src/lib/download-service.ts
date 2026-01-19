@@ -528,6 +528,29 @@ export class DownloadService {
         console.log(
           `[DownloadService] 所有剧集已存在，跳过下载: ${task.source}_${task.resourceId}`
         );
+        // 重要：即便全部跳过，也要“刷新” metadata/index。
+        // 场景：历史版本/手动落盘导致 m3u8 已存在，但 metadata.episodes 仍是空占位，
+        // 会导致播放页误判“当前集未下载”。
+        try {
+          await this.storageManager.generateMetadata(
+            task.resource,
+            localPath,
+            alignedEpisodes.length > 0 ? alignedEpisodes : downloadedEpisodes,
+            totalSize
+          );
+          this.storageManager.updateIndex(
+            task.source,
+            task.resourceId,
+            task.resource.title,
+            task.resource.year,
+            localPath
+          );
+        } catch (e) {
+          console.warn(
+            '[DownloadService] 跳过下载但刷新 metadata/index 失败（可忽略）:',
+            e
+          );
+        }
         task.status = DownloadStatus.COMPLETED;
         task.progress = 100;
         this.updateTask(task);

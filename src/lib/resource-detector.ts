@@ -34,6 +34,78 @@ export class ResourceDetector {
     this.storageManager = getStorageManager();
   }
 
+  private normalizeToProjectRelative(filePath: string): string {
+    // Align with StorageManager.generateMetadata: store path relative to project root when possible.
+    if (!path.isAbsolute(filePath)) return filePath.replace(/\\/g, '/');
+    const projectRoot = process.cwd();
+    const relativePath = path.relative(projectRoot, filePath);
+    return relativePath.replace(/\\/g, '/');
+  }
+
+  private tryRepairEpisodesByFilename(localPath: string, metadata: LocalResourceMetadata): {
+    repaired: boolean;
+    repairedEpisodes: number[];
+  } {
+    const episodesArr = Array.isArray(metadata.episodes) ? metadata.episodes : [];
+    if (episodesArr.length === 0) return { repaired: false, repairedEpisodes: [] };
+
+    const repairedEpisodes: number[] = [];
+    let changed = false;
+
+    for (let ep = 1; ep <= episodesArr.length; ep++) {
+      const cur = episodesArr[ep - 1];
+      const curTrim = typeof cur === 'string' ? cur.trim() : '';
+      if (curTrim) {
+        // If recorded path exists, keep it.
+        continue;
+      }
+
+      // Fallback: probe conventional filename `episode_XX.m3u8` under resource directory.
+      const epNo = String(ep).padStart(2, '0');
+      const m3u8File = path.join(localPath, `episode_${epNo}.m3u8`);
+      try {
+        if (fs.existsSync(m3u8File)) {
+          const st = fs.statSync(m3u8File);
+          if (st.isFile() && st.size > 0) {
+            episodesArr[ep - 1] = this.normalizeToProjectRelative(m3u8File);
+            repairedEpisodes.push(ep);
+            changed = true;
+          }
+        }
+      } catch {
+        // ignore and keep placeholder
+      }
+    }
+
+    if (!changed) return { repaired: false, repairedEpisodes: [] };
+
+    metadata.episodes = episodesArr;
+    // Keep derived fields consistent
+    metadata.episode_count = episodesArr.filter(
+      (p) => typeof p === 'string' && p.trim().length > 0
+    ).length;
+    metadata.episodes_info = episodesArr
+      .map((ep, index) => ({ ep, index }))
+      .filter((x) => typeof x.ep === 'string' && x.ep.trim().length > 0)
+      .map((x) => ({
+        index: x.index + 1,
+        file_path: x.ep as string,
+        file_size: 0,
+      }));
+
+    try {
+      fs.writeFileSync(
+        path.join(localPath, 'metadata.json'),
+        JSON.stringify(metadata, null, 2),
+        'utf-8'
+      );
+    } catch {
+      // best-effort; don't block playback if repair can't be persisted
+    }
+
+    return { repaired: true, repairedEpisodes };
+  }
+
   /**
    * 检查资源是否存在
    */
@@ -71,6 +143,18 @@ export class ResourceDetector {
     const metadata = this.storageManager.readMetadata(localPath);
     if (!metadata) {
       return { exists: false };
+    }
+
+    // Best-effort repair:
+    // Some legacy/edge cases may have downloaded episode_XX.m3u8 on disk but left metadata.episodes as placeholders ('').
+    // This causes playback to incorrectly treat episode as "not downloaded".
+    const repair = this.tryRepairEpisodesByFilename(localPath, metadata);
+    if (repair.repaired) {
+      console.log(
+        `[ResourceDetector] repaired metadata.episodes by filename: ${source}_${id}, episodes=${repair.repairedEpisodes.join(
+          ','
+        )}`
+      );
     }
 
     // 验证文件是否存在（允许“部分下载/占位”）
@@ -303,6 +387,11 @@ let resourceDetectorInstance: ResourceDetector | null = null;
  * 获取资源检测服务实例
  */
 export function getResourceDetector(): ResourceDetector {
+  // Dev/HMR: 避免“热更新后仍复用旧实例”导致新逻辑（如 metadata 修复）不生效
+  // 生产环境仍可复用单例以减少对象创建。
+  if (process.env.NODE_ENV !== 'production') {
+    return new ResourceDetector();
+  }
   if (!resourceDetectorInstance) {
     resourceDetectorInstance = new ResourceDetector();
   }
