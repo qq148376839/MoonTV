@@ -12,6 +12,8 @@
     "lint:fix": "eslint src --fix && pnpm format",
     "lint:strict": "eslint --max-warnings=0 src",
     "typecheck": "tsc --noEmit --incremental false",
+    "check:fast": "pnpm lint:strict && pnpm typecheck",
+    "check": "pnpm check:fast && pnpm run build",
     "test:watch": "jest --watch",
     "test": "jest",
     "format": "prettier -w .",
