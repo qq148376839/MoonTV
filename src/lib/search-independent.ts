@@ -50,7 +50,9 @@ export async function searchOfficialResources(
   console.log(`[searchOfficialResources] 请求URL: ${apiUrl}`);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+  // 生产环境到下游（尤其是 SSE）首包可能超过 5s，5s 会导致误判超时 -> 结果为空
+  // 与 /api/search/stream 的 15s 行为对齐，提升稳定性
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
 
   try {
     const response = await fetch(apiUrl, {
@@ -307,7 +309,8 @@ export async function searchUnofficialResources(
   console.log(`[searchUnofficialResources] 请求URL: ${apiUrl}`);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+  // 生产环境 SSE/网络更慢，5s 会频繁触发 AbortError；提升到 15s 避免误判
+  const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
 
   try {
     const response = await fetch(apiUrl, {
