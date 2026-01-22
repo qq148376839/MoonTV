@@ -22,11 +22,19 @@
 
 ## 🔧 关键实现
 
-### 1) `/api/search` 聚合 `/api/search/stream`
+### 1) `/api/search` 与 Web/OrionTV 搜索一致（最终方案：直连 independent search，避免 SSE 缓冲）
 
-- `/api/search` 改为内部读取 `/api/search/stream` 的 SSE 数据并聚合成 JSON 返回
-- 修复 SSE 聚合的 idle 超时：使用 `Promise.race(reader.read(), idleTimeout)`，避免 `reader.read()` 阻塞导致超时失效
-- `/api/search` 返回 `Cache-Control: no-store`，避免浏览器缓存旧的空结果造成误判
+最初方案是“聚合 `/api/search/stream` 的 SSE 返回 JSON”，但线上（Cloudflare/反代链路）可能对 SSE **缓冲**，导致 `/api/search` 读不到首包而误判为空。
+
+最终落地改为：
+
+- `/api/search` **不再自调用** `/api/search/stream`
+- 直接并发调用：
+  - `searchOfficialResources(query)`（默认 `NEXT_PUBLIC_OFFICIAL_SEARCH_URL`，未配置时直连 `789jx.riowang.win`）
+  - `searchUnofficialResources(query)`（优先 `NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL`，否则 `NEXT_PUBLIC_CF_SEARCH_WORKER_URL`，都未配则直连 `ss.riowang.win`）
+- 合并 + 去重后返回 JSON（并保留 `Cache-Control: no-store`）
+- **非官方 SSE 长连接**：当达到超时（Abort）时，返回 **已收集到的部分结果**，避免“超时就整段丢弃 -> results 为空”
+- 增加 `X-MoonTV-Search-Rev` 响应头用于快速验证线上是否命中新代码
 
 ### 2) `/api/search/resources` 扩展多源 key
 
@@ -58,12 +66,19 @@
 
 ## 🧪 验证要点
 
-- `/api/search?q=新僵尸先生粤语` 应返回 `ruyi` 结果（与 `/api/search/stream` 一致）
+- `/api/search?q=新僵尸先生粤语` 应返回 `ruyi` 结果（OrionTV 搜索页依赖此接口）
 - `/api/search/resources` 必须包含 `ruyi`
 - `/api/search/one?q=新僵尸先生粤语&resourceId=ruyi` 应返回结果且 `episodes[0]` 可播放
 - `official-play.m3u8`：
   - `?url=...` 仍可直接 302（兼容）
   - 新参数形式可触发下载并优先本地
+
+线上排障建议：
+
+- `curl -i /api/search?...` 检查 `X-MoonTV-Search-Rev` 是否为最新
+- 若 `results` 为空，优先查看服务端日志中：
+  - `[searchUnofficialResources] 请求超时`
+  - `[searchOfficialResources] SSE 解析后数据为空`
 
 ---
 
@@ -76,3 +91,12 @@
 - `src/app/api/unofficial-play.m3u8/route.ts`
 - `src/app/api/local-resource/route.ts`
 - `src/middleware.ts`
+
+## 🚀 部署效率优化（Docker）
+
+为减少 `docker compose build` 时间：
+
+- 补齐 `.dockerignore`，忽略 `node_modules/`、`.next/`、`data/`、`.git/` 等，显著缩小 build context
+- 部署流程可优先使用：
+  - `git pull`
+  - `docker compose up -d --build`
