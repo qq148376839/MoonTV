@@ -1,13 +1,17 @@
 import { NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
+import {
+  searchOfficialResources,
+  searchUnofficialResources,
+} from '@/lib/search-independent';
 import { SearchResult } from '@/lib/types';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'edge';
 
 // 用于线上快速确认是否已经部署了最新代码（curl -i 查看响应头）
-const SEARCH_ROUTE_REV = '2026-01-22.2';
+const SEARCH_ROUTE_REV = '2026-01-22.3';
 
 type IdleTimeoutResult = { timeout: true };
 type ReadWithIdleTimeoutResult =
@@ -69,7 +73,8 @@ function normalizeOfficialSource(result: SearchResult): SearchResult {
   return result;
 }
 
-async function collectSearchResultsFromStream(params: {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function _collectSearchResultsFromStream(params: {
   request: Request;
   query: string;
   maxTotalMs: number;
@@ -221,6 +226,38 @@ async function collectSearchResultsFromStream(params: {
   return out;
 }
 
+function dedupeResults(items: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const r of items) {
+    if (!r || typeof r !== 'object') continue;
+    const key = `${r.source_type || 'unknown'}-${r.source}-${r.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
+async function collectSearchResultsDirect(params: {
+  query: string;
+  exactTitle?: string;
+}): Promise<SearchResult[]> {
+  const { query, exactTitle } = params;
+  const [officialRes, unofficialRes] = await Promise.allSettled([
+    searchOfficialResources(query, undefined),
+    searchUnofficialResources(query, undefined),
+  ]);
+
+  const merged: SearchResult[] = [];
+  if (officialRes.status === 'fulfilled') merged.push(...officialRes.value);
+  if (unofficialRes.status === 'fulfilled') merged.push(...unofficialRes.value);
+
+  const normalized = merged.map(normalizeOfficialSource);
+  const deduped = dedupeResults(normalized);
+  return exactTitle ? deduped.filter((r) => r.title === exactTitle) : deduped;
+}
+
 /**
  * 检测本地资源并获取播放 URL（用于 OrionTV 兼容性）
  * 在 Edge Runtime 中通过 HTTP 调用本地资源检测 API
@@ -335,18 +372,10 @@ export async function GET(request: Request) {
 
     // OrionTV 优化：只返回同标题的少量结果（避免对大量结果逐个 parse 导致超时）
     if (isOrionTV) {
-      const streamed = await collectSearchResultsFromStream({
-        request,
-        query,
-        // 生产环境中可能存在 SSE 缓冲（直到 done 才返回首包），
-        // firstByteMs 需要覆盖 /api/search/stream 内部 15s 超时窗口，否则会误判为空。
-        maxTotalMs: 20000,
-        firstByteMs: 18000,
-        idleMs: 1200,
-      });
-
       const results: SearchResult[] = [];
-      const exact = streamed.filter((r) => r.title === query);
+      // 生产环境链路可能缓冲 SSE，导致 /api/search 聚合不到首包而误判为空；
+      // 这里改为直接并发调用独立搜索接口，返回 JSON，彻底绕开 SSE 缓冲。
+      const exact = await collectSearchResultsDirect({ query, exactTitle: query });
       const official = exact.find((r) => r.source_type === 'official');
       const unofficial = exact.find((r) => r.source_type === 'unofficial');
 
@@ -405,15 +434,8 @@ export async function GET(request: Request) {
       );
     }
 
-    // Web 端：聚合 /api/search/stream 结果，确保与 MoonTV Web 搜索展示一致
-    const allResults = await collectSearchResultsFromStream({
-      request,
-      query,
-      // 同上：避免在被缓冲的情况下过早触发“首包超时”而返回空数组
-      maxTotalMs: 22000,
-      firstByteMs: 18000,
-      idleMs: 1500,
-    });
+    // Web 端：同样使用直连搜索，避免 SSE 缓冲导致 results 为空
+    const allResults = await collectSearchResultsDirect({ query });
 
     let flattenedResults = allResults;
     if (!config.SiteConfig.DisableYellowFilter) {
