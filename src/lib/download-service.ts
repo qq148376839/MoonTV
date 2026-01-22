@@ -420,10 +420,10 @@ export class DownloadService {
         ? task.resource.episodes.length
         : 0;
       const existingMetadata = this.storageManager.readMetadata(localPath);
+      const existingEpisodes = existingMetadata?.episodes;
       const alignedEpisodes: string[] =
-        Array.isArray(existingMetadata?.episodes) &&
-          existingMetadata.episodes.length === totalEpisodes
-          ? [...existingMetadata.episodes]
+        Array.isArray(existingEpisodes) && existingEpisodes.length === totalEpisodes
+          ? [...existingEpisodes]
           : new Array(totalEpisodes).fill('');
 
       for (let i = 0; i < task.episodes.length; i++) {

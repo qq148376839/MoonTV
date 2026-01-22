@@ -5,6 +5,39 @@ import { getStorage } from '@/lib/db';
 import { AdminConfig } from './admin.types';
 import runtimeConfig from './runtime';
 
+function ensureOrionSearchSources(config: AdminConfig): void {
+  if (!Array.isArray(config.SourceConfig)) {
+    // defensive: AdminConfig always includes SourceConfig
+    config.SourceConfig = [];
+  }
+  if (config.SourceConfig.length > 0) return;
+
+  // 当 runtime.ts 的 api_site 为空（无 config.json）时，补全 OrionTV 依赖的“资源站 key”
+  // 注意：OrionTV 的 resourceId 应该等于 SearchResult.source（例如 789caiji / jisu），而不是 official/unofficial 这种“分类”。
+  config.SourceConfig = [
+    {
+      key: '789caiji',
+      name: '789采集（官方解析）',
+      api:
+        process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL || 'https://789jx.riowang.win',
+      detail: undefined,
+      official_parser: true,
+      from: 'config',
+      disabled: false,
+    },
+    {
+      key: 'jisu',
+      name: '极速资源（非官方）',
+      api:
+        process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL || 'https://ss.riowang.win',
+      detail: undefined,
+      official_parser: false,
+      from: 'config',
+      disabled: false,
+    },
+  ];
+}
+
 export interface ApiSite {
   key: string;
   api: string;
@@ -347,6 +380,7 @@ export async function getConfig(): Promise<AdminConfig> {
   const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
   if (process.env.DOCKER_ENV === 'true' || storageType === 'localstorage') {
     await initConfig();
+    ensureOrionSearchSources(cachedConfig);
     return cachedConfig;
   }
   // 非 docker 环境且 DB 存储，直接读 db 配置
@@ -514,6 +548,7 @@ export async function getConfig(): Promise<AdminConfig> {
 
     cachedConfig = defaultConfig;
   }
+  ensureOrionSearchSources(cachedConfig);
   return cachedConfig;
 }
 

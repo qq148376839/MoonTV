@@ -139,20 +139,16 @@ export async function convertOfficialEpisodes(
   // 检查第一个 episode 是否需要解析
   const firstEpisode = episodes[0];
   if (firstEpisode && isLikelyWebPageUrl(firstEpisode)) {
-    console.log(
-      `[parse-helper] 检测到官方资源 HTML URL，开始解析: ${firstEpisode.substring(0, 100)}...`
-    );
-    const m3u8Url = await parseToM3u8Url(firstEpisode, origin);
-    if (m3u8Url) {
-      // 替换第一个 URL，其他保持不变（如果后续也需要转换，可以扩展）
-      return [m3u8Url, ...episodes.slice(1)];
-    } else {
-      // 解析失败，返回空数组（避免返回不可播放的 URL）
-      console.warn(
-        `[parse-helper] 解析失败，返回空数组以避免返回不可播放的 URL`
-      );
-      return [];
+    // OrionTV 兼容：不要在 search 阶段同步调用外部解析（易超时），改为返回“可播放的解析跳转 URL”
+    // 播放器真正拉取该 URL 时再由服务端解析并 302 到 m3u8。
+    if (origin) {
+      const playable = `${origin}/api/parse-m3u8?url=${encodeURIComponent(firstEpisode)}`;
+      return [playable, ...episodes.slice(1)];
     }
+
+    // 没有 origin 的情况下再尝试直接解析（可能会慢/失败）
+    const m3u8Url = await parseToM3u8Url(firstEpisode, origin);
+    return m3u8Url ? [m3u8Url, ...episodes.slice(1)] : episodes;
   }
 
   // 如果第一个 URL 已经是 m3u8 或不需要解析，直接返回

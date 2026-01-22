@@ -23,7 +23,7 @@ services:
       - PASSWORD=rio
       - SITE_NAME=腾小宝资源站
       - NEXT_PUBLIC_DISABLE_YELLOW_FILTER=true
-      - NEXT_PUBLIC_BASE_URL=http://localhost:1234
+      - NEXT_PUBLIC_BASE_URL=http://mtv.riowang.win:1234
       # 如果需要数据库，添加数据库环境变量
       # - DATABASE_URL=postgresql://...
     user: 'nextjs'
@@ -35,7 +35,7 @@ services:
           'CMD',
           'node',
           '-e',
-          "require('http').get('http://localhost:3000/login', (res) => process.exit(res.statusCode && res.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))",
+          "require('http').get('http://mtv.riowang.win:1234/login', (res) => process.exit(res.statusCode && res.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))",
         ]
       interval: 30s
       timeout: 10s

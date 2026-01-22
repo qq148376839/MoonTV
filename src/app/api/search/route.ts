@@ -1,18 +1,183 @@
 import { NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
-import {
-  convertOfficialEpisodes,
-  convertUnofficialEpisodes,
-} from '@/lib/parse-helper';
-import {
-  searchOfficialResources,
-  searchUnofficialResources,
-} from '@/lib/search-independent';
 import { SearchResult } from '@/lib/types';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'edge';
+
+type IdleTimeoutResult = { timeout: true };
+type ReadWithIdleTimeoutResult =
+  | ReadableStreamReadResult<Uint8Array>
+  | IdleTimeoutResult;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function buildOfficialPlayUrl(params: {
+  origin: string | undefined;
+  q: string;
+  source: string;
+  id: string;
+  epNo: number;
+  total: number;
+  episodeUrl: string;
+}): string {
+  const { origin, q, source, id, epNo, total, episodeUrl } = params;
+  const prefix = origin ? `${origin}` : '';
+  return `${prefix}/api/official-play.m3u8?q=${encodeURIComponent(
+    q
+  )}&source=${encodeURIComponent(source)}&id=${encodeURIComponent(
+    id
+  )}&ep=${encodeURIComponent(String(epNo))}&total=${encodeURIComponent(
+    String(total)
+  )}&url=${encodeURIComponent(episodeUrl)}`;
+}
+
+function buildUnofficialPlayUrl(params: {
+  origin: string | undefined;
+  q: string;
+  source: string;
+  id: string;
+  epNo: number;
+  total: number;
+  episodeUrl: string;
+}): string {
+  const { origin, q, source, id, epNo, total, episodeUrl } = params;
+  const prefix = origin ? `${origin}` : '';
+  return `${prefix}/api/unofficial-play.m3u8?q=${encodeURIComponent(
+    q
+  )}&source=${encodeURIComponent(source)}&id=${encodeURIComponent(
+    id
+  )}&ep=${encodeURIComponent(String(epNo))}&total=${encodeURIComponent(
+    String(total)
+  )}&url=${encodeURIComponent(episodeUrl)}`;
+}
+
+function normalizeOfficialSource(result: SearchResult): SearchResult {
+  if (result.source_type === 'official') {
+    return {
+      ...result,
+      source: '789caiji',
+      source_name: '789采集',
+    };
+  }
+  return result;
+}
+
+async function collectSearchResultsFromStream(params: {
+  request: Request;
+  query: string;
+  maxTotalMs: number;
+  idleMs: number;
+}): Promise<SearchResult[]> {
+  const { request, query, maxTotalMs, idleMs } = params;
+  const urlObj = new URL(request.url);
+  const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
+  const streamUrl = `${baseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), maxTotalMs);
+
+  const res = await fetch(streamUrl, {
+    headers: { Accept: 'text/event-stream' },
+    signal: controller.signal,
+    cache: 'no-store',
+  });
+
+  if (!res.ok || !res.body) {
+    clearTimeout(timeoutId);
+    return [];
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const startedAt = Date.now();
+
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+
+  const readWithIdleTimeout =
+    async (): Promise<ReadWithIdleTimeoutResult> => {
+      return await Promise.race([
+        reader.read(),
+        new Promise<IdleTimeoutResult>((resolve) =>
+          setTimeout(() => resolve({ timeout: true }), idleMs)
+        ),
+      ]);
+    };
+
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const r = await readWithIdleTimeout();
+      if ('timeout' in r) {
+        // 空闲超时：流还在，但一段时间没有新数据，收敛返回
+        try {
+          reader.cancel();
+        } catch {
+          // ignore
+        }
+        break;
+      }
+
+      const { value, done } = r as ReadableStreamReadResult<Uint8Array>;
+      if (done) break;
+      if (value) {
+        buffer += decoder.decode(value, { stream: true });
+      }
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const jsonStr = trimmed.substring(5).trim();
+        if (!jsonStr) continue;
+
+        let msg: unknown;
+        try {
+          msg = JSON.parse(jsonStr);
+        } catch {
+          continue;
+        }
+
+        const msgObj = isRecord(msg) ? msg : null;
+        const results = msgObj && Array.isArray(msgObj.results) ? msgObj.results : [];
+        for (const item of results) {
+          if (!item || typeof item !== 'object') continue;
+          const sr: SearchResult = normalizeOfficialSource(item as SearchResult);
+          const key = `${sr.source_type || 'unknown'}-${sr.source}-${sr.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(sr);
+        }
+
+        if (msgObj?.done === true) {
+          try {
+            reader.cancel();
+          } catch {
+            // ignore
+          }
+          clearTimeout(timeoutId);
+          return out;
+        }
+      }
+
+      const now = Date.now();
+      if (now - startedAt > maxTotalMs) break;
+    }
+  } catch {
+    // ignore; return partial
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  return out;
+}
 
 /**
  * 检测本地资源并获取播放 URL（用于 OrionTV 兼容性）
@@ -65,12 +230,8 @@ async function getLocalResourcePlayUrl(
       ? `${baseUrl}/api/local-video?path=${encodedPath}`
       : `/api/local-video?path=${encodedPath}`;
 
-    console.log(
-      `[search] 检测到本地资源，使用本地播放 URL: ${playUrl.substring(0, 100)}...`
-    );
     return playUrl;
   } catch (error) {
-    console.warn(`[search] 检测本地资源失败:`, error);
     return null;
   }
 }
@@ -110,88 +271,101 @@ export async function GET(request: Request) {
     if (origin && origin.includes('0.0.0.0')) {
       origin = origin.replace('0.0.0.0', 'localhost');
     }
-  } catch (e) {
-    console.warn('[search] 无法获取 origin:', e);
+  } catch {
+    origin = undefined;
   }
 
   try {
-    // 并发搜索官方和非官方资源
-    const [officialResults, unofficialResults] = await Promise.allSettled([
-      searchOfficialResources(query, undefined),
-      searchUnofficialResources(query, undefined),
-    ]);
-
-    // 合并结果
-    const allResults: SearchResult[] = [];
-    const seenResults = new Set<string>(); // 用于去重
+    const ua = request.headers.get('user-agent') || '';
+    const isOrionTV = ua.toLowerCase().includes('oriontv');
 
     // 获取基础 URL（用于调用本地资源检测 API）
     let baseUrl: string | undefined;
     try {
       const urlObj = new URL(request.url);
       baseUrl = `${urlObj.protocol}//${urlObj.host}`;
-    } catch (e) {
-      console.warn('[search] 无法获取 baseUrl:', e);
+      if (baseUrl.includes('0.0.0.0')) {
+        baseUrl = baseUrl.replace('0.0.0.0', 'localhost');
+      }
+    } catch {
+      baseUrl = undefined;
     }
 
-    // 处理官方资源搜索结果
-    if (officialResults.status === 'fulfilled') {
-      // 对官方资源的 episodes 进行预处理：将 HTML URL 转换为 m3u8 URL
-      for (const result of officialResults.value) {
-        const key = `${result.source_type || 'official'}-${result.id}`;
-        if (!seenResults.has(key)) {
-          seenResults.add(key);
-          // 转换官方资源的 episodes（OrionTV 兼容性）
-          if (result.episodes && result.episodes.length > 0) {
-            result.episodes = await convertOfficialEpisodes(
-              result.episodes,
-              origin
+    // OrionTV 优化：只返回同标题的少量结果（避免对大量结果逐个 parse 导致超时）
+    if (isOrionTV) {
+      const streamed = await collectSearchResultsFromStream({
+        request,
+        query,
+        maxTotalMs: 6000,
+        idleMs: 900,
+      });
+
+      const results: SearchResult[] = [];
+      const exact = streamed.filter((r) => r.title === query);
+      const official = exact.find((r) => r.source_type === 'official');
+      const unofficial = exact.find((r) => r.source_type === 'unofficial');
+
+      for (const r of [official, unofficial]) {
+        if (!r) continue;
+        if (r.episodes && r.episodes.length > 0) {
+          const totalEpisodes = r.episodes.length;
+          if (r.source_type === 'official') {
+            r.episodes = r.episodes.map((ep, idx) =>
+              buildOfficialPlayUrl({
+                origin,
+                q: query,
+                source: r.source,
+                id: r.id,
+                epNo: idx + 1,
+                total: totalEpisodes,
+                episodeUrl: ep,
+              })
             );
-            // 检测本地资源（优先使用本地资源播放）
-            const localPlayUrl = await getLocalResourcePlayUrl(
-              result.source,
-              result.id,
-              0, // 只检测第一个 episode（OrionTV 通常只播放第一个）
-              baseUrl
+          } else {
+            r.episodes = r.episodes.map((ep, idx) =>
+              buildUnofficialPlayUrl({
+                origin,
+                q: query,
+                source: r.source,
+                id: r.id,
+                epNo: idx + 1,
+                total: totalEpisodes,
+                episodeUrl: ep,
+              })
             );
-            if (localPlayUrl) {
-              // 替换第一个 episode 为本地播放 URL
-              result.episodes[0] = localPlayUrl;
-            }
           }
-          allResults.push(result);
+
+          const localPlayUrl = await getLocalResourcePlayUrl(
+            r.source,
+            r.id,
+            0,
+            baseUrl
+          );
+          if (localPlayUrl) r.episodes[0] = localPlayUrl;
         }
+        results.push(r);
       }
+
+      return NextResponse.json(
+        { results },
+        {
+          headers: {
+            // /api/search 结果来自 stream 聚合：避免浏览器缓存旧的空结果造成“看起来搜不到”
+            'Cache-Control': 'no-store',
+            'CDN-Cache-Control': 'no-store',
+            'Vercel-CDN-Cache-Control': 'no-store',
+          },
+        }
+      );
     }
 
-    // 处理非官方资源搜索结果
-    if (unofficialResults.status === 'fulfilled') {
-      for (const result of unofficialResults.value) {
-        const key = `${result.source_type || 'unofficial'}-${result.id}`;
-        if (!seenResults.has(key)) {
-          seenResults.add(key);
-          // 转换非官方资源的 episodes 为代理 URL（解决 CORS 问题）
-          if (result.episodes && result.episodes.length > 0) {
-            result.episodes = convertUnofficialEpisodes(
-              result.episodes,
-              origin
-            );
-            // 检测本地资源（优先使用本地资源播放）
-            const localPlayUrl = await getLocalResourcePlayUrl(
-              result.source,
-              result.id,
-              0, // 只检测第一个 episode（OrionTV 通常只播放第一个）
-              baseUrl
-            );
-            if (localPlayUrl) {
-              // 替换第一个 episode 为本地播放 URL
-              result.episodes[0] = localPlayUrl;
-            }
-          }
-          allResults.push(result);
-        }
-      }
-    }
+    // Web 端：聚合 /api/search/stream 结果，确保与 MoonTV Web 搜索展示一致
+    const allResults = await collectSearchResultsFromStream({
+      request,
+      query,
+      maxTotalMs: 12000,
+      idleMs: 1200,
+    });
 
     let flattenedResults = allResults;
     if (!config.SiteConfig.DisableYellowFilter) {
@@ -200,15 +374,14 @@ export async function GET(request: Request) {
         return !yellowWords.some((word: string) => typeName.includes(word));
       });
     }
-    const cacheTime = await getCacheTime();
-
     return NextResponse.json(
       { results: flattenedResults },
       {
         headers: {
-          'Cache-Control': `public, max-age=${cacheTime}, s-maxage=${cacheTime}`,
-          'CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
-          'Vercel-CDN-Cache-Control': `public, s-maxage=${cacheTime}`,
+          // /api/search 结果来自 stream 聚合：避免浏览器缓存旧的空结果造成“看起来搜不到”
+          'Cache-Control': 'no-store',
+          'CDN-Cache-Control': 'no-store',
+          'Vercel-CDN-Cache-Control': 'no-store',
         },
       }
     );

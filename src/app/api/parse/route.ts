@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+import { NextResponse } from 'next/server';
 export const runtime = 'edge';
 
 interface ParseResponse {
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
   const videoUrl = searchParams.get('url');
 
   if (!videoUrl) {
-    return Response.json(
+    return NextResponse.json(
       {
         success: false,
         data: {},
@@ -60,7 +61,7 @@ export async function GET(request: Request) {
       console.error(
         `[parse] 解析接口返回错误: ${response.status} ${response.statusText}`
       );
-      return Response.json(
+      return NextResponse.json(
         {
           success: false,
           data: {},
@@ -135,7 +136,7 @@ export async function GET(request: Request) {
         console.warn(`[parse] URL解析失败，保持原样:`, m3u8Url);
       }
       
-      return Response.json({
+      return NextResponse.json({
         success: true,
         data: {
           m3u8_url: m3u8Url,
@@ -149,7 +150,7 @@ export async function GET(request: Request) {
       const errorMsg =
         result.error || '解析失败：无法获取播放地址';
       console.error(`[parse] 解析失败: ${errorMsg}`);
-      return Response.json(
+      return NextResponse.json(
         {
           success: false,
           data: {},
@@ -163,7 +164,7 @@ export async function GET(request: Request) {
     console.error(`[parse] 解析请求失败:`, error);
     const errorMsg =
       error instanceof Error ? error.message : '解析失败';
-    return Response.json(
+    return NextResponse.json(
       {
         success: false,
         data: {},

@@ -35,6 +35,11 @@ export async function searchOfficialResources(
   query: string,
   baseUrl?: string
 ): Promise<SearchResult[]> {
+  // OrionTV 兼容：官方独立搜索接口（789）返回的 source 字段可能缺失/不稳定。
+  // 为了保证 /api/search/resources 返回的 key（789caiji）与 SearchResult.source 一致，这里统一固化。
+  const OFFICIAL_SOURCE_KEY = '789caiji';
+  const OFFICIAL_SOURCE_NAME = '789采集';
+
   const officialSearchUrl =
     baseUrl ||
     process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL ||
@@ -104,8 +109,8 @@ export async function searchOfficialResources(
                     title: item.title || item.vod_name || '',
                     poster: item.poster || item.vod_pic || '',
                     episodes: item.episodes,
-                    source: item.source || 'official',
-                    source_name: item.source_name || '官方资源',
+                    source: OFFICIAL_SOURCE_KEY,
+                    source_name: OFFICIAL_SOURCE_NAME,
                     class: item.class || item.vod_class || '',
                     year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
                     desc: cleanHtmlTags(item.desc || item.vod_content || ''),
@@ -252,8 +257,8 @@ export async function searchOfficialResources(
         title: item.vod_name.trim().replace(/\s+/g, ' '),
         poster: item.vod_pic,
         episodes,
-        source: 'official',
-        source_name: '官方资源',
+        source: OFFICIAL_SOURCE_KEY,
+        source_name: OFFICIAL_SOURCE_NAME,
         class: item.vod_class,
         year: item.vod_year
           ? item.vod_year.match(/\d{4}/)?.[0] || ''
@@ -288,7 +293,8 @@ export async function searchOfficialResources(
  */
 export async function searchUnofficialResources(
   query: string,
-  baseUrl?: string
+  baseUrl?: string,
+  options?: { exactTitle?: string; limit?: number; source?: string }
 ): Promise<SearchResult[]> {
   const unofficialSearchUrl =
     baseUrl ||
@@ -313,8 +319,6 @@ export async function searchUnofficialResources(
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
-
     if (!response.ok) {
       console.warn(
         `[searchUnofficialResources] 接口返回错误状态: ${response.status}`
@@ -324,81 +328,144 @@ export async function searchUnofficialResources(
 
     // 检查响应类型，可能是 SSE 格式或 JSON 格式
     const contentType = response.headers.get('content-type') || '';
-    const text = await response.text();
-
     let data: ApiSearchResponse;
 
-    // 如果是 SSE 格式（text/event-stream 或以 "data: " 开头）
-    if (
-      contentType.includes('text/event-stream') ||
-      text.trim().startsWith('data:')
-    ) {
+    // SSE：使用流式解析，避免 response.text() 等待长连接结束导致接口卡死
+    if (contentType.includes('text/event-stream') && response.body) {
       console.log(`[searchUnofficialResources] 检测到 SSE 格式响应`);
-      // 解析 SSE 格式：提取所有 data: 行的 JSON
-      const lines = text.split('\n');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
       const allSearchResults: SearchResult[] = [];
       const allApiItems: ApiSearchItem[] = [];
       let hasSearchResultFormat = false;
 
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine.startsWith('data:')) {
-          try {
-            const jsonStr = trimmedLine.substring(5).trim(); // 去掉 "data: " 前缀
-            const sseData = JSON.parse(jsonStr);
+      const exactTitle = options?.exactTitle;
+      const limit = options?.limit ?? 0;
+      const wantSource = options?.source;
+      const matchedExact: SearchResult[] = [];
 
-            // SSE 格式可能包含 results 数组
-            if (sseData.results && Array.isArray(sseData.results)) {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              sseData.results.forEach((item: any) => {
-                // 检查是否是 SearchResult 格式（有 episodes 数组）
-                if (item.episodes && Array.isArray(item.episodes)) {
-                  hasSearchResultFormat = true;
-                  // 已经是 SearchResult 格式，直接使用
-                  allSearchResults.push({
-                    id: item.id || item.vod_id?.toString() || '',
-                    title: item.title || item.vod_name || '',
-                    poster: item.poster || item.vod_pic || '',
-                    episodes: item.episodes,
-                    source: item.source || 'unofficial',
-                    source_name: item.source_name || '非官方资源',
-                    class: item.class || item.vod_class || '',
-                    year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
-                    desc: cleanHtmlTags(item.desc || item.vod_content || ''),
-                    type_name: item.type_name,
-                    douban_id: item.douban_id || item.vod_douban_id,
-                    source_type: 'unofficial',
-                  });
-                } else if (item.vod_id || item.id) {
-                  // 是 ApiSearchItem 格式，需要转换
+      let streamDone = false;
+      while (!streamDone) {
+        const { value, done } = await reader.read();
+        streamDone = done;
+        if (streamDone) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine.startsWith('data:')) continue;
+
+          const jsonStr = trimmedLine.substring(5).trim();
+          if (!jsonStr) continue;
+
+          let sseData: unknown;
+          try {
+            sseData = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          const sseObj =
+            typeof sseData === 'object' && sseData !== null
+              ? (sseData as Record<string, unknown>)
+              : null;
+
+          if (sseObj && Array.isArray(sseObj.results)) {
+            const results = sseObj.results as unknown[];
+            for (const item of results) {
+              if (typeof item !== 'object' || item === null) continue;
+              const rec = item as Record<string, unknown>;
+              const episodes = rec.episodes;
+              if (Array.isArray(episodes)) {
+                hasSearchResultFormat = true;
+                const doubanRaw = rec.douban_id ?? rec.vod_douban_id;
+                const doubanId =
+                  typeof doubanRaw === 'number'
+                    ? doubanRaw
+                    : typeof doubanRaw === 'string'
+                      ? parseInt(doubanRaw, 10)
+                      : undefined;
+
+                const sr: SearchResult = {
+                  id: String(rec.id || (rec.vod_id as string | number | undefined) || ''),
+                  title: String(rec.title || rec.vod_name || ''),
+                  poster: String(rec.poster || rec.vod_pic || ''),
+                  episodes: episodes as string[],
+                  source: String(rec.source || 'unofficial'),
+                  source_name: String(rec.source_name || '非官方资源'),
+                  class: String(rec.class || rec.vod_class || ''),
+                  year:
+                    String(rec.year || rec.vod_year || '').match(/\d{4}/)?.[0] ||
+                    'unknown',
+                  desc: cleanHtmlTags(String(rec.desc || rec.vod_content || '')),
+                  type_name: rec.type_name as string | undefined,
+                  douban_id: Number.isFinite(doubanId) ? doubanId : undefined,
+                  source_type: 'unofficial',
+                };
+
+                // 支持提前返回：只要拿到同标题的前 N 条就够了（/api/search/one 用）
+                const isExact = !!exactTitle && sr.title === exactTitle;
+                const isSourceOk = !wantSource || sr.source === wantSource;
+
+                if (isExact && isSourceOk) {
+                  matchedExact.push(sr);
+                  if (limit > 0 && matchedExact.length >= limit) {
+                    reader.cancel();
+                    return matchedExact.slice(0, limit);
+                  }
+                }
+
+                // 默认行为：不做过滤时才累积全量结果（避免在 /api/search/one 中把大流全部塞进内存）
+                if (!exactTitle && !wantSource && limit <= 0) {
+                  allSearchResults.push(sr);
+                }
+              } else {
+                const vodId = rec.vod_id ?? rec.id;
+                if (vodId) {
                   allApiItems.push({
-                    vod_id: item.vod_id || item.id,
-                    vod_name: item.vod_name || item.title,
-                    vod_pic: item.vod_pic || item.poster,
-                    vod_play_url: item.vod_play_url,
-                    vod_class: item.vod_class || item.class,
-                    vod_year: item.vod_year || item.year,
-                    vod_content: item.vod_content || item.desc,
-                    vod_douban_id: item.vod_douban_id || item.douban_id,
-                    type_name: item.type_name,
+                    vod_id: String(vodId),
+                    vod_name: String(rec.vod_name ?? rec.title ?? ''),
+                    vod_pic: String(rec.vod_pic ?? rec.poster ?? ''),
+                    vod_play_url: rec.vod_play_url as string | undefined,
+                    vod_class: rec.vod_class
+                      ? String(rec.vod_class)
+                      : rec.class
+                        ? String(rec.class)
+                        : undefined,
+                    vod_year: rec.vod_year
+                      ? String(rec.vod_year)
+                      : rec.year
+                        ? String(rec.year)
+                        : undefined,
+                    vod_content: rec.vod_content
+                      ? String(rec.vod_content)
+                      : rec.desc
+                        ? String(rec.desc)
+                        : undefined,
+                    vod_douban_id:
+                      typeof rec.vod_douban_id === 'number'
+                        ? rec.vod_douban_id
+                        : typeof rec.douban_id === 'number'
+                          ? rec.douban_id
+                          : undefined,
+                    type_name: rec.type_name as string | undefined,
                   });
                 }
-              });
-            } else if (sseData.list && Array.isArray(sseData.list)) {
-              // 如果是标准的 API 响应格式
-              allApiItems.push(...sseData.list);
+              }
             }
+          } else if (sseObj && Array.isArray(sseObj.list)) {
+            allApiItems.push(...(sseObj.list as ApiSearchItem[]));
+          }
 
-            // 如果 done 为 true，停止解析
-            if (sseData.done === true) {
-              break;
-            }
-          } catch (e) {
-            // 忽略解析错误，继续处理下一行
-            console.warn(
-              `[searchUnofficialResources] SSE 行解析失败:`,
-              trimmedLine.substring(0, 100)
-            );
+          if (sseObj?.done === true) {
+            reader.cancel();
+            break;
           }
         }
       }
@@ -411,44 +478,78 @@ export async function searchUnofficialResources(
         return allSearchResults;
       }
 
-      // 如果解析到了 ApiSearchItem 格式的数据，构造标准格式的响应
+      // 如果开启了精确过滤/限流，但没有提前命中，也返回已收集的精确结果（可能为空）
+      if ((exactTitle || wantSource || limit > 0) && hasSearchResultFormat) {
+        return matchedExact;
+      }
+
       if (allApiItems.length > 0) {
         console.log(
           `[searchUnofficialResources] SSE 解析到 ApiSearchItem 格式，结果数: ${allApiItems.length}`
         );
-        data = {
-          code: 1,
-          msg: '数据列表',
-          list: allApiItems,
-        };
+        data = { code: 1, msg: '数据列表', list: allApiItems };
       } else {
-        // 如果两种格式都没有解析到数据，记录详细日志
-        console.warn(
-          `[searchUnofficialResources] SSE 解析后数据为空`,
-          {
-            textLength: text.length,
-            linesCount: lines.length,
-            hasSearchResultFormat,
-            allSearchResultsLength: allSearchResults.length,
-            allApiItemsLength: allApiItems.length,
-            firstFewLines: lines.slice(0, 5),
+        console.warn(`[searchUnofficialResources] SSE 解析后数据为空`);
+        return [];
+      }
+    }
+
+    // 非 SSE：按 JSON 读取
+    const text = await response.text();
+    // 如果没有设置 content-type 但实际是 SSE 文本，这里兜底走原逻辑（会慢，但至少不 crash）
+    if (text.trim().startsWith('data:')) {
+      console.log(`[searchUnofficialResources] 检测到 SSE 文本响应（非 event-stream）`);
+      // 复用旧逻辑：把 data: 行拆出来 JSON.parse
+      const lines = text.split('\n');
+      const allSearchResults: SearchResult[] = [];
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine.startsWith('data:')) continue;
+        try {
+          const jsonStr = trimmedLine.substring(5).trim();
+          const sseData = JSON.parse(jsonStr);
+          if (sseData?.results && Array.isArray(sseData.results)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            sseData.results.forEach((item: any) => {
+              if (item.episodes && Array.isArray(item.episodes)) {
+                allSearchResults.push({
+                  id: item.id || item.vod_id?.toString() || '',
+                  title: item.title || item.vod_name || '',
+                  poster: item.poster || item.vod_pic || '',
+                  episodes: item.episodes,
+                  source: item.source || 'unofficial',
+                  source_name: item.source_name || '非官方资源',
+                  class: item.class || item.vod_class || '',
+                  year:
+                    item.year ||
+                    item.vod_year?.match(/\d{4}/)?.[0] ||
+                    'unknown',
+                  desc: cleanHtmlTags(item.desc || item.vod_content || ''),
+                  type_name: item.type_name,
+                  douban_id: item.douban_id || item.vod_douban_id,
+                  source_type: 'unofficial',
+                });
+              }
+            });
           }
-        );
-        return [];
+        } catch {
+          // ignore
+        }
       }
-    } else {
-      // 标准 JSON 格式
-      try {
-        data = JSON.parse(text);
-      } catch (parseError) {
-        console.error(
-          `[searchUnofficialResources] JSON 解析失败:`,
-          parseError,
-          `响应前100字符:`,
-          text.substring(0, 100)
-        );
-        return [];
-      }
+      return allSearchResults;
+    }
+
+    // 标准 JSON 格式
+    try {
+      data = JSON.parse(text);
+    } catch (parseError) {
+      console.error(
+        `[searchUnofficialResources] JSON 解析失败:`,
+        parseError,
+        `响应前100字符:`,
+        text.substring(0, 100)
+      );
+      return [];
     }
 
     if (
@@ -508,12 +609,13 @@ export async function searchUnofficialResources(
     );
     return results;
   } catch (error) {
-    clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
       console.warn(`[searchUnofficialResources] 请求超时`);
     } else {
       console.error(`[searchUnofficialResources] 搜索失败:`, error);
     }
     return [];
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
