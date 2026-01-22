@@ -1,2 +1,35 @@
 .env
 .env*.local
+
+# VCS
+.git
+.gitignore
+
+# Node / Next.js build artifacts
+node_modules
+.next
+out
+.turbo
+.cache
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local data / runtime data (very important for build context size)
+data
+data/**
+
+# IDE / OS
+.DS_Store
+.idea
+.vscode
+
+# Tests / coverage
+coverage
+
+# Misc
+*.tsbuildinfo
