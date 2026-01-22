@@ -338,8 +338,10 @@ export async function GET(request: Request) {
       const streamed = await collectSearchResultsFromStream({
         request,
         query,
-        maxTotalMs: 16000,
-        firstByteMs: 6000,
+        // 生产环境中可能存在 SSE 缓冲（直到 done 才返回首包），
+        // firstByteMs 需要覆盖 /api/search/stream 内部 15s 超时窗口，否则会误判为空。
+        maxTotalMs: 20000,
+        firstByteMs: 18000,
         idleMs: 1200,
       });
 
@@ -407,8 +409,9 @@ export async function GET(request: Request) {
     const allResults = await collectSearchResultsFromStream({
       request,
       query,
-      maxTotalMs: 20000,
-      firstByteMs: 8000,
+      // 同上：避免在被缓冲的情况下过早触发“首包超时”而返回空数组
+      maxTotalMs: 22000,
+      firstByteMs: 18000,
       idleMs: 1500,
     });
 
