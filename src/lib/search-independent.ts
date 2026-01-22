@@ -350,11 +350,39 @@ export async function searchUnofficialResources(
       const wantSource = options?.source;
       const matchedExact: SearchResult[] = [];
 
-      let streamDone = false;
-      while (!streamDone) {
-        const { value, done } = await reader.read();
-        streamDone = done;
-        if (streamDone) break;
+      // 注意：ss.riowang.win 是长连接 SSE；如果用固定超时 abort，会导致“已收到的数据被整体丢弃”。
+      // 这里在 AbortError 时返回已收集的部分结果（而不是 return []）。
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        let value: Uint8Array | undefined;
+        let done = false;
+        try {
+          const r = await reader.read();
+          value = r.value;
+          done = r.done;
+        } catch (e) {
+          // 超时/取消：直接返回已收集到的部分结果
+          const isAbort =
+            (e instanceof Error && e.name === 'AbortError') ||
+            controller.signal.aborted === true;
+          if (isAbort) {
+            try {
+              reader.cancel();
+            } catch {
+              // ignore
+            }
+            if (hasSearchResultFormat) {
+              // /api/search/one 等精确过滤：优先返回 matchedExact
+              if (exactTitle || wantSource || limit > 0) return matchedExact;
+              return allSearchResults;
+            }
+            // 没有 SearchResult 格式也只能返回空
+            return [];
+          }
+          throw e;
+        }
+
+        if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');

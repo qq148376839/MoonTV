@@ -11,7 +11,7 @@ import { yellowWords } from '@/lib/yellow';
 export const runtime = 'edge';
 
 // 用于线上快速确认是否已经部署了最新代码（curl -i 查看响应头）
-const SEARCH_ROUTE_REV = '2026-01-22.4';
+const SEARCH_ROUTE_REV = '2026-01-22.5';
 
 type IdleTimeoutResult = { timeout: true };
 type ReadWithIdleTimeoutResult =
