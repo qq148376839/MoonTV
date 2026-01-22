@@ -6,6 +6,9 @@ import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'edge';
 
+// 用于线上快速确认是否已经部署了最新代码（curl -i 查看响应头）
+const SEARCH_ROUTE_REV = '2026-01-22.2';
+
 type IdleTimeoutResult = { timeout: true };
 type ReadWithIdleTimeoutResult =
   | ReadableStreamReadResult<Uint8Array>
@@ -71,20 +74,56 @@ async function collectSearchResultsFromStream(params: {
   query: string;
   maxTotalMs: number;
   idleMs: number;
+  firstByteMs: number;
 }): Promise<SearchResult[]> {
-  const { request, query, maxTotalMs, idleMs } = params;
+  const { request, query, maxTotalMs, idleMs, firstByteMs } = params;
   const urlObj = new URL(request.url);
-  const baseUrl = `${urlObj.protocol}//${urlObj.host}`;
-  const streamUrl = `${baseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
+  const externalBaseUrl = `${urlObj.protocol}//${urlObj.host}`;
+  const internalPort = process.env.PORT || '3000';
+  const internalBaseUrl = `http://127.0.0.1:${internalPort}`;
+
+  const internalStreamUrl = `${internalBaseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
+  const externalStreamUrl = `${externalBaseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), maxTotalMs);
 
-  const res = await fetch(streamUrl, {
-    headers: { Accept: 'text/event-stream' },
-    signal: controller.signal,
-    cache: 'no-store',
-  });
+  let res: Response;
+  try {
+    // Docker/反代场景下，容器内直接请求公网域名回环经常失败；
+    // 优先快速探测 internal loopback，失败则回退 external host。
+    const shouldTryInternalFirst =
+      urlObj.hostname !== 'localhost' && urlObj.hostname !== '127.0.0.1';
+
+    if (shouldTryInternalFirst) {
+      const probe = new AbortController();
+      const probeId = setTimeout(() => probe.abort(), 800);
+      try {
+        res = await fetch(internalStreamUrl, {
+          headers: { Accept: 'text/event-stream' },
+          signal: probe.signal,
+          cache: 'no-store',
+        });
+        clearTimeout(probeId);
+      } catch {
+        clearTimeout(probeId);
+        res = await fetch(externalStreamUrl, {
+          headers: { Accept: 'text/event-stream' },
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+      }
+    } else {
+      res = await fetch(externalStreamUrl, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+    }
+  } catch {
+    clearTimeout(timeoutId);
+    return [];
+  }
 
   if (!res.ok || !res.body) {
     clearTimeout(timeoutId);
@@ -95,16 +134,18 @@ async function collectSearchResultsFromStream(params: {
   const decoder = new TextDecoder();
   let buffer = '';
   const startedAt = Date.now();
+  let hasAnyChunk = false;
 
   const seen = new Set<string>();
   const out: SearchResult[] = [];
 
   const readWithIdleTimeout =
     async (): Promise<ReadWithIdleTimeoutResult> => {
+      const waitMs = hasAnyChunk ? idleMs : firstByteMs;
       return await Promise.race([
         reader.read(),
         new Promise<IdleTimeoutResult>((resolve) =>
-          setTimeout(() => resolve({ timeout: true }), idleMs)
+          setTimeout(() => resolve({ timeout: true }), waitMs)
         ),
       ]);
     };
@@ -126,6 +167,7 @@ async function collectSearchResultsFromStream(params: {
       const { value, done } = r as ReadableStreamReadResult<Uint8Array>;
       if (done) break;
       if (value) {
+        hasAnyChunk = true;
         buffer += decoder.decode(value, { stream: true });
       }
 
@@ -296,8 +338,9 @@ export async function GET(request: Request) {
       const streamed = await collectSearchResultsFromStream({
         request,
         query,
-        maxTotalMs: 6000,
-        idleMs: 900,
+        maxTotalMs: 16000,
+        firstByteMs: 6000,
+        idleMs: 1200,
       });
 
       const results: SearchResult[] = [];
@@ -350,6 +393,7 @@ export async function GET(request: Request) {
         { results },
         {
           headers: {
+            'X-MoonTV-Search-Rev': SEARCH_ROUTE_REV,
             // /api/search 结果来自 stream 聚合：避免浏览器缓存旧的空结果造成“看起来搜不到”
             'Cache-Control': 'no-store',
             'CDN-Cache-Control': 'no-store',
@@ -363,8 +407,9 @@ export async function GET(request: Request) {
     const allResults = await collectSearchResultsFromStream({
       request,
       query,
-      maxTotalMs: 12000,
-      idleMs: 1200,
+      maxTotalMs: 20000,
+      firstByteMs: 8000,
+      idleMs: 1500,
     });
 
     let flattenedResults = allResults;
@@ -378,6 +423,7 @@ export async function GET(request: Request) {
       { results: flattenedResults },
       {
         headers: {
+          'X-MoonTV-Search-Rev': SEARCH_ROUTE_REV,
           // /api/search 结果来自 stream 聚合：避免浏览器缓存旧的空结果造成“看起来搜不到”
           'Cache-Control': 'no-store',
           'CDN-Cache-Control': 'no-store',
@@ -386,6 +432,14 @@ export async function GET(request: Request) {
       }
     );
   } catch (error) {
-    return NextResponse.json({ error: '搜索失败' }, { status: 500 });
+    const debug = searchParams.get('debug') === '1';
+    const msg =
+      error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+    // eslint-disable-next-line no-console
+    console.error('[api/search] failed:', msg || error);
+    return NextResponse.json(
+      debug ? { error: '搜索失败', message: msg || 'unknown' } : { error: '搜索失败' },
+      { status: 500, headers: { 'X-MoonTV-Search-Rev': SEARCH_ROUTE_REV } }
+    );
   }
 }
