@@ -107,6 +107,14 @@ function handleAuthFailure(
     return new NextResponse('Unauthorized', { status: 401 });
   }
 
+  // TV 路由重定向到 TV 登录页面
+  if (pathname.startsWith('/tv')) {
+    const loginUrl = new URL('/tv/login', request.url);
+    const fullUrl = `${pathname}${request.nextUrl.search}`;
+    loginUrl.searchParams.set('redirect', fullUrl);
+    return NextResponse.redirect(loginUrl);
+  }
+
   // 否则重定向到登录页面
   const loginUrl = new URL('/login', request.url);
   // 保留完整的URL，包括查询参数
@@ -133,6 +141,6 @@ function shouldSkipAuth(pathname: string): boolean {
 // 配置middleware匹配规则
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|login|warning|api/login|api/register|api/logout|api/cron|api/server-config|api/decrypt|api/search|api/proxy|api/local-|api/image-proxy|api/parse-m3u8|api/official-play\\.m3u8|api/unofficial-play\\.m3u8).*)',
+    '/((?!_next/static|_next/image|favicon.ico|login|tv/login|warning|api/login|api/register|api/logout|api/cron|api/server-config|api/decrypt|api/search|api/proxy|api/local-|api/image-proxy|api/parse-m3u8|api/official-play\\.m3u8|api/unofficial-play\\.m3u8).*)',
   ],
 };

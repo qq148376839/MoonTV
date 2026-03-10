@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MoonTV</string>
+    <string name="settings_title">设置</string>
+    <string name="server_url_label">服务器地址</string>
+    <string name="server_url_hint">例如: http://192.168.1.100:51000</string>
+    <string name="save">保存</string>
+    <string name="clear_cache">清除缓存</string>
+    <string name="cache_cleared">缓存已清除</string>
+    <string name="server_url_required">请输入服务器地址</string>
+    <string name="player_loading">正在加载...</string>
+</resources>

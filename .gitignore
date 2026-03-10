@@ -66,3 +66,10 @@ public/workbox-*.js
 # Wrangler build artifacts
 workers/.wrangler/
 **/.wrangler/
+
+# Android TV build artifacts
+android-tv/.gradle/
+android-tv/build/
+android-tv/app/build/
+android-tv/local.properties
+android-tv/.idea/
