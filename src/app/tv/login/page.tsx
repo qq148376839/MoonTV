@@ -249,6 +249,11 @@ function TvLoginClient() {
           {error && (
             <p className='text-red-400 text-lg text-center'>{error}</p>
           )}
+          <p
+            id='tv-login-error'
+            className='text-red-400 text-lg text-center'
+            style={{ display: 'none' }}
+          />
           <button
             id='tv-login-btn'
             ref={focusSubmitRef}
