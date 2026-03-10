@@ -3,10 +3,17 @@
     <string name="app_name">MoonTV</string>
     <string name="settings_title">设置</string>
     <string name="server_url_label">服务器地址</string>
-    <string name="server_url_hint">例如: http://192.168.1.100:51000</string>
+    <string name="server_url_hint">例如: http://192.168.1.100:1234</string>
     <string name="save">保存</string>
     <string name="clear_cache">清除缓存</string>
     <string name="cache_cleared">缓存已清除</string>
     <string name="server_url_required">请输入服务器地址</string>
     <string name="player_loading">正在加载...</string>
+    <string name="connection_failed">连接服务器失败，请检查地址是否正确</string>
+    <string name="server_error">服务器错误 (%1$d)，请检查服务是否正常运行</string>
+    <string name="url_saved">已保存: %1$s</string>
+    <string name="qr_title">手机扫码配置</string>
+    <string name="qr_scan_hint">手机扫描二维码，在浏览器中输入服务器地址\n%1$s</string>
+    <string name="qr_no_network">未检测到网络连接，请手动输入</string>
+    <string name="qr_loading">正在生成二维码...</string>
 </resources>

@@ -6,19 +6,27 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.http.SslError
 import android.os.Bundle
 import android.view.KeyEvent
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private var hasLoadError = false
+    private var pageStarted = false
 
     private val playerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -33,6 +41,18 @@ class MainActivity : AppCompatActivity() {
                     null
                 )
             }
+        }
+    }
+
+    private val settingsLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // After returning from settings, reload with new URL
+        val prefs = getSharedPreferences(MoonTvBridge.PREFS_NAME, Context.MODE_PRIVATE)
+        val serverUrl = prefs.getString(MoonTvBridge.KEY_SERVER_URL, null)
+        if (!serverUrl.isNullOrBlank()) {
+            hasLoadError = false
+            webView.loadUrl("$serverUrl/tv")
         }
     }
 
@@ -82,8 +102,60 @@ class MainActivity : AppCompatActivity() {
         // Add JS bridge
         webView.addJavascriptInterface(MoonTvBridge(this), MoonTvBridge.BRIDGE_NAME)
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                pageStarted = true
+                hasLoadError = false
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                // Only handle main frame errors
+                if (request?.isForMainFrame == true) {
+                    hasLoadError = true
+                    goToSettings(getString(R.string.connection_failed))
+                }
+            }
+
+            @SuppressLint("WebViewClientOnReceivedSslError")
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: SslErrorHandler?,
+                error: SslError?
+            ) {
+                // Allow self-signed certs on local network
+                handler?.proceed()
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: android.webkit.WebResourceResponse?
+            ) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request?.isForMainFrame == true) {
+                    val statusCode = errorResponse?.statusCode ?: 0
+                    if (statusCode >= 500) {
+                        hasLoadError = true
+                        goToSettings(getString(R.string.server_error, statusCode))
+                    }
+                }
+            }
+        }
+
         webView.webChromeClient = WebChromeClient()
+    }
+
+    private fun goToSettings(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        val intent = Intent(this, SettingsActivity::class.java)
+        intent.putExtra(SettingsActivity.EXTRA_ERROR_MESSAGE, message)
+        settingsLauncher.launch(intent)
     }
 
     fun launchPlayer(intent: Intent) {
@@ -91,6 +163,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Menu button or long-press back → open settings
+        if (keyCode == KeyEvent.KEYCODE_MENU) {
+            settingsLauncher.launch(Intent(this, SettingsActivity::class.java))
+            return true
+        }
         // Handle back button - go back in WebView history first
         if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
             webView.goBack()

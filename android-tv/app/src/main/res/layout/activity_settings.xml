@@ -1,62 +1,121 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg_dark"
-    android:gravity="center"
-    android:orientation="vertical"
-    android:padding="48dp">
+    android:fillViewport="true">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="48dp"
-        android:text="@string/app_name"
-        android:textColor="@color/green_primary"
-        android:textSize="36sp"
-        android:textStyle="bold" />
-
-    <TextView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="8dp"
-        android:text="@string/server_url_label"
-        android:textColor="@color/text_secondary"
-        android:textSize="18sp" />
+        android:gravity="center_horizontal"
+        android:orientation="horizontal"
+        android:padding="48dp">
 
-    <EditText
-        android:id="@+id/serverUrlInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@color/surface_dark"
-        android:hint="@string/server_url_hint"
-        android:inputType="textUri"
-        android:padding="16dp"
-        android:textColor="@color/text_primary"
-        android:textColorHint="@color/text_secondary"
-        android:textSize="20sp"
-        android:importantForAutofill="no" />
+        <!-- Left side: QR code -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingEnd="32dp"
+            android:paddingStart="0dp">
 
-    <Button
-        android:id="@+id/saveButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:backgroundTint="@color/green_primary"
-        android:padding="16dp"
-        android:text="@string/save"
-        android:textColor="@color/white"
-        android:textSize="18sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                android:text="@string/qr_title"
+                android:textColor="@color/green_primary"
+                android:textSize="20sp"
+                android:textStyle="bold" />
 
-    <Button
-        android:id="@+id/clearCacheButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:backgroundTint="@color/surface_dark"
-        android:padding="16dp"
-        android:text="@string/clear_cache"
-        android:textColor="@color/text_secondary"
-        android:textSize="16sp" />
+            <ImageView
+                android:id="@+id/qrCodeImage"
+                android:layout_width="260dp"
+                android:layout_height="260dp"
+                android:background="@color/white"
+                android:contentDescription="@string/qr_title"
+                android:padding="8dp"
+                android:scaleType="fitCenter" />
 
-</LinearLayout>
+            <TextView
+                android:id="@+id/qrHintText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center"
+                android:text="@string/qr_loading"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+
+        </LinearLayout>
+
+        <!-- Right side: manual input -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:paddingStart="32dp"
+            android:paddingEnd="0dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="32dp"
+                android:text="@string/app_name"
+                android:textColor="@color/green_primary"
+                android:textSize="36sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:text="@string/server_url_label"
+                android:textColor="@color/text_secondary"
+                android:textSize="18sp" />
+
+            <EditText
+                android:id="@+id/serverUrlInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@color/surface_dark"
+                android:hint="@string/server_url_hint"
+                android:importantForAutofill="no"
+                android:inputType="textUri"
+                android:padding="16dp"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:textSize="20sp" />
+
+            <Button
+                android:id="@+id/saveButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="@color/green_primary"
+                android:padding="16dp"
+                android:text="@string/save"
+                android:textColor="@color/white"
+                android:textSize="18sp" />
+
+            <Button
+                android:id="@+id/clearCacheButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/surface_dark"
+                android:padding="16dp"
+                android:text="@string/clear_cache"
+                android:textColor="@color/text_secondary"
+                android:textSize="16sp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</ScrollView>
