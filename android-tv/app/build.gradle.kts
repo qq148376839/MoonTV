@@ -47,4 +47,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.2.1")
 
     implementation("com.google.android.material:material:1.11.0")
+
+    // QR code generation
+    implementation("com.google.zxing:core:3.5.3")
 }

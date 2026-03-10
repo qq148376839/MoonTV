@@ -8,3 +8,6 @@
 
 # Keep WebView JS interface
 -keepattributes JavascriptInterface
+
+# Keep ZXing QR code classes
+-keep class com.google.zxing.** { *; }
