@@ -133,7 +133,13 @@ export function TvFocusProvider({ children }: { children: React.ReactNode }) {
           break;
         }
         case 'Enter': {
-          // D-pad center / Enter: simulate click on focused element
+          // For form inputs, let the browser handle Enter natively
+          // (triggers form submission, opens on-screen keyboard, etc.)
+          const tag = current.element.tagName.toLowerCase();
+          if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            return;
+          }
+          // For other elements (buttons, cards, etc.), simulate click
           // Some Android TV WebViews don't trigger click for DPAD_CENTER
           e.preventDefault();
           current.element.click();
