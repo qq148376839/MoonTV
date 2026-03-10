@@ -2,6 +2,20 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 const nextConfig = {
   output: 'standalone',
+
+  // Disable caching for TV pages to prevent Android TV WebView stale content
+  async headers() {
+    return [
+      {
+        source: '/tv/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+          { key: 'Pragma', value: 'no-cache' },
+          { key: 'Expires', value: '0' },
+        ],
+      },
+    ];
+  },
   typescript: {
     // 构建时忽略 TypeScript 错误，减少内存消耗
     // 建议在 CI/CD 中单独运行类型检查
@@ -93,7 +107,7 @@ const nextConfig = {
       // 确保 webpack 正确处理 CommonJS 模块
       // Next.js 16 的 webpack 应该自动处理，但如果出现问题，可能需要显式配置
       // 注意：这个错误可能来自 Next.js 的 react-refresh-utils 或第三方依赖
-      
+
       // 如果问题仍然存在，可能需要：
       // 1. 清除 .next 目录和 node_modules，重新安装依赖
       // 2. 检查是否有第三方依赖使用 CommonJS，考虑使用 next-transpile-modules

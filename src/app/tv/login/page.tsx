@@ -8,7 +8,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTvFocusable } from '@/components/tv/TvFocusProvider';
 
 // BUILD_TS is used to verify the correct version is loaded in the WebView
-const BUILD_TS = '20260310-v7';
+const BUILD_TS = '20260310-v8';
 
 // Direct DOM debug writer — completely bypasses React state.
 // Works even if React's state/rendering has issues in the WebView.
