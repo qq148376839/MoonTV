@@ -7,6 +7,28 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useTvFocusable } from '@/components/tv/TvFocusProvider';
 
+// BUILD_TS is used to verify the correct version is loaded in the WebView
+const BUILD_TS = '20260310-v7';
+
+// Direct DOM debug writer — completely bypasses React state.
+// Works even if React's state/rendering has issues in the WebView.
+function debugWrite(msg: string) {
+  try {
+    const el = document.getElementById('tv-debug-log');
+    if (!el) return;
+    const line = document.createElement('div');
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.appendChild(line);
+    // Keep only last 15 entries
+    while (el.children.length > 15) {
+      if (el.firstChild) el.removeChild(el.firstChild);
+    }
+    el.scrollTop = el.scrollHeight;
+  } catch {
+    // ignore
+  }
+}
+
 function TvLoginClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -14,17 +36,11 @@ function TvLoginClient() {
   const [loading, setLoading] = useState(false);
   const [shouldAskUsername, setShouldAskUsername] = useState(false);
 
-  // Debug log state — visible on screen for Android TV diagnosis
-  const [debugLog, setDebugLog] = useState<string[]>([]);
-  const addDebug = useCallback((msg: string) => {
-    setDebugLog((prev) => [...prev.slice(-9), msg]);
-  }, []);
-
   const focusUsernameRef = useTvFocusable(1, 0);
   const focusPasswordRef = useTvFocusable(2, 0);
   const focusSubmitRef = useTvFocusable(3, 0);
 
-  // Plain JS value storage — immune to React closure/state issues
+  // Plain JS value storage
   const passwordValueRef = useRef('');
   const usernameValueRef = useRef('');
 
@@ -49,30 +65,31 @@ function TvLoginClient() {
   );
 
   useEffect(() => {
+    debugWrite(`=== MoonTV Login ${BUILD_TS} ===`);
     if (typeof window !== 'undefined') {
       const storageType = (window as any).RUNTIME_CONFIG?.STORAGE_TYPE;
       setShouldAskUsername(storageType && storageType !== 'localstorage');
-      addDebug(`init: storage=${storageType || 'localstorage'}`);
+      debugWrite(`init: storage=${storageType || 'localstorage'}`);
+      debugWrite(`ua: ${navigator.userAgent.slice(0, 60)}`);
     }
-  }, [addDebug]);
+  }, []);
 
-  // Track input values via native DOM 'input' event listeners.
+  // Track input values via native DOM event listeners
   useEffect(() => {
     const pwEl = passwordElRef.current;
     const unEl = usernameElRef.current;
 
-    addDebug(`refs: pw=${!!pwEl}, un=${!!unEl}`);
+    debugWrite(`refs: pw=${!!pwEl}, un=${!!unEl}`);
 
     const onPwInput = () => {
       const val = pwEl?.value ?? '';
       passwordValueRef.current = val;
-      addDebug(`pw-input: len=${val.length}`);
+      debugWrite(`pw-input: len=${val.length}`);
     };
     const onUnInput = () => {
       usernameValueRef.current = unEl?.value ?? '';
     };
 
-    // Listen to every event that could indicate a value change
     const pwEvents = ['input', 'compositionend', 'change', 'keyup'];
     const unEvents = ['input', 'compositionend', 'change', 'keyup'];
 
@@ -83,10 +100,9 @@ function TvLoginClient() {
       pwEvents.forEach((evt) => pwEl?.removeEventListener(evt, onPwInput));
       unEvents.forEach((evt) => unEl?.removeEventListener(evt, onUnInput));
     };
-  }, [shouldAskUsername, addDebug]);
+  }, [shouldAskUsername]);
 
   const doLogin = useCallback(async () => {
-    // Read from multiple sources for maximum reliability
     const src1 = passwordValueRef.current.trim();
     const src2 = passwordElRef.current?.value?.trim() || '';
     const src3 =
@@ -98,7 +114,7 @@ function TvLoginClient() {
 
     const pw = src1 || src2 || src3;
 
-    addDebug(
+    debugWrite(
       `doLogin: src1=${src1.length}, src2=${src2.length}, src3=${src3.length}`
     );
 
@@ -109,7 +125,7 @@ function TvLoginClient() {
 
     if (!pw) {
       setError('请输入密码');
-      addDebug('doLogin: pw empty, abort');
+      debugWrite('doLogin: pw empty, abort');
       return;
     }
     if (shouldAskUsername && !un) {
@@ -119,7 +135,7 @@ function TvLoginClient() {
 
     setError(null);
     setLoading(true);
-    addDebug(`doLogin: fetching /api/login pw=${pw.length}chars`);
+    debugWrite(`doLogin: fetching pw=${pw.length}chars`);
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
@@ -130,7 +146,7 @@ function TvLoginClient() {
         }),
       });
 
-      addDebug(`doLogin: response ${res.status}`);
+      debugWrite(`doLogin: response ${res.status}`);
 
       if (res.ok) {
         const redirect = searchParams.get('redirect') || '/tv';
@@ -142,21 +158,21 @@ function TvLoginClient() {
         setError(data.error ?? '服务器错误');
       }
     } catch (err) {
-      addDebug(`doLogin: error ${err}`);
+      debugWrite(`doLogin: error ${err}`);
       setError('网络错误，请稍后重试');
     } finally {
       setLoading(false);
     }
-  }, [shouldAskUsername, searchParams, router, addDebug]);
+  }, [shouldAskUsername, searchParams, router]);
 
-  // Native keydown listener on password input — Enter triggers login.
+  // Native keydown listener on password input
   useEffect(() => {
     const pwEl = passwordElRef.current;
     if (!pwEl) return;
 
     const handler = (e: Event) => {
       const ke = e as KeyboardEvent;
-      addDebug(`pw-keydown: key=${ke.key}, code=${ke.code}`);
+      debugWrite(`pw-keydown: key=${ke.key} code=${ke.code}`);
       if (ke.key === 'Enter') {
         e.preventDefault();
         e.stopPropagation();
@@ -166,37 +182,45 @@ function TvLoginClient() {
 
     pwEl.addEventListener('keydown', handler, true);
     return () => pwEl.removeEventListener('keydown', handler, true);
-  }, [doLogin, addDebug]);
+  }, [doLogin]);
 
   // Native click listener on button
   useEffect(() => {
     const btn = document.getElementById('tv-login-btn');
-    if (!btn) {
-      addDebug('btn: not found!');
-      return;
-    }
+    debugWrite(`btn: ${btn ? 'found' : 'NOT FOUND'}`);
 
-    addDebug('btn: listener attached');
+    if (!btn) return;
 
     const handler = (e: Event) => {
       e.preventDefault();
-      addDebug('btn: clicked!');
+      debugWrite('btn: clicked!');
       doLogin();
     };
 
     btn.addEventListener('click', handler);
     return () => btn.removeEventListener('click', handler);
-  }, [doLogin, addDebug]);
+  }, [doLogin]);
 
-  // Global keydown debug — log ALL key events to see what the remote sends
+  // Global keydown — log ALL key events
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName || '?';
-      addDebug(`key: ${e.key}(${e.code}) on ${tag}`);
+      debugWrite(`key: ${e.key}(${e.code}) target=${tag}`);
     };
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [addDebug]);
+  }, []);
+
+  // Global click — log ALL click events
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName || '?';
+      const id = (e.target as HTMLElement)?.id || '';
+      debugWrite(`click: target=${tag}${id ? '#' + id : ''}`);
+    };
+    window.addEventListener('click', handler, true);
+    return () => window.removeEventListener('click', handler, true);
+  }, []);
 
   return (
     <div className='flex min-h-screen items-center justify-center'>
@@ -236,17 +260,15 @@ function TvLoginClient() {
           </button>
         </div>
 
-        {/* Debug panel — visible on screen for Android TV diagnosis */}
-        <div className='mt-6 rounded-lg bg-black/50 p-3 font-mono text-xs text-green-400 max-h-48 overflow-y-auto'>
-          <div className='text-gray-500 mb-1'>-- debug --</div>
-          {debugLog.map((line, i) => (
-            <div key={i} className='truncate'>
-              {line}
-            </div>
-          ))}
-          {debugLog.length === 0 && (
-            <div className='text-gray-600'>waiting for events...</div>
-          )}
+        {/* Debug panel — direct DOM manipulation, no React state */}
+        <div className='mt-6 rounded-lg bg-black/80 p-3 max-h-48 overflow-y-auto'>
+          <div className='text-gray-500 font-mono text-xs mb-1'>
+            -- debug {BUILD_TS} --
+          </div>
+          <div
+            id='tv-debug-log'
+            className='font-mono text-xs text-green-400 space-y-0.5'
+          />
         </div>
       </div>
     </div>
