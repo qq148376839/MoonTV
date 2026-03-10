@@ -21,13 +21,12 @@ function TvLoginClient() {
   // Direct DOM refs for reading input values
   const usernameInputRef = useRef<HTMLInputElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
 
   const setUsernameRef = useCallback(
     (el: HTMLInputElement | null) => {
       usernameInputRef.current = el;
-      if (typeof focusUsernameRef === 'function') {
-        focusUsernameRef(el);
-      }
+      if (typeof focusUsernameRef === 'function') focusUsernameRef(el);
     },
     [focusUsernameRef]
   );
@@ -35,11 +34,17 @@ function TvLoginClient() {
   const setPasswordRef = useCallback(
     (el: HTMLInputElement | null) => {
       passwordInputRef.current = el;
-      if (typeof focusPasswordRef === 'function') {
-        focusPasswordRef(el);
-      }
+      if (typeof focusPasswordRef === 'function') focusPasswordRef(el);
     },
     [focusPasswordRef]
+  );
+
+  const setSubmitRef = useCallback(
+    (el: HTMLButtonElement | null) => {
+      buttonRef.current = el;
+      if (typeof focusSubmitRef === 'function') focusSubmitRef(el);
+    },
+    [focusSubmitRef]
   );
 
   useEffect(() => {
@@ -49,7 +54,6 @@ function TvLoginClient() {
     }
   }, []);
 
-  // Single login function that always reads from DOM
   const doLogin = useCallback(async () => {
     const pw = passwordInputRef.current?.value?.trim() || '';
     const un = usernameInputRef.current?.value?.trim() || '';
@@ -91,13 +95,34 @@ function TvLoginClient() {
     }
   }, [shouldAskUsername, searchParams, router]);
 
+  // Global keydown handler to catch Enter/DpadCenter on the login button
+  // Android TV WebView may send Enter or DpadCenter that don't trigger onClick
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Enter' && document.activeElement === buttonRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        doLogin();
+      }
+    }
+    // Use capture phase to run before TvFocusProvider
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [doLogin]);
+
   return (
     <div className='flex min-h-screen items-center justify-center'>
       <div className='w-full max-w-lg rounded-2xl bg-gray-900 p-10'>
         <h1 className='mb-8 text-center text-3xl font-bold text-green-500'>
           MoonTV
         </h1>
-        <div className='space-y-6'>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            doLogin();
+          }}
+          className='space-y-6'
+        >
           {shouldAskUsername && (
             <input
               ref={setUsernameRef}
@@ -114,30 +139,17 @@ function TvLoginClient() {
             placeholder='输入访问密码'
             autoComplete='current-password'
             autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                doLogin();
-              }
-            }}
           />
           {error && <p className='text-red-400 text-lg text-center'>{error}</p>}
           <button
-            ref={focusSubmitRef}
-            type='button'
+            ref={setSubmitRef}
+            type='submit'
             disabled={loading}
             className='tv-focusable w-full rounded-lg bg-green-600 py-4 text-xl font-semibold text-white disabled:opacity-50'
-            onClick={() => doLogin()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                doLogin();
-              }
-            }}
           >
             {loading ? '登录中...' : '登录'}
           </button>
-        </div>
+        </form>
       </div>
     </div>
   );
