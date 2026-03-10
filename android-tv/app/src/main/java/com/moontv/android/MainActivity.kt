@@ -79,6 +79,8 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
+        // Enable Chrome DevTools remote debugging via chrome://inspect
+        WebView.setWebContentsDebuggingEnabled(true)
         // Enable cookies
         CookieManager.getInstance().apply {
             setAcceptCookie(true)

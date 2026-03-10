@@ -14,6 +14,12 @@ function TvLoginClient() {
   const [loading, setLoading] = useState(false);
   const [shouldAskUsername, setShouldAskUsername] = useState(false);
 
+  // Debug log state — visible on screen for Android TV diagnosis
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const addDebug = useCallback((msg: string) => {
+    setDebugLog((prev) => [...prev.slice(-9), msg]);
+  }, []);
+
   const focusUsernameRef = useTvFocusable(1, 0);
   const focusPasswordRef = useTvFocusable(2, 0);
   const focusSubmitRef = useTvFocusable(3, 0);
@@ -46,49 +52,55 @@ function TvLoginClient() {
     if (typeof window !== 'undefined') {
       const storageType = (window as any).RUNTIME_CONFIG?.STORAGE_TYPE;
       setShouldAskUsername(storageType && storageType !== 'localstorage');
+      addDebug(`init: storage=${storageType || 'localstorage'}`);
     }
-  }, []);
+  }, [addDebug]);
 
   // Track input values via native DOM 'input' event listeners.
-  // This captures IME composition, paste, autocomplete — everything.
-  // React's onChange may not fire reliably in Android TV WebView.
   useEffect(() => {
     const pwEl = passwordElRef.current;
     const unEl = usernameElRef.current;
 
+    addDebug(`refs: pw=${!!pwEl}, un=${!!unEl}`);
+
     const onPwInput = () => {
-      passwordValueRef.current = pwEl?.value ?? '';
+      const val = pwEl?.value ?? '';
+      passwordValueRef.current = val;
+      addDebug(`pw-input: len=${val.length}`);
     };
     const onUnInput = () => {
       usernameValueRef.current = unEl?.value ?? '';
     };
 
-    pwEl?.addEventListener('input', onPwInput);
-    unEl?.addEventListener('input', onUnInput);
+    // Listen to every event that could indicate a value change
+    const pwEvents = ['input', 'compositionend', 'change', 'keyup'];
+    const unEvents = ['input', 'compositionend', 'change', 'keyup'];
 
-    // Also capture compositionend for CJK IME
-    pwEl?.addEventListener('compositionend', onPwInput);
-    unEl?.addEventListener('compositionend', onUnInput);
+    pwEvents.forEach((evt) => pwEl?.addEventListener(evt, onPwInput));
+    unEvents.forEach((evt) => unEl?.addEventListener(evt, onUnInput));
 
     return () => {
-      pwEl?.removeEventListener('input', onPwInput);
-      unEl?.removeEventListener('input', onUnInput);
-      pwEl?.removeEventListener('compositionend', onPwInput);
-      unEl?.removeEventListener('compositionend', onUnInput);
+      pwEvents.forEach((evt) => pwEl?.removeEventListener(evt, onPwInput));
+      unEvents.forEach((evt) => unEl?.removeEventListener(evt, onUnInput));
     };
-  }, [shouldAskUsername]);
+  }, [shouldAskUsername, addDebug]);
 
   const doLogin = useCallback(async () => {
     // Read from multiple sources for maximum reliability
-    const pw =
-      passwordValueRef.current.trim() ||
-      passwordElRef.current?.value?.trim() ||
+    const src1 = passwordValueRef.current.trim();
+    const src2 = passwordElRef.current?.value?.trim() || '';
+    const src3 =
       (
         document.querySelector(
           'input[type="password"]'
         ) as HTMLInputElement | null
-      )?.value?.trim() ||
-      '';
+      )?.value?.trim() || '';
+
+    const pw = src1 || src2 || src3;
+
+    addDebug(
+      `doLogin: src1=${src1.length}, src2=${src2.length}, src3=${src3.length}`
+    );
 
     const un =
       usernameValueRef.current.trim() ||
@@ -97,6 +109,7 @@ function TvLoginClient() {
 
     if (!pw) {
       setError('请输入密码');
+      addDebug('doLogin: pw empty, abort');
       return;
     }
     if (shouldAskUsername && !un) {
@@ -106,6 +119,7 @@ function TvLoginClient() {
 
     setError(null);
     setLoading(true);
+    addDebug(`doLogin: fetching /api/login pw=${pw.length}chars`);
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
@@ -116,6 +130,8 @@ function TvLoginClient() {
         }),
       });
 
+      addDebug(`doLogin: response ${res.status}`);
+
       if (res.ok) {
         const redirect = searchParams.get('redirect') || '/tv';
         router.replace(redirect);
@@ -125,47 +141,62 @@ function TvLoginClient() {
         const data = await res.json().catch(() => ({}));
         setError(data.error ?? '服务器错误');
       }
-    } catch {
+    } catch (err) {
+      addDebug(`doLogin: error ${err}`);
       setError('网络错误，请稍后重试');
     } finally {
       setLoading(false);
     }
-  }, [shouldAskUsername, searchParams, router]);
+  }, [shouldAskUsername, searchParams, router, addDebug]);
 
   // Native keydown listener on password input — Enter triggers login.
-  // NOT using React onKeyDown because React event delegation may fail
-  // in Android TV WebView.
   useEffect(() => {
     const pwEl = passwordElRef.current;
     if (!pwEl) return;
 
     const handler = (e: Event) => {
-      if ((e as KeyboardEvent).key === 'Enter') {
+      const ke = e as KeyboardEvent;
+      addDebug(`pw-keydown: key=${ke.key}, code=${ke.code}`);
+      if (ke.key === 'Enter') {
         e.preventDefault();
         e.stopPropagation();
         doLogin();
       }
     };
 
-    // Use capture phase to run before TvFocusProvider's handler
     pwEl.addEventListener('keydown', handler, true);
     return () => pwEl.removeEventListener('keydown', handler, true);
-  }, [doLogin]);
+  }, [doLogin, addDebug]);
 
-  // Native click listener on button as backup — ensures doLogin runs
-  // even if React's onClick delegation fails in the WebView.
+  // Native click listener on button
   useEffect(() => {
     const btn = document.getElementById('tv-login-btn');
-    if (!btn) return;
+    if (!btn) {
+      addDebug('btn: not found!');
+      return;
+    }
+
+    addDebug('btn: listener attached');
 
     const handler = (e: Event) => {
       e.preventDefault();
+      addDebug('btn: clicked!');
       doLogin();
     };
 
     btn.addEventListener('click', handler);
     return () => btn.removeEventListener('click', handler);
-  }, [doLogin]);
+  }, [doLogin, addDebug]);
+
+  // Global keydown debug — log ALL key events to see what the remote sends
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName || '?';
+      addDebug(`key: ${e.key}(${e.code}) on ${tag}`);
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [addDebug]);
 
   return (
     <div className='flex min-h-screen items-center justify-center'>
@@ -173,8 +204,6 @@ function TvLoginClient() {
         <h1 className='mb-8 text-center text-3xl font-bold text-green-500'>
           MoonTV
         </h1>
-        {/* No <form> element — avoids any risk of native form submission
-            causing a page reload in Android TV WebView */}
         <div className='space-y-6'>
           {shouldAskUsername && (
             <input
@@ -205,6 +234,19 @@ function TvLoginClient() {
           >
             {loading ? '登录中...' : '登录'}
           </button>
+        </div>
+
+        {/* Debug panel — visible on screen for Android TV diagnosis */}
+        <div className='mt-6 rounded-lg bg-black/50 p-3 font-mono text-xs text-green-400 max-h-48 overflow-y-auto'>
+          <div className='text-gray-500 mb-1'>-- debug --</div>
+          {debugLog.map((line, i) => (
+            <div key={i} className='truncate'>
+              {line}
+            </div>
+          ))}
+          {debugLog.length === 0 && (
+            <div className='text-gray-600'>waiting for events...</div>
+          )}
         </div>
       </div>
     </div>
