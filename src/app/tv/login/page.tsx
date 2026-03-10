@@ -18,10 +18,8 @@ function TvLoginClient() {
   const focusPasswordRef = useTvFocusable(2, 0);
   const focusSubmitRef = useTvFocusable(3, 0);
 
-  // Direct DOM refs for reading input values
   const usernameInputRef = useRef<HTMLInputElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
 
   const setUsernameRef = useCallback(
     (el: HTMLInputElement | null) => {
@@ -37,14 +35,6 @@ function TvLoginClient() {
       if (typeof focusPasswordRef === 'function') focusPasswordRef(el);
     },
     [focusPasswordRef]
-  );
-
-  const setSubmitRef = useCallback(
-    (el: HTMLButtonElement | null) => {
-      buttonRef.current = el;
-      if (typeof focusSubmitRef === 'function') focusSubmitRef(el);
-    },
-    [focusSubmitRef]
   );
 
   useEffect(() => {
@@ -95,21 +85,6 @@ function TvLoginClient() {
     }
   }, [shouldAskUsername, searchParams, router]);
 
-  // Global keydown handler to catch Enter/DpadCenter on the login button
-  // Android TV WebView may send Enter or DpadCenter that don't trigger onClick
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Enter' && document.activeElement === buttonRef.current) {
-        e.preventDefault();
-        e.stopPropagation();
-        doLogin();
-      }
-    }
-    // Use capture phase to run before TvFocusProvider
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [doLogin]);
-
   return (
     <div className='flex min-h-screen items-center justify-center'>
       <div className='w-full max-w-lg rounded-2xl bg-gray-900 p-10'>
@@ -142,7 +117,7 @@ function TvLoginClient() {
           />
           {error && <p className='text-red-400 text-lg text-center'>{error}</p>}
           <button
-            ref={setSubmitRef}
+            ref={focusSubmitRef}
             type='submit'
             disabled={loading}
             className='tv-focusable w-full rounded-lg bg-green-600 py-4 text-xl font-semibold text-white disabled:opacity-50'

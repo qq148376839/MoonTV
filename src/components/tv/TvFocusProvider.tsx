@@ -132,6 +132,13 @@ export function TvFocusProvider({ children }: { children: React.ReactNode }) {
           }
           break;
         }
+        case 'Enter': {
+          // D-pad center / Enter: simulate click on focused element
+          // Some Android TV WebViews don't trigger click for DPAD_CENTER
+          e.preventDefault();
+          current.element.click();
+          return;
+        }
         default:
           return; // Don't preventDefault for other keys
       }
