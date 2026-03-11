@@ -5,8 +5,8 @@
     <string name="server_url_label">服务器地址</string>
     <string name="server_url_hint">例如: http://192.168.1.100:1234</string>
     <string name="save">保存</string>
-    <string name="clear_cache">清除缓存</string>
-    <string name="cache_cleared">缓存已清除</string>
+    <string name="clear_cache">清除登录</string>
+    <string name="cache_cleared">已清除登录信息</string>
     <string name="server_url_required">请输入服务器地址</string>
     <string name="player_loading">正在加载...</string>
     <string name="connection_failed">连接服务器失败，请检查地址是否正确</string>
@@ -16,4 +16,10 @@
     <string name="qr_scan_hint">手机扫描二维码，在浏览器中输入服务器地址\n%1$s</string>
     <string name="qr_no_network">未检测到网络连接，请手动输入</string>
     <string name="qr_loading">正在生成二维码...</string>
+    <string name="login_subtitle">请登录以继续</string>
+    <string name="username_label">用户名</string>
+    <string name="username_hint">可选</string>
+    <string name="password_label">密码</string>
+    <string name="password_hint">请输入密码</string>
+    <string name="login_button">登录</string>
 </resources>

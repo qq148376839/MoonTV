@@ -1,11 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- OrionTV Design System -->
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-    <color name="green_primary">#FF22C55E</color>
-    <color name="green_dark">#FF16A34A</color>
-    <color name="bg_dark">#FF0A0A0A</color>
-    <color name="surface_dark">#FF1F2937</color>
-    <color name="text_primary">#FFF3F4F6</color>
-    <color name="text_secondary">#FF9CA3AF</color>
+
+    <!-- Background hierarchy -->
+    <color name="bg_primary">#FF151718</color>
+    <color name="bg_card">#FF222222</color>
+    <color name="bg_input">#FF2C2C2E</color>
+    <color name="bg_surface">#FF333333</color>
+    <color name="bg_focus">#FF555555</color>
+
+    <!-- Brand colors -->
+    <color name="primary">#FF00BB5E</color>
+    <color name="primary_dark">#FF009A4D</color>
+    <color name="favorite_active">#FFFEFF5F</color>
+
+    <!-- Text hierarchy -->
+    <color name="text_primary">#FFECEDEE</color>
+    <color name="text_secondary">#FFCCCCCC</color>
+    <color name="text_muted">#FFAAAAAA</color>
+    <color name="text_disabled">#FF808080</color>
+
+    <!-- UI elements -->
+    <color name="border">#FF333333</color>
+    <color name="focus_border">#FF00BB5E</color>
+    <color name="rating_gold">#FFFFD700</color>
+    <color name="error">#FFEF4444</color>
+    <color name="badge_bg">#B3000000</color>
+    <color name="overlay_dark">#4D000000</color>
+    <color name="overlay_heavy">#99000000</color>
+    <color name="overlay_dense">#D9000000</color>
+
+    <!-- Legacy aliases -->
+    <color name="green_primary">@color/primary</color>
+    <color name="green_dark">@color/primary_dark</color>
+    <color name="bg_dark">@color/bg_primary</color>
+    <color name="surface_dark">@color/bg_card</color>
+    <color name="text_hint">@color/text_muted</color>
+    <color name="search_opaque">@color/primary</color>
 </resources>

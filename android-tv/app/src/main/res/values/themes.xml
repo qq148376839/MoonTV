@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.MoonTV" parent="Theme.AppCompat.NoActionBar">
-        <item name="android:windowBackground">@color/bg_dark</item>
-        <item name="android:colorPrimary">@color/green_primary</item>
-        <item name="android:colorPrimaryDark">@color/green_dark</item>
-        <item name="android:colorAccent">@color/green_primary</item>
+    <style name="Theme.MoonTV" parent="Theme.Leanback">
+        <item name="android:windowBackground">@color/bg_primary</item>
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:colorPrimaryDark">@color/primary_dark</item>
+        <item name="android:colorAccent">@color/primary</item>
         <item name="android:textColorPrimary">@color/text_primary</item>
         <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="defaultBrandColor">@color/primary</item>
+        <item name="defaultSearchColor">@color/primary</item>
+        <item name="defaultSearchBrightColor">@color/primary</item>
     </style>
 
     <style name="Theme.MoonTV.Player" parent="Theme.MoonTV">

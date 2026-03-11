@@ -186,13 +186,84 @@ Rules:
 - One document per feature - don't create separate docs for test/summary/implementation
 - Technical docs go in `docs/technical/`
 
+## Android TV App (`android-tv/`)
+
+### Tech Stack
+
+- **Language**: Kotlin 1.9.22, JDK 17
+- **UI**: Leanback (BrowseSupportFragment, SearchSupportFragment, DetailsSupportFragment, VerticalGridSupportFragment)
+- **Architecture**: MVVM + ViewModel + StateFlow + Kotlin Coroutines
+- **Network**: OkHttp + kotlinx.serialization (no Retrofit — API count is small)
+- **Image**: Coil (Kotlin-first)
+- **Player**: ExoPlayer (Media3) with HLS
+- **Build**: Gradle 8.5, AGP 8.2.0, compileSdk 34, minSdk 21
+
+### Directory Structure
+
+```
+android-tv/app/src/main/java/com/moontv/android/
+├── MainActivity.kt              # Fragment host (login or home)
+├── PlayerActivity.kt            # ExoPlayer HLS playback
+├── SettingsActivity.kt          # Server URL config + QR setup
+├── api/
+│   ├── Models.kt                # API data classes (@Serializable)
+│   ├── ApiClient.kt             # OkHttp singleton (all API calls)
+│   ├── CookieStore.kt           # CookieJar → SharedPreferences
+│   └── SseParser.kt             # SSE stream → Kotlin Flow
+├── viewmodel/                   # MVVM ViewModels (StateFlow)
+├── ui/
+│   ├── LoginFragment.kt         # Password login
+│   ├── HomeFragment.kt          # BrowseSupportFragment (Netflix rows)
+│   ├── SearchFragment.kt        # SSE streaming search + pinyin
+│   ├── DetailFragment.kt        # Episode grid + favorite toggle
+│   ├── FavoritesFragment.kt     # VerticalGridSupportFragment
+│   ├── CardPresenter.kt         # Poster card presenter
+│   ├── EpisodePresenter.kt      # Episode button presenter
+│   └── PinyinHelper.kt          # Built-in pinyin initial matching
+└── util/
+    ├── Prefs.kt                 # SharedPreferences helper
+    └── ImageUtils.kt            # Coil image loading
+```
+
+### Build Commands
+
+```bash
+# Environment setup (macOS with Homebrew)
+export JAVA_HOME="/opt/homebrew/opt/openjdk@17"
+export PATH="$JAVA_HOME/bin:$PATH"
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+
+# Build debug APK
+cd android-tv && ./gradlew assembleDebug
+# Output: android-tv/app/build/outputs/apk/debug/app-debug.apk
+
+# Build release APK
+cd android-tv && ./gradlew assembleRelease
+
+# Install to TV via ADB
+adb connect <TV_IP>:5555
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Android TV Build Rules
+
+- Theme MUST be `Theme.Leanback` (not `Theme.AppCompat`) — Activities must extend `FragmentActivity`, NOT `AppCompatActivity`
+- All network calls MUST run on `Dispatchers.IO` (Android throws `NetworkOnMainThreadException` on main thread)
+- API data classes MUST have `@Serializable` annotation and `ignoreUnknownKeys = true` in Json config
+- OkHttp `CookieJar` handles auth cookie persistence — do not use Android `CookieManager`
+- `./gradlew assembleDebug` MUST pass before committing Android changes
+
 ## Common Commands
 
 ```bash
+# --- Web (Next.js) ---
 pnpm dev                 # Start dev server (port 51000)
 pnpm run build           # Production build (6GB memory limit)
 pnpm check:fast          # Quick quality check (lint + typecheck)
 pnpm lint:fix            # Auto-fix lint + format issues
 pnpm test                # Run Jest tests
 pnpm typecheck           # TypeScript type checking only
+
+# --- Android TV ---
+cd android-tv && JAVA_HOME="/opt/homebrew/opt/openjdk@17" ./gradlew assembleDebug
 ```

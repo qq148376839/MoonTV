@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark"
-    android:fillViewport="true">
+    android:background="@color/bg_primary">
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_horizontal"
+        android:layout_height="match_parent"
+        android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="48dp">
+        android:paddingStart="64dp"
+        android:paddingEnd="64dp">
 
         <!-- Left side: QR code -->
         <LinearLayout
@@ -19,35 +19,40 @@
             android:layout_weight="1"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingEnd="32dp"
-            android:paddingStart="0dp">
+            android:paddingEnd="48dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
+                android:layout_marginBottom="20dp"
                 android:text="@string/qr_title"
-                android:textColor="@color/green_primary"
+                android:textColor="@color/primary"
                 android:textSize="20sp"
                 android:textStyle="bold" />
 
-            <ImageView
-                android:id="@+id/qrCodeImage"
-                android:layout_width="260dp"
-                android:layout_height="260dp"
+            <FrameLayout
+                android:layout_width="240dp"
+                android:layout_height="240dp"
                 android:background="@color/white"
-                android:contentDescription="@string/qr_title"
-                android:padding="8dp"
-                android:scaleType="fitCenter" />
+                android:padding="8dp">
+
+                <ImageView
+                    android:id="@+id/qrCodeImage"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:contentDescription="@string/qr_title"
+                    android:scaleType="fitCenter" />
+            </FrameLayout>
 
             <TextView
                 android:id="@+id/qrHintText"
-                android:layout_width="wrap_content"
+                android:layout_width="240dp"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="16dp"
                 android:gravity="center"
+                android:lineSpacingExtra="4dp"
                 android:text="@string/qr_loading"
-                android:textColor="@color/text_secondary"
+                android:textColor="@color/text_muted"
                 android:textSize="13sp" />
 
         </LinearLayout>
@@ -57,65 +62,75 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:gravity="center"
+            android:background="@drawable/login_card_bg"
             android:orientation="vertical"
-            android:paddingStart="32dp"
-            android:paddingEnd="0dp">
+            android:padding="32dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="32dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="8dp"
                 android:text="@string/app_name"
-                android:textColor="@color/green_primary"
-                android:textSize="36sp"
+                android:textColor="@color/primary"
+                android:textSize="28sp"
                 android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginBottom="28dp"
+                android:text="服务器配置"
+                android:textColor="@color/text_muted"
+                android:textSize="14sp" />
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="8dp"
+                android:layout_marginBottom="6dp"
                 android:text="@string/server_url_label"
                 android:textColor="@color/text_secondary"
-                android:textSize="18sp" />
+                android:textSize="13sp" />
 
             <EditText
                 android:id="@+id/serverUrlInput"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:background="@color/surface_dark"
+                android:layout_marginBottom="20dp"
+                android:background="@drawable/input_bg"
                 android:hint="@string/server_url_hint"
                 android:importantForAutofill="no"
                 android:inputType="textUri"
-                android:padding="16dp"
+                android:padding="14dp"
                 android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_secondary"
-                android:textSize="20sp" />
+                android:textColorHint="@color/text_muted"
+                android:textSize="15sp" />
 
             <Button
                 android:id="@+id/saveButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
-                android:backgroundTint="@color/green_primary"
-                android:padding="16dp"
+                android:backgroundTint="@color/primary"
+                android:padding="14dp"
                 android:text="@string/save"
                 android:textColor="@color/white"
-                android:textSize="18sp" />
+                android:textSize="15sp"
+                android:textStyle="bold" />
 
             <Button
                 android:id="@+id/clearCacheButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:backgroundTint="@color/surface_dark"
-                android:padding="16dp"
+                android:layout_marginTop="12dp"
+                android:backgroundTint="@color/bg_surface"
+                android:padding="14dp"
                 android:text="@string/clear_cache"
                 android:textColor="@color/text_secondary"
-                android:textSize="16sp" />
+                android:textSize="14sp" />
 
         </LinearLayout>
 
     </LinearLayout>
 
-</ScrollView>
+</FrameLayout>

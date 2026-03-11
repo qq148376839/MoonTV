@@ -1,22 +1,22 @@
 package com.moontv.android
 
-import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.webkit.CookieManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.FragmentActivity
+import com.moontv.android.api.ApiClient
+import com.moontv.android.util.Prefs
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
-class SettingsActivity : AppCompatActivity() {
+class SettingsActivity : FragmentActivity() {
 
     private lateinit var serverUrlInput: EditText
     private var setupServer: SetupServer? = null
@@ -33,8 +33,7 @@ class SettingsActivity : AppCompatActivity() {
         val qrHintText = findViewById<TextView>(R.id.qrHintText)
 
         // Load existing URL
-        val prefs = getSharedPreferences(MoonTvBridge.PREFS_NAME, Context.MODE_PRIVATE)
-        val existingUrl = prefs.getString(MoonTvBridge.KEY_SERVER_URL, "")
+        val existingUrl = Prefs.getServerUrl(this) ?: ""
         serverUrlInput.setText(existingUrl)
 
         // Show error message if coming from connection failure
@@ -70,7 +69,7 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         clearCacheButton.setOnClickListener {
-            CookieManager.getInstance().removeAllCookies(null)
+            ApiClient.getInstance(this).cookieStore.clearAuth()
             Toast.makeText(this, getString(R.string.cache_cleared), Toast.LENGTH_SHORT).show()
         }
 
@@ -79,8 +78,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun saveUrlAndRestart(url: String) {
-        val prefs = getSharedPreferences(MoonTvBridge.PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putString(MoonTvBridge.KEY_SERVER_URL, url).apply()
+        Prefs.setServerUrl(this, url)
         Toast.makeText(this, getString(R.string.url_saved, url), Toast.LENGTH_SHORT).show()
 
         // Restart main activity
