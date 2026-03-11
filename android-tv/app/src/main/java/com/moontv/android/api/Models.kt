@@ -98,3 +98,20 @@ data class SaveFavoriteRequest(
 data class ApiSuccess(
     val success: Boolean = false
 )
+
+@Serializable
+data class LocalLibraryItem(
+    val source: String = "",
+    val id: String = "",
+    val title: String = "",
+    val year: String = "",
+    val poster: String? = null,
+    @SerialName("local_path") val localPath: String = "",
+    @SerialName("downloaded_episodes") val downloadedEpisodes: Int? = null,
+    @SerialName("updated_at") val updatedAt: Long = 0L
+)
+
+@Serializable
+data class LocalLibraryResponse(
+    val items: List<LocalLibraryItem> = emptyList()
+)

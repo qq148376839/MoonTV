@@ -134,6 +134,18 @@ class ApiClient private constructor(context: Context) {
         response.isSuccessful
     }
 
+    // --- Local Library ---
+
+    suspend fun getLocalLibrary(): List<LocalLibraryItem> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("${baseUrl()}/api/local-library")
+            .build()
+        val response = client.newCall(request).execute()
+        val body = response.body?.string() ?: "{}"
+        val result = json.decodeFromString<LocalLibraryResponse>(body)
+        result.items
+    }
+
     // --- Favorites ---
 
     suspend fun getFavorites(): Map<String, Favorite> = withContext(Dispatchers.IO) {

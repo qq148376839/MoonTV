@@ -56,10 +56,12 @@ class HomeFragment : Fragment() {
         // Top navigation buttons
         val navSearch = view.findViewById<TextView>(R.id.navSearch)
         val navFavorites = view.findViewById<TextView>(R.id.navFavorites)
+        val navDownloads = view.findViewById<TextView>(R.id.navDownloads)
         val navSettings = view.findViewById<TextView>(R.id.navSettings)
 
         setupNavButton(navSearch)
         setupNavButton(navFavorites)
+        setupNavButton(navDownloads)
         setupNavButton(navSettings)
 
         navSearch.setOnClickListener {
@@ -72,6 +74,13 @@ class HomeFragment : Fragment() {
         navFavorites.setOnClickListener {
             parentFragmentManager.beginTransaction()
                 .replace(R.id.fragmentContainer, FavoritesFragment())
+                .addToBackStack(null)
+                .commit()
+        }
+
+        navDownloads.setOnClickListener {
+            parentFragmentManager.beginTransaction()
+                .replace(R.id.fragmentContainer, LocalLibraryFragment())
                 .addToBackStack(null)
                 .commit()
         }

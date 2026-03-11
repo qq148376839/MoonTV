@@ -63,6 +63,21 @@
                 android:textSize="14sp" />
 
             <TextView
+                android:id="@+id/navDownloads"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginStart="12dp"
+                android:background="@drawable/btn_secondary_bg"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:gravity="center"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:text="下载"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp" />
+
+            <TextView
                 android:id="@+id/navSettings"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"

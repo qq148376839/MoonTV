@@ -53,6 +53,7 @@ class DetailFragment : Fragment() {
     private lateinit var sourceTabsContainer: LinearLayout
 
     private var currentResult: SearchResult? = null
+    private var allResultsJson: String = "[]"
     private var episodeAdapter: EpisodeGridAdapter? = null
 
     override fun onCreateView(
@@ -89,7 +90,7 @@ class DetailFragment : Fragment() {
         setupButtonFocus(btnPlay)
         setupButtonFocus(btnFavorite)
 
-        // Play button click → play first episode
+        // Play button click -> play first episode
         btnPlay.setOnClickListener {
             val episodes = viewModel.state.value.item?.episodes ?: return@setOnClickListener
             if (episodes.isNotEmpty()) {
@@ -109,6 +110,7 @@ class DetailFragment : Fragment() {
         val jsonStr = arguments?.getString(ARG_RESULT) ?: return
         val result = Json.decodeFromString<SearchResult>(jsonStr)
         currentResult = result
+        allResultsJson = arguments?.getString(ARG_ALL_RESULTS) ?: "[]"
 
         observeState()
         viewModel.loadDetail(result)
@@ -234,10 +236,14 @@ class DetailFragment : Fragment() {
             putExtra(PlayerActivity.EXTRA_TITLE, item.title)
             putExtra(PlayerActivity.EXTRA_SUBTITLE, "第${episode.index + 1}集")
             putExtra(PlayerActivity.EXTRA_SOURCE, item.source)
+            putExtra(PlayerActivity.EXTRA_SOURCE_NAME, item.sourceName)
+            putExtra(PlayerActivity.EXTRA_SOURCE_TYPE, item.sourceType)
             putExtra(PlayerActivity.EXTRA_ID, item.id)
             putExtra(PlayerActivity.EXTRA_EPISODE_INDEX, episode.index)
             putExtra(PlayerActivity.EXTRA_TOTAL_EPISODES, item.episodes.size)
             putExtra(PlayerActivity.EXTRA_SEARCH_TITLE, item.title)
+            putExtra(PlayerActivity.EXTRA_ALL_RESULTS, allResultsJson)
+            putExtra(PlayerActivity.EXTRA_EPISODES_JSON, Json.encodeToString(item.episodes))
         }
         startActivity(intent)
     }
@@ -265,11 +271,13 @@ class DetailFragment : Fragment() {
 
     companion object {
         private const val ARG_RESULT = "arg_result"
+        private const val ARG_ALL_RESULTS = "arg_all_results"
 
-        fun newInstance(result: SearchResult): DetailFragment {
+        fun newInstance(result: SearchResult, allResultsJson: String = "[]"): DetailFragment {
             return DetailFragment().apply {
                 arguments = Bundle().apply {
                     putString(ARG_RESULT, Json.encodeToString(result))
+                    putString(ARG_ALL_RESULTS, allResultsJson)
                 }
             }
         }
