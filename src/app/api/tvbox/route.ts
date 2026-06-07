@@ -138,7 +138,7 @@ function handleDetail(request: NextRequest, ids: string): NextResponse {
   episodes.forEach((ep: string, idx: number) => {
     if (typeof ep === 'string' && ep.trim().length > 0) {
       const epNum = idx + 1;
-      const url = `${baseUrl}/api/tvbox/m3u8?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}&episode=${epNum}`;
+      const url = `${baseUrl}/api/tvbox/m3u8/play.m3u8?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}&episode=${epNum}`;
       playUrls.push(`第${epNum}集$${url}`);
     }
   });
@@ -159,6 +159,39 @@ function handleDetail(request: NextRequest, ids: string): NextResponse {
   });
 }
 
+function handleHome(): NextResponse {
+  const items = getResourceItems();
+  const typeSet = new Set<string>();
+
+  for (const item of items) {
+    typeSet.add(item.type_name || '其他');
+  }
+
+  const classes = Array.from(typeSet).map((name) => ({
+    type_id: name || '其他',
+    type_name: name || '其他',
+  }));
+
+  const PAGE_SIZE = 20;
+  const pageItems = items.slice(0, PAGE_SIZE);
+  const list = pageItems.map((item) => ({
+    vod_id: `${item.source}_${item.id}`,
+    vod_name: item.title,
+    vod_pic: item.poster,
+    vod_remarks: `已下载 ${item.downloaded_episodes} 集`,
+    type_name: item.type_name || '其他',
+  }));
+
+  return NextResponse.json({
+    class: classes,
+    list,
+    page: 1,
+    pagecount: Math.ceil(items.length / PAGE_SIZE) || 1,
+    limit: PAGE_SIZE,
+    total: items.length,
+  });
+}
+
 export async function GET(request: NextRequest) {
   const storageManager = getStorageManager();
   if (!storageManager.isEnabled()) {
@@ -173,15 +206,26 @@ export async function GET(request: NextRequest) {
 
   if (ac === 'class') {
     return handleClass();
-  } else if (ac === 'list') {
+  } else if (ac === 'list' || ac === 'videolist') {
     const t = searchParams.get('t') || '';
     const pg = parseInt(searchParams.get('pg') || '1', 10);
     return handleList(t, pg);
   } else if (ac === 'detail') {
+    // TVBox type=1: ac=detail 同时用于分类列表(带t参数)和视频详情(带ids参数)
     const ids = searchParams.get('ids') || '';
-    return handleDetail(request, ids);
+    const t = searchParams.get('t');
+    if (t !== null) {
+      // 分类列表请求
+      const pg = parseInt(searchParams.get('pg') || '1', 10);
+      return handleList(t, pg);
+    }
+    if (ids) {
+      return handleDetail(request, ids);
+    }
+    // ac=detail 无参数，返回全部列表
+    return handleList('', 1);
   }
 
-  // 默认返回分类
-  return handleClass();
+  // 默认返回分类 + 首页列表（TVBox 初始请求需要两者）
+  return handleHome();
 }
