@@ -31,13 +31,18 @@ export async function GET() {
         const splitAt = key.indexOf('_');
         const source = splitAt >= 0 ? key.slice(0, splitAt) : key;
         const id = splitAt >= 0 ? key.slice(splitAt + 1) : '';
-        const localPath = PathUtils.resolveResourcePath(entry.local_path, storagePath);
+        const localPath = PathUtils.resolveResourcePath(
+          entry.local_path,
+          storagePath
+        );
         const metadata = fs.existsSync(localPath)
           ? storageManager.readMetadata(localPath)
           : null;
 
         const downloadedEpisodes = metadata?.episodes
-          ? metadata.episodes.filter((p) => typeof p === 'string' && p.trim().length > 0).length
+          ? metadata.episodes.filter(
+              (p) => typeof p === 'string' && p.trim().length > 0
+            ).length
           : undefined;
 
         return {
@@ -56,7 +61,10 @@ export async function GET() {
     return NextResponse.json({ items }, { status: 200 });
   } catch (error) {
     console.error('[Local Library API] 获取列表失败:', error);
-    return NextResponse.json({ error: '获取本地资源列表失败' }, { status: 500 });
+    return NextResponse.json(
+      { error: '获取本地资源列表失败' },
+      { status: 500 }
+    );
   }
 }
 
@@ -91,7 +99,10 @@ export async function DELETE(request: NextRequest) {
     }
 
     const storagePath = storageManager.getStoragePath();
-    const localPath = PathUtils.resolveResourcePath(entry.local_path, storagePath);
+    const localPath = PathUtils.resolveResourcePath(
+      entry.local_path,
+      storagePath
+    );
 
     // 删除目录
     if (fs.existsSync(localPath)) {
@@ -101,8 +112,9 @@ export async function DELETE(request: NextRequest) {
       try {
         if (
           fs.existsSync(parentDir) &&
-          fs.readdirSync(parentDir, { withFileTypes: true }).filter((d) => d.name !== 'index.json')
-            .length === 0
+          fs
+            .readdirSync(parentDir, { withFileTypes: true })
+            .filter((d) => d.name !== 'index.json').length === 0
         ) {
           fs.rmSync(parentDir, { recursive: true, force: true });
         }
@@ -120,4 +132,3 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: '删除资源失败' }, { status: 500 });
   }
 }
-

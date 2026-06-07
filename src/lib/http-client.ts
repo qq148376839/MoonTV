@@ -1,7 +1,7 @@
 /**
  * HTTP客户端工具 - 使用 Node.js 原生 http/https 模块
  * 用于解决 fetch API 无法访问内网地址的问题
- * 
+ *
  * ⚠️ 注意：此模块只能在服务器端使用（API Routes），不能在客户端使用
  */
 
@@ -44,7 +44,7 @@ function shouldRetryStatus(status: number): boolean {
 /**
  * 使用 Node.js 原生 http/https 模块发送 HTTP 请求
  * 解决 fetch API 无法访问内网地址的问题
- * 
+ *
  * @param url 目标URL
  * @param options 请求选项
  * @returns Promise<HttpResponse> 响应对象
@@ -137,7 +137,9 @@ export async function httpRequest(
         req.destroy();
         reject(
           new Error(
-            `Request timeout after ${requestOptions.timeout}ms (URL: ${url.substring(0, 100)})`
+            `Request timeout after ${
+              requestOptions.timeout
+            }ms (URL: ${url.substring(0, 100)})`
           )
         );
       });

@@ -144,15 +144,22 @@ export async function GET(request: NextRequest) {
         if (trimmedLine.startsWith('#')) return line;
 
         // If it's a URL line
-        if (trimmedLine.startsWith('http://') || trimmedLine.startsWith('https://')) {
+        if (
+          trimmedLine.startsWith('http://') ||
+          trimmedLine.startsWith('https://')
+        ) {
           // 已经是绝对URL，转换为代理URL
-          const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(trimmedLine)}`;
+          const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(
+            trimmedLine
+          )}`;
           return proxiedUrl;
         } else {
           // 相对URL，先解析为绝对URL，再转换为代理URL
           try {
             const absoluteUrl = new URL(trimmedLine, url).href;
-            const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(absoluteUrl)}`;
+            const proxiedUrl = `${proxyBaseUrl}?url=${encodeURIComponent(
+              absoluteUrl
+            )}`;
             return proxiedUrl;
           } catch (e) {
             // 解析失败，保持原样
@@ -188,7 +195,8 @@ export async function GET(request: NextRequest) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const originalError = (error as any)?.originalError;
-    const originalErrorMessage = originalError instanceof Error ? originalError.message : '';
+    const originalErrorMessage =
+      originalError instanceof Error ? originalError.message : '';
 
     // 检测网络错误类型
     const isNetworkError =

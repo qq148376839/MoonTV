@@ -57,13 +57,17 @@ describe('/api/search/stream', () => {
       });
 
       // Mock search functions
-      const mockSearchOfficial = searchIndependent.searchOfficialResources as jest.Mock;
-      const mockSearchUnofficial = searchIndependent.searchUnofficialResources as jest.Mock;
+      const mockSearchOfficial =
+        searchIndependent.searchOfficialResources as jest.Mock;
+      const mockSearchUnofficial =
+        searchIndependent.searchUnofficialResources as jest.Mock;
 
       mockSearchOfficial.mockResolvedValueOnce(mockOfficialResults);
       mockSearchUnofficial.mockResolvedValueOnce(mockUnofficialResults);
 
-      const request = new Request('http://localhost:3000/api/search/stream?q=测试');
+      const request = new Request(
+        'http://localhost:3000/api/search/stream?q=测试'
+      );
       const response = await GET(request);
 
       expect(response.status).toBe(200);
@@ -87,7 +91,10 @@ describe('/api/search/stream', () => {
       let attempts = 0;
       while (attempts < 50) {
         await new Promise((resolve) => setTimeout(resolve, 10));
-        if (mockSearchOfficial.mock.calls.length > 0 && mockSearchUnofficial.mock.calls.length > 0) {
+        if (
+          mockSearchOfficial.mock.calls.length > 0 &&
+          mockSearchUnofficial.mock.calls.length > 0
+        ) {
           break;
         }
         attempts++;
@@ -114,13 +121,19 @@ describe('/api/search/stream', () => {
         },
       });
 
-      const mockSearchOfficial = searchIndependent.searchOfficialResources as jest.Mock;
-      const mockSearchUnofficial = searchIndependent.searchUnofficialResources as jest.Mock;
+      const mockSearchOfficial =
+        searchIndependent.searchOfficialResources as jest.Mock;
+      const mockSearchUnofficial =
+        searchIndependent.searchUnofficialResources as jest.Mock;
 
-      mockSearchOfficial.mockRejectedValueOnce(new Error('Official search failed'));
+      mockSearchOfficial.mockRejectedValueOnce(
+        new Error('Official search failed')
+      );
       mockSearchUnofficial.mockResolvedValueOnce(mockUnofficialResults);
 
-      const request = new Request('http://localhost:3000/api/search/stream?q=测试');
+      const request = new Request(
+        'http://localhost:3000/api/search/stream?q=测试'
+      );
       const response = await GET(request);
 
       // 应该仍然返回200，因为非官方搜索成功
@@ -136,13 +149,19 @@ describe('/api/search/stream', () => {
         },
       });
 
-      const mockSearchOfficial = searchIndependent.searchOfficialResources as jest.Mock;
-      const mockSearchUnofficial = searchIndependent.searchUnofficialResources as jest.Mock;
+      const mockSearchOfficial =
+        searchIndependent.searchOfficialResources as jest.Mock;
+      const mockSearchUnofficial =
+        searchIndependent.searchUnofficialResources as jest.Mock;
 
       mockSearchOfficial.mockResolvedValueOnce(mockOfficialResults);
-      mockSearchUnofficial.mockRejectedValueOnce(new Error('Unofficial search failed'));
+      mockSearchUnofficial.mockRejectedValueOnce(
+        new Error('Unofficial search failed')
+      );
 
-      const request = new Request('http://localhost:3000/api/search/stream?q=测试');
+      const request = new Request(
+        'http://localhost:3000/api/search/stream?q=测试'
+      );
       const response = await GET(request);
 
       // 应该仍然返回200，因为官方搜索成功
@@ -181,13 +200,17 @@ describe('/api/search/stream', () => {
         },
       ];
 
-      const mockSearchOfficial = searchIndependent.searchOfficialResources as jest.Mock;
-      const mockSearchUnofficial = searchIndependent.searchUnofficialResources as jest.Mock;
+      const mockSearchOfficial =
+        searchIndependent.searchOfficialResources as jest.Mock;
+      const mockSearchUnofficial =
+        searchIndependent.searchUnofficialResources as jest.Mock;
 
       mockSearchOfficial.mockResolvedValueOnce(duplicateOfficialResults);
       mockSearchUnofficial.mockResolvedValueOnce([]);
 
-      const request = new Request('http://localhost:3000/api/search/stream?q=测试');
+      const request = new Request(
+        'http://localhost:3000/api/search/stream?q=测试'
+      );
       const response = await GET(request);
 
       expect(response.status).toBe(200);

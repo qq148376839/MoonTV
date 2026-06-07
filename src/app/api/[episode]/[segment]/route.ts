@@ -390,7 +390,9 @@ export async function GET(
     headers['Content-Type'] = isKey ? 'application/octet-stream' : 'video/mp2t';
 
     // 读取文件片段（key 不做 range）
-    const fileBuffer = isKey ? fs.readFileSync(resolvedPath) : Buffer.alloc(end - start + 1);
+    const fileBuffer = isKey
+      ? fs.readFileSync(resolvedPath)
+      : Buffer.alloc(end - start + 1);
     if (!isKey) {
       const fileDescriptor = fs.openSync(resolvedPath, 'r');
       fs.readSync(fileDescriptor, fileBuffer, 0, fileBuffer.length, start);

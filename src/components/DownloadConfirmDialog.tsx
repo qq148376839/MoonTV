@@ -53,7 +53,9 @@ export default function DownloadConfirmDialog({
   detail: SearchResult;
   currentEpisodeIndex: number; // 0-based
 }) {
-  const totalEpisodes = Array.isArray(detail.episodes) ? detail.episodes.length : 0;
+  const totalEpisodes = Array.isArray(detail.episodes)
+    ? detail.episodes.length
+    : 0;
   const currentEpisodeNumber = currentEpisodeIndex + 1;
 
   const [mode, setMode] = useState<Mode>('current');
@@ -123,7 +125,9 @@ export default function DownloadConfirmDialog({
           ? '下载任务进行中，可在「离线」查看进度'
           : '下载任务已创建');
 
-      setResultType(data?.is_already_downloaded || data?.is_existing ? 'warn' : 'ok');
+      setResultType(
+        data?.is_already_downloaded || data?.is_existing ? 'warn' : 'ok'
+      );
       setResultText(msg);
     } catch (e) {
       setResultType('error');
@@ -238,7 +242,9 @@ export default function DownloadConfirmDialog({
                 onChange={(e) => setRangeStart(e.target.value)}
                 className='w-24 px-3 py-2 rounded border border-gray-200/60 dark:border-gray-700/60 bg-white/60 dark:bg-gray-900/40 text-sm'
               />
-              <span className='text-sm text-gray-600 dark:text-gray-400'>到</span>
+              <span className='text-sm text-gray-600 dark:text-gray-400'>
+                到
+              </span>
               <input
                 value={rangeEnd}
                 onChange={(e) => setRangeEnd(e.target.value)}
@@ -284,4 +290,3 @@ export default function DownloadConfirmDialog({
     </div>
   );
 }
-

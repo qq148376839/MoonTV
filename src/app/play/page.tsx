@@ -117,10 +117,14 @@ function PlayPageClient() {
   // 集数相关
   const [currentEpisodeIndex, setCurrentEpisodeIndex] = useState(0);
 
-  type EpisodeDownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded' | 'failed';
-  const [episodeStatusMap, setEpisodeStatusMap] = useState<Record<number, EpisodeDownloadStatus>>(
-    {}
-  );
+  type EpisodeDownloadStatus =
+    | 'not_downloaded'
+    | 'downloading'
+    | 'downloaded'
+    | 'failed';
+  const [episodeStatusMap, setEpisodeStatusMap] = useState<
+    Record<number, EpisodeDownloadStatus>
+  >({});
   const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
   const [downloadButtonText, setDownloadButtonText] = useState('下载');
 
@@ -357,8 +361,10 @@ function PlayPageClient() {
     resultsWithScore.forEach((result, index) => {
       // eslint-disable-next-line no-console
       console.log(
-        `${index + 1}. ${result.source.source_name
-        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${result.testResult.loadSpeed
+        `${index + 1}. ${
+          result.source.source_name
+        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${
+          result.testResult.loadSpeed
         }, ${result.testResult.pingTime}ms)`
       );
     });
@@ -461,7 +467,8 @@ function PlayPageClient() {
       // 【本地资源检测】优先检查本地资源
       try {
         console.log(
-          `[updateVideoUrl] 检查本地资源: ${detailData.source}_${detailData.id
+          `[updateVideoUrl] 检查本地资源: ${detailData.source}_${
+            detailData.id
           }, 集数: ${episodeIndex + 1}`
         );
         const localResourceResponse = await fetch(
@@ -473,7 +480,8 @@ function PlayPageClient() {
         if (localResourceResponse.ok) {
           const localResourceData = await localResourceResponse.json();
           console.log(
-            `[updateVideoUrl] 本地资源检测结果: exists=${localResourceData.exists
+            `[updateVideoUrl] 本地资源检测结果: exists=${
+              localResourceData.exists
             }, hasMetadata=${!!localResourceData.metadata}`
           );
 
@@ -482,7 +490,8 @@ function PlayPageClient() {
             // - 若当前集已下载：走本地播放
             // - 若当前集未下载：不回退第1集；走在线/混合代理（本地优先缺失回源）
             const episodeNumber = episodeIndex + 1;
-            const rawEpisodePath = localResourceData.metadata.episodes?.[episodeIndex];
+            const rawEpisodePath =
+              localResourceData.metadata.episodes?.[episodeIndex];
             const episodePath =
               typeof rawEpisodePath === 'string' ? rawEpisodePath.trim() : '';
 
@@ -539,11 +548,14 @@ function PlayPageClient() {
             // 这样可实现“无缝越来越本地”，并避免切集/缺集误回退
             const canHybrid =
               typeof originalUrl === 'string' &&
-              (originalUrl.includes('.m3u8') || originalUrl.toLowerCase().includes('m3u8'));
+              (originalUrl.includes('.m3u8') ||
+                originalUrl.toLowerCase().includes('m3u8'));
             if (canHybrid) {
               const hybridUrl = `/api/local-hybrid/m3u8?source=${encodeURIComponent(
                 detailData.source
-              )}&id=${encodeURIComponent(detailData.id)}&episode=${encodeURIComponent(
+              )}&id=${encodeURIComponent(
+                detailData.id
+              )}&episode=${encodeURIComponent(
                 String(episodeNumber)
               )}&url=${encodeURIComponent(originalUrl)}`;
               setVideoUrl(hybridUrl);
@@ -613,13 +625,13 @@ function PlayPageClient() {
         (detailData.source === 'official'
           ? 'official'
           : detailData.source === 'unofficial'
-            ? 'unofficial'
-            : sourceConfig.find((s) => s && s.key === detailData.source)
+          ? 'unofficial'
+          : sourceConfig.find((s) => s && s.key === detailData.source)
               ?.official_parser
-              ? 'official'
-              : looksLikeWebPage
-                ? 'official'
-                : 'unofficial');
+          ? 'official'
+          : looksLikeWebPage
+          ? 'official'
+          : 'unofficial');
 
       console.log('[updateVideoUrl] 检查资源类型:', {
         source: detailData.source,
@@ -668,8 +680,14 @@ function PlayPageClient() {
             setDecrypting(false);
             setDecryptError(null);
             // 如果详情数据已就绪，立即设置loading为false，让播放器可以初始化
-            if (detailData && detailData.episodes && detailData.episodes.length > 0) {
-              console.log('[updateVideoUrl] 详情数据已就绪，设置loading为false');
+            if (
+              detailData &&
+              detailData.episodes &&
+              detailData.episodes.length > 0
+            ) {
+              console.log(
+                '[updateVideoUrl] 详情数据已就绪，设置loading为false'
+              );
               setLoading(false);
             }
           } else {
@@ -754,11 +772,19 @@ function PlayPageClient() {
       url.startsWith('http://') || url.startsWith('https://');
 
     // 如果是内网地址或外部URL，需要代理
-    if (isPrivate || (isExternalUrl && !url.includes('localhost') && !url.includes('127.0.0.1'))) {
+    if (
+      isPrivate ||
+      (isExternalUrl &&
+        !url.includes('localhost') &&
+        !url.includes('127.0.0.1'))
+    ) {
       const shouldBlockAd = blockAdEnabledRef.current && !isOfficialResource;
 
       if (shouldBlockAd) {
-        console.log('[Player] 非官方资源，使用代理清理广告:', url.substring(0, 100));
+        console.log(
+          '[Player] 非官方资源，使用代理清理广告:',
+          url.substring(0, 100)
+        );
       } else {
         console.log('[Player] 使用代理解决CORS问题:', url.substring(0, 100));
       }
@@ -1269,7 +1295,9 @@ function PlayPageClient() {
                   setAvailableSources((prev) => {
                     const arr = Array.isArray(prev) ? prev : [];
                     const key = `${found.source}-${found.id}`;
-                    const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                    const existed = arr.some(
+                      (s) => `${s.source}-${s.id}` === key
+                    );
                     return existed ? arr : [...arr, found];
                   });
                   return [found];
@@ -1334,10 +1362,7 @@ function PlayPageClient() {
         if (!detailResponse.ok) {
           // 检查是否是"不在配置中"的错误
           const errorData = await detailResponse.json().catch(() => ({}));
-          if (
-            errorData.error &&
-            errorData.error.includes('不在配置列表中')
-          ) {
+          if (errorData.error && errorData.error.includes('不在配置列表中')) {
             // 对于不在配置中的源，尝试从搜索结果中查找
             // eslint-disable-next-line no-console
             console.log(
@@ -1366,7 +1391,9 @@ function PlayPageClient() {
                       setAvailableSources((prev) => {
                         const arr = Array.isArray(prev) ? prev : [];
                         const key = `${found.source}-${found.id}`;
-                        const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                        const existed = arr.some(
+                          (s) => `${s.source}-${s.id}` === key
+                        );
                         return existed ? arr : [...arr, found];
                       });
                       return [found];
@@ -1395,7 +1422,9 @@ function PlayPageClient() {
                   setAvailableSources((prev) => {
                     const arr = Array.isArray(prev) ? prev : [];
                     const key = `${found.source}-${found.id}`;
-                    const existed = arr.some((s) => `${s.source}-${s.id}` === key);
+                    const existed = arr.some(
+                      (s) => `${s.source}-${s.id}` === key
+                    );
                     return existed ? arr : [...arr, found];
                   });
                   return [found];
@@ -1457,13 +1486,17 @@ function PlayPageClient() {
               const currentYear = videoYearRef.current || '';
               return (
                 result.title.replaceAll(' ', '').toLowerCase() ===
-                currentTitle.replaceAll(' ', '').toLowerCase() &&
+                  currentTitle.replaceAll(' ', '').toLowerCase() &&
                 (currentYear
                   ? result.year.toLowerCase() === currentYear.toLowerCase()
                   : true) &&
                 (searchType
-                  ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
-                  (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
+                  ? (searchType === 'tv' &&
+                      Array.isArray(result.episodes) &&
+                      result.episodes.length > 1) ||
+                    (searchType === 'movie' &&
+                      Array.isArray(result.episodes) &&
+                      result.episodes.length === 1)
                   : true)
               );
             });
@@ -1498,13 +1531,17 @@ function PlayPageClient() {
           const currentYear = videoYearRef.current || '';
           return (
             result.title.replaceAll(' ', '').toLowerCase() ===
-            currentTitle.replaceAll(' ', '').toLowerCase() &&
+              currentTitle.replaceAll(' ', '').toLowerCase() &&
             (currentYear
               ? result.year.toLowerCase() === currentYear.toLowerCase()
               : true) &&
             (searchType
-              ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
-              (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
+              ? (searchType === 'tv' &&
+                  Array.isArray(result.episodes) &&
+                  result.episodes.length > 1) ||
+                (searchType === 'movie' &&
+                  Array.isArray(result.episodes) &&
+                  result.episodes.length === 1)
               : true)
           );
         });
@@ -1550,13 +1587,17 @@ function PlayPageClient() {
           const currentYear = videoYearRef.current || '';
           return (
             result.title.replaceAll(' ', '').toLowerCase() ===
-            currentTitle.replaceAll(' ', '').toLowerCase() &&
+              currentTitle.replaceAll(' ', '').toLowerCase() &&
             (currentYear
               ? result.year.toLowerCase() === currentYear.toLowerCase()
               : true) &&
             (searchType
-              ? (searchType === 'tv' && Array.isArray(result.episodes) && result.episodes.length > 1) ||
-              (searchType === 'movie' && Array.isArray(result.episodes) && result.episodes.length === 1)
+              ? (searchType === 'tv' &&
+                  Array.isArray(result.episodes) &&
+                  result.episodes.length > 1) ||
+                (searchType === 'movie' &&
+                  Array.isArray(result.episodes) &&
+                  result.episodes.length === 1)
               : true)
           );
         });
@@ -1702,14 +1743,26 @@ function PlayPageClient() {
                     const isExpired =
                       Number.isFinite(parsed?.timestamp) &&
                       Date.now() - parsed.timestamp > 5 * 60 * 1000;
-                    const raw = !isExpired && Array.isArray(parsed?.results) ? parsed.results : [];
-                    const targetTitle = (cachedDetail.title || urlTitle || '').replaceAll(' ', '').toLowerCase();
-                    const targetYear = (cachedDetail.year || urlYear || '').toLowerCase();
+                    const raw =
+                      !isExpired && Array.isArray(parsed?.results)
+                        ? parsed.results
+                        : [];
+                    const targetTitle = (cachedDetail.title || urlTitle || '')
+                      .replaceAll(' ', '')
+                      .toLowerCase();
+                    const targetYear = (
+                      cachedDetail.year ||
+                      urlYear ||
+                      ''
+                    ).toLowerCase();
                     const filtered = raw.filter((r: SearchResult) => {
                       if (!r || !Array.isArray(r.episodes)) return false;
                       const titleOk =
-                        (r.title || '').replaceAll(' ', '').toLowerCase() === targetTitle;
-                      const yearOk = targetYear ? (r.year || '').toLowerCase() === targetYear : true;
+                        (r.title || '').replaceAll(' ', '').toLowerCase() ===
+                        targetTitle;
+                      const yearOk = targetYear
+                        ? (r.year || '').toLowerCase() === targetYear
+                        : true;
                       const typeOk = searchType
                         ? (searchType === 'tv' && r.episodes.length > 1) ||
                           (searchType === 'movie' && r.episodes.length === 1)
@@ -1766,7 +1819,10 @@ function PlayPageClient() {
                   } else {
                     console.warn('[PlayPage] 聚合数据格式不正确');
                     // 若前面已从 search_results 恢复过多源，则不要回退成单源
-                    if (!Array.isArray(sourcesInfo) || sourcesInfo.length <= 1) {
+                    if (
+                      !Array.isArray(sourcesInfo) ||
+                      sourcesInfo.length <= 1
+                    ) {
                       setAvailableSources([cachedDetail]);
                     }
                   }
@@ -1983,8 +2039,8 @@ function PlayPageClient() {
           decision: shouldUseDirectly
             ? '直接使用指定源，绝不执行优选'
             : optimizationEnabled
-              ? '执行优选逻辑'
-              : '使用第一个源',
+            ? '执行优选逻辑'
+            : '使用第一个源',
         });
 
         // 【核心修复】如果有明确的 source 和 id，无论 prefer 参数如何，都直接使用，绝不执行优选
@@ -2101,7 +2157,9 @@ function PlayPageClient() {
 
             if (localResourceData.exists && localResourceData.metadata) {
               // 本地资源存在，立即切换到本地资源
-              console.log(`[PlayPage] ✓ 初始化时检测到本地资源（将按当前集决定本地/混合/在线）`);
+              console.log(
+                `[PlayPage] ✓ 初始化时检测到本地资源（将按当前集决定本地/混合/在线）`
+              );
 
               // 触发 updateVideoUrl（内部会决定：本地 or 混合 or 在线）
               // 注意：这里需要确保 currentEpisodeIndex 已设置
@@ -2203,13 +2261,15 @@ function PlayPageClient() {
                               .toLowerCase();
                           const yearMatch = videoYearRef.current
                             ? result.year.toLowerCase() ===
-                            videoYearRef.current.toLowerCase()
+                              videoYearRef.current.toLowerCase()
                             : true;
                           const typeMatch = searchType
                             ? (searchType === 'tv' &&
-                              Array.isArray(result.episodes) && result.episodes.length > 1) ||
-                            (searchType === 'movie' &&
-                              Array.isArray(result.episodes) && result.episodes.length === 1)
+                                Array.isArray(result.episodes) &&
+                                result.episodes.length > 1) ||
+                              (searchType === 'movie' &&
+                                Array.isArray(result.episodes) &&
+                                result.episodes.length === 1)
                             : true;
 
                           return titleMatch && yearMatch && typeMatch;
@@ -2474,7 +2534,12 @@ function PlayPageClient() {
 
   const refreshEpisodeDownloadStatus = useCallback(async () => {
     try {
-      if (!currentSourceRef.current || !currentIdRef.current || !detailRef.current) return;
+      if (
+        !currentSourceRef.current ||
+        !currentIdRef.current ||
+        !detailRef.current
+      )
+        return;
       const source = currentSourceRef.current;
       const id = currentIdRef.current;
       const total = detailRef.current?.episodes?.length || 0;
@@ -2484,7 +2549,9 @@ function PlayPageClient() {
       const taskRes = await fetch('/api/download', { cache: 'no-store' });
       const taskJson = taskRes.ok ? await taskRes.json() : null;
       const tasks = Array.isArray(taskJson?.tasks) ? taskJson.tasks : [];
-      const related = tasks.filter((t: any) => t?.source === source && t?.id === id);
+      const related = tasks.filter(
+        (t: any) => t?.source === source && t?.id === id
+      );
 
       const hasActiveTask = related.some((t: any) =>
         ['pending', 'downloading', 'paused'].includes(String(t?.status))
@@ -2492,14 +2559,18 @@ function PlayPageClient() {
 
       // 2) 若本地资源存在，拉取每集文件存在性（最可靠）
       const localRes = await fetch(
-        `/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
+        `/api/local-resource?source=${encodeURIComponent(
+          source
+        )}&id=${encodeURIComponent(id)}`,
         { cache: 'no-store' }
       );
       const localJson = localRes.ok ? await localRes.json() : null;
       let downloadedSet = new Set<number>();
       if (localJson?.exists) {
         const detailRes = await fetch(
-          `/api/local-library/detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`,
+          `/api/local-library/detail?source=${encodeURIComponent(
+            source
+          )}&id=${encodeURIComponent(id)}`,
           { cache: 'no-store' }
         );
         const detailJson = detailRes.ok ? await detailRes.json() : null;
@@ -2507,7 +2578,9 @@ function PlayPageClient() {
           ? detailJson.episode_status
           : [];
         downloadedSet = new Set<number>(
-          episodeStatusArr.filter((e: any) => e?.downloaded).map((e: any) => Number(e?.episode))
+          episodeStatusArr
+            .filter((e: any) => e?.downloaded)
+            .map((e: any) => Number(e?.episode))
         );
       }
 
@@ -2526,22 +2599,33 @@ function PlayPageClient() {
           // 已下载优先展示 downloaded
           if (nextMap[ep] === 'downloaded') continue;
           if (status === 'failed') nextMap[ep] = 'failed';
-          else if (status === 'pending' || status === 'downloading' || status === 'paused')
+          else if (
+            status === 'pending' ||
+            status === 'downloading' ||
+            status === 'paused'
+          )
             nextMap[ep] = 'downloading';
         }
       }
 
       setEpisodeStatusMap(nextMap);
 
-      const downloadedCount = Object.values(nextMap).filter((s) => s === 'downloaded').length;
-      if (downloadedCount >= total && total > 0) setDownloadButtonText('已下载');
-      else if (Object.values(nextMap).some((s) => s === 'downloading')) setDownloadButtonText('下载中');
+      const downloadedCount = Object.values(nextMap).filter(
+        (s) => s === 'downloaded'
+      ).length;
+      if (downloadedCount >= total && total > 0)
+        setDownloadButtonText('已下载');
+      else if (Object.values(nextMap).some((s) => s === 'downloading'))
+        setDownloadButtonText('下载中');
       else setDownloadButtonText('下载');
 
       // 调整轮询：有进行中任务才轮询；否则停止
       if (hasActiveTask) {
         if (!downloadPollRef.current) {
-          downloadPollRef.current = window.setInterval(refreshEpisodeDownloadStatus, 2000);
+          downloadPollRef.current = window.setInterval(
+            refreshEpisodeDownloadStatus,
+            2000
+          );
         }
       } else {
         if (downloadPollRef.current) {
@@ -2802,7 +2886,8 @@ function PlayPageClient() {
           const localResourceData = await localResourceResponse.json();
 
           if (localResourceData.exists && localResourceData.metadata) {
-            const rawEpisodePath = localResourceData.metadata.episodes?.[episodeIndex];
+            const rawEpisodePath =
+              localResourceData.metadata.episodes?.[episodeIndex];
             const episodePath =
               typeof rawEpisodePath === 'string' ? rawEpisodePath.trim() : '';
 
@@ -2939,7 +3024,7 @@ function PlayPageClient() {
           cover: detailRef.current?.poster || '',
           total_episodes:
             detailRef.current?.episodes &&
-              Array.isArray(detailRef.current.episodes)
+            Array.isArray(detailRef.current.episodes)
               ? detailRef.current.episodes.length
               : 1,
           save_time: Date.now(),
@@ -2994,7 +3079,10 @@ function PlayPageClient() {
     }
 
     try {
-      console.log('[Player] 创建新播放器实例，URL:', videoUrl.substring(0, 100));
+      console.log(
+        '[Player] 创建新播放器实例，URL:',
+        videoUrl.substring(0, 100)
+      );
       // 创建新的播放器实例
       Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
       Artplayer.USE_RAF = true;
@@ -3049,7 +3137,8 @@ function PlayPageClient() {
             // 4. 如果是外部URL（http://或https://开头），转换为代理URL
             // 5. 非官方资源 + 去广告开关开启 → 代理时清理广告
             // 6. 官方资源 → 代理时不去广告（仅解决CORS问题）
-            const isOfficialResource = currentSourceTypeRef.current === 'official';
+            const isOfficialResource =
+              currentSourceTypeRef.current === 'official';
             const playUrl = convertToProxyUrlIfNeeded(url, isOfficialResource);
 
             if (video.hls) {
@@ -3293,7 +3382,7 @@ function PlayPageClient() {
           skipConfigRef.current.outro_time < 0 &&
           duration > 0 &&
           currentTime >
-          artPlayerRef.current.duration + skipConfigRef.current.outro_time
+            artPlayerRef.current.duration + skipConfigRef.current.outro_time
         ) {
           if (
             currentEpisodeIndexRef.current <
@@ -3403,27 +3492,30 @@ function PlayPageClient() {
             <div className='mb-6 w-80 mx-auto'>
               <div className='flex justify-center space-x-2 mb-4'>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'searching' || loadingStage === 'fetching'
-                    ? 'bg-green-500 scale-125'
-                    : loadingStage === 'preferring' ||
-                      loadingStage === 'ready'
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
+                    loadingStage === 'searching' || loadingStage === 'fetching'
+                      ? 'bg-green-500 scale-125'
+                      : loadingStage === 'preferring' ||
+                        loadingStage === 'ready'
                       ? 'bg-green-500'
                       : 'bg-gray-300'
-                    }`}
+                  }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'preferring'
-                    ? 'bg-green-500 scale-125'
-                    : loadingStage === 'ready'
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
+                    loadingStage === 'preferring'
+                      ? 'bg-green-500 scale-125'
+                      : loadingStage === 'ready'
                       ? 'bg-green-500'
                       : 'bg-gray-300'
-                    }`}
+                  }`}
                 ></div>
                 <div
-                  className={`w-3 h-3 rounded-full transition-all duration-500 ${loadingStage === 'ready'
-                    ? 'bg-green-500 scale-125'
-                    : 'bg-gray-300'
-                    }`}
+                  className={`w-3 h-3 rounded-full transition-all duration-500 ${
+                    loadingStage === 'ready'
+                      ? 'bg-green-500 scale-125'
+                      : 'bg-gray-300'
+                  }`}
                 ></div>
               </div>
 
@@ -3434,11 +3526,11 @@ function PlayPageClient() {
                   style={{
                     width:
                       loadingStage === 'searching' ||
-                        loadingStage === 'fetching'
+                      loadingStage === 'fetching'
                         ? '33%'
                         : loadingStage === 'preferring'
-                          ? '66%'
-                          : '100%',
+                        ? '66%'
+                        : '100%',
                   }}
                 ></div>
               </div>
@@ -3552,8 +3644,9 @@ function PlayPageClient() {
               }
             >
               <svg
-                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'
-                  }`}
+                className={`w-3.5 h-3.5 text-gray-500 dark:text-gray-400 transition-transform duration-200 ${
+                  isEpisodeSelectorCollapsed ? 'rotate-180' : 'rotate-0'
+                }`}
                 fill='none'
                 stroke='currentColor'
                 viewBox='0 0 24 24'
@@ -3571,24 +3664,27 @@ function PlayPageClient() {
 
               {/* 精致的状态指示点 */}
               <div
-                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full transition-all duration-200 ${isEpisodeSelectorCollapsed
-                  ? 'bg-orange-400 animate-pulse'
-                  : 'bg-green-400'
-                  }`}
+                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full transition-all duration-200 ${
+                  isEpisodeSelectorCollapsed
+                    ? 'bg-orange-400 animate-pulse'
+                    : 'bg-green-400'
+                }`}
               ></div>
             </button>
           </div>
 
           <div
-            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
-              ? 'grid-cols-1'
-              : 'grid-cols-1 md:grid-cols-4'
-              }`}
+            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${
+              isEpisodeSelectorCollapsed
+                ? 'grid-cols-1'
+                : 'grid-cols-1 md:grid-cols-4'
+            }`}
           >
             {/* 播放器 */}
             <div
-              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
-                }`}
+              className={`h-full transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 ${
+                isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
+              }`}
             >
               <div className='relative w-full h-[300px] lg:h-full'>
                 {/* 播放器右上角：下载入口 */}
@@ -3639,8 +3735,8 @@ function PlayPageClient() {
                           {decrypting
                             ? '🔐 正在解析视频...'
                             : videoLoadingStage === 'sourceChanging'
-                              ? '🔄 切换播放源...'
-                              : '🔄 视频加载中...'}
+                            ? '🔄 切换播放源...'
+                            : '🔄 视频加载中...'}
                         </p>
                         {decryptError && (
                           <div className='mt-4 p-4 bg-red-500/20 border border-red-500/50 rounded-lg'>
@@ -3698,10 +3794,11 @@ function PlayPageClient() {
 
             {/* 选集和换源 - 在移动端始终显示，在 lg 及以上可折叠 */}
             <div
-              className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
-                ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
-                : 'md:col-span-1 lg:opacity-100 lg:scale-100'
-                }`}
+              className={`h-[300px] lg:h-full md:overflow-hidden transition-all duration-300 ease-in-out ${
+                isEpisodeSelectorCollapsed
+                  ? 'md:col-span-1 lg:hidden lg:opacity-0 lg:scale-95'
+                  : 'md:col-span-1 lg:opacity-100 lg:scale-100'
+              }`}
             >
               <EpisodeSelector
                 totalEpisodes={totalEpisodes}

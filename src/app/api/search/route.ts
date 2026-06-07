@@ -87,8 +87,12 @@ async function _collectSearchResultsFromStream(params: {
   const internalPort = process.env.PORT || '3000';
   const internalBaseUrl = `http://127.0.0.1:${internalPort}`;
 
-  const internalStreamUrl = `${internalBaseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
-  const externalStreamUrl = `${externalBaseUrl}/api/search/stream?q=${encodeURIComponent(query)}`;
+  const internalStreamUrl = `${internalBaseUrl}/api/search/stream?q=${encodeURIComponent(
+    query
+  )}`;
+  const externalStreamUrl = `${externalBaseUrl}/api/search/stream?q=${encodeURIComponent(
+    query
+  )}`;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), maxTotalMs);
@@ -144,16 +148,15 @@ async function _collectSearchResultsFromStream(params: {
   const seen = new Set<string>();
   const out: SearchResult[] = [];
 
-  const readWithIdleTimeout =
-    async (): Promise<ReadWithIdleTimeoutResult> => {
-      const waitMs = hasAnyChunk ? idleMs : firstByteMs;
-      return await Promise.race([
-        reader.read(),
-        new Promise<IdleTimeoutResult>((resolve) =>
-          setTimeout(() => resolve({ timeout: true }), waitMs)
-        ),
-      ]);
-    };
+  const readWithIdleTimeout = async (): Promise<ReadWithIdleTimeoutResult> => {
+    const waitMs = hasAnyChunk ? idleMs : firstByteMs;
+    return await Promise.race([
+      reader.read(),
+      new Promise<IdleTimeoutResult>((resolve) =>
+        setTimeout(() => resolve({ timeout: true }), waitMs)
+      ),
+    ]);
+  };
 
   try {
     // eslint-disable-next-line no-constant-condition
@@ -193,10 +196,13 @@ async function _collectSearchResultsFromStream(params: {
         }
 
         const msgObj = isRecord(msg) ? msg : null;
-        const results = msgObj && Array.isArray(msgObj.results) ? msgObj.results : [];
+        const results =
+          msgObj && Array.isArray(msgObj.results) ? msgObj.results : [];
         for (const item of results) {
           if (!item || typeof item !== 'object') continue;
-          const sr: SearchResult = normalizeOfficialSource(item as SearchResult);
+          const sr: SearchResult = normalizeOfficialSource(
+            item as SearchResult
+          );
           const key = `${sr.source_type || 'unknown'}-${sr.source}-${sr.id}`;
           if (seen.has(key)) continue;
           seen.add(key);
@@ -271,8 +277,12 @@ async function getLocalResourcePlayUrl(
   try {
     // 构建 API 路径
     const apiPath = baseUrl
-      ? `${baseUrl}/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`
-      : `/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`;
+      ? `${baseUrl}/api/local-resource?source=${encodeURIComponent(
+          source
+        )}&id=${encodeURIComponent(id)}`
+      : `/api/local-resource?source=${encodeURIComponent(
+          source
+        )}&id=${encodeURIComponent(id)}`;
 
     // 调用本地资源检测 API
     const response = await fetch(apiPath, {
@@ -375,7 +385,10 @@ export async function GET(request: Request) {
       const results: SearchResult[] = [];
       // 生产环境链路可能缓冲 SSE，导致 /api/search 聚合不到首包而误判为空；
       // 这里改为直接并发调用独立搜索接口，返回 JSON，彻底绕开 SSE 缓冲。
-      const exact = await collectSearchResultsDirect({ query, exactTitle: query });
+      const exact = await collectSearchResultsDirect({
+        query,
+        exactTitle: query,
+      });
       const official = exact.find((r) => r.source_type === 'official');
       const unofficial = exact.find((r) => r.source_type === 'unofficial');
 
@@ -459,11 +472,17 @@ export async function GET(request: Request) {
   } catch (error) {
     const debug = searchParams.get('debug') === '1';
     const msg =
-      error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+        ? error
+        : '';
     // eslint-disable-next-line no-console
     console.error('[api/search] failed:', msg || error);
     return NextResponse.json(
-      debug ? { error: '搜索失败', message: msg || 'unknown' } : { error: '搜索失败' },
+      debug
+        ? { error: '搜索失败', message: msg || 'unknown' }
+        : { error: '搜索失败' },
       { status: 500, headers: { 'X-MoonTV-Search-Rev': SEARCH_ROUTE_REV } }
     );
   }

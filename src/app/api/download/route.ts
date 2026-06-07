@@ -46,7 +46,8 @@ export async function POST(request: NextRequest) {
       hasEpisodes: !!episodes,
       auto_download,
       episode_range,
-      hasEpisodeNumbers: Array.isArray(episode_numbers) && episode_numbers.length > 0,
+      hasEpisodeNumbers:
+        Array.isArray(episode_numbers) && episode_numbers.length > 0,
       auto_download_next,
       current_episode,
     });
@@ -132,7 +133,9 @@ export async function POST(request: NextRequest) {
       resource.episodes.forEach((u, idx) => {
         if (!urlToNo.has(u)) urlToNo.set(u, idx + 1);
       });
-      episodeNumbers = episodesToDownload.map((u, i) => urlToNo.get(u) ?? i + 1);
+      episodeNumbers = episodesToDownload.map(
+        (u, i) => urlToNo.get(u) ?? i + 1
+      );
     } else if (episode_range && typeof episode_range === 'object') {
       // 使用剧集范围（用于自动下载）
       const { start, end } = episode_range;
@@ -161,7 +164,10 @@ export async function POST(request: NextRequest) {
 
       if (n <= 0) {
         return NextResponse.json(
-          { error: '自动下载后续集数配置无效（LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT）' },
+          {
+            error:
+              '自动下载后续集数配置无效（LOCAL_STORAGE_AUTO_DOWNLOAD_NEXT）',
+          },
           { status: 400 }
         );
       }
@@ -193,7 +199,11 @@ export async function POST(request: NextRequest) {
     );
 
     // 创建下载任务（内部会检查是否有重复任务或已完全下载）
-    const task = downloadService.createTask(resource, episodesToDownload, episodeNumbers);
+    const task = downloadService.createTask(
+      resource,
+      episodesToDownload,
+      episodeNumbers
+    );
 
     // 检查任务状态
     let message = '下载任务已创建';

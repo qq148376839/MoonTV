@@ -35,9 +35,10 @@ function rewriteTagUri(
   const raw = m[1];
   let absolute: string;
   try {
-    absolute = raw.startsWith('http://') || raw.startsWith('https://')
-      ? raw
-      : new URL(raw, baseUrl).href;
+    absolute =
+      raw.startsWith('http://') || raw.startsWith('https://')
+        ? raw
+        : new URL(raw, baseUrl).href;
   } catch {
     return line;
   }
@@ -51,9 +52,9 @@ function rewriteTagUri(
     kind
   )}&source=${encodeURIComponent(source)}&id=${encodeURIComponent(
     id
-  )}&episode=${encodeURIComponent(String(episode))}${keyPart}&referer=${encodeURIComponent(
-    baseUrl
-  )}&url=${encodeURIComponent(
+  )}&episode=${encodeURIComponent(
+    String(episode)
+  )}${keyPart}&referer=${encodeURIComponent(baseUrl)}&url=${encodeURIComponent(
     absolute
   )}`;
   return line.replace(/URI="([^"]+)"/, `URI="${hybrid}"`);
@@ -78,7 +79,13 @@ export async function GET(request: NextRequest) {
   const url = sp.get('url') || '';
   const episode = parseInt(episodeStr, 10);
 
-  if (!source || !id || !episodeStr || !Number.isFinite(episode) || episode < 1) {
+  if (
+    !source ||
+    !id ||
+    !episodeStr ||
+    !Number.isFinite(episode) ||
+    episode < 1
+  ) {
     return new NextResponse('Missing/invalid source/id/episode', {
       status: 400,
       headers: { ...CORS_HEADERS },
@@ -105,10 +112,13 @@ export async function GET(request: NextRequest) {
     });
 
     if (!res.ok) {
-      return new NextResponse(`Upstream error: ${res.status} ${res.statusText}`, {
-        status: res.status,
-        headers: { ...CORS_HEADERS },
-      });
+      return new NextResponse(
+        `Upstream error: ${res.status} ${res.statusText}`,
+        {
+          status: res.status,
+          headers: { ...CORS_HEADERS },
+        }
+      );
     }
 
     const content = res.body.toString('utf-8');
@@ -150,9 +160,10 @@ export async function GET(request: NextRequest) {
         const rawKeyUri = km[1];
         let keyAbs = rawKeyUri;
         try {
-          keyAbs = rawKeyUri.startsWith('http://') || rawKeyUri.startsWith('https://')
-            ? rawKeyUri
-            : new URL(rawKeyUri, url).href;
+          keyAbs =
+            rawKeyUri.startsWith('http://') || rawKeyUri.startsWith('https://')
+              ? rawKeyUri
+              : new URL(rawKeyUri, url).href;
         } catch {
           // ignore, keep raw
         }
@@ -161,7 +172,9 @@ export async function GET(request: NextRequest) {
           keyIndex = nextKeyIndex++;
           keyUrlToIndex.set(keyAbs, keyIndex);
         }
-        out.push(rewriteTagUri(line, url, source, id, episode, 'key', keyIndex));
+        out.push(
+          rewriteTagUri(line, url, source, id, episode, 'key', keyIndex)
+        );
         continue;
       }
 
@@ -178,9 +191,10 @@ export async function GET(request: NextRequest) {
         if (nextTrim && !nextTrim.startsWith('#')) {
           let absolute: string;
           try {
-            absolute = nextTrim.startsWith('http://') || nextTrim.startsWith('https://')
-              ? nextTrim
-              : new URL(nextTrim, url).href;
+            absolute =
+              nextTrim.startsWith('http://') || nextTrim.startsWith('https://')
+                ? nextTrim
+                : new URL(nextTrim, url).href;
           } catch {
             absolute = nextTrim;
           }
@@ -199,9 +213,10 @@ export async function GET(request: NextRequest) {
       if (!trimmed.startsWith('#')) {
         let absolute: string;
         try {
-          absolute = trimmed.startsWith('http://') || trimmed.startsWith('https://')
-            ? trimmed
-            : new URL(trimmed, url).href;
+          absolute =
+            trimmed.startsWith('http://') || trimmed.startsWith('https://')
+              ? trimmed
+              : new URL(trimmed, url).href;
         } catch {
           absolute = trimmed;
         }
@@ -221,9 +236,9 @@ export async function GET(request: NextRequest) {
           source
         )}&id=${encodeURIComponent(id)}&episode=${encodeURIComponent(
           String(episode)
-        )}&index=${encodeURIComponent(String(segmentIndex))}&referer=${encodeURIComponent(
-          url
-        )}&url=${encodeURIComponent(
+        )}&index=${encodeURIComponent(
+          String(segmentIndex)
+        )}&referer=${encodeURIComponent(url)}&url=${encodeURIComponent(
           absolute
         )}`;
         out.push(seg);
@@ -243,10 +258,12 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (e) {
-    return new NextResponse(`Hybrid m3u8 error: ${e instanceof Error ? e.message : String(e)}`, {
-      status: 500,
-      headers: { ...CORS_HEADERS },
-    });
+    return new NextResponse(
+      `Hybrid m3u8 error: ${e instanceof Error ? e.message : String(e)}`,
+      {
+        status: 500,
+        headers: { ...CORS_HEADERS },
+      }
+    );
   }
 }
-

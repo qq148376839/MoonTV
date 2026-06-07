@@ -97,7 +97,11 @@ export default function DownloadTaskList() {
   };
 
   const onCancel = (taskId: string) =>
-    mutate(() => fetch(`/api/download?task_id=${encodeURIComponent(taskId)}`, { method: 'DELETE' }));
+    mutate(() =>
+      fetch(`/api/download?task_id=${encodeURIComponent(taskId)}`, {
+        method: 'DELETE',
+      })
+    );
 
   const onPause = (taskId: string) =>
     mutate(() =>
@@ -153,13 +157,16 @@ export default function DownloadTaskList() {
                     </div>
                     <div className='mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-gray-300'>
                       <DownloadStatusBadge status={t.status} />
-                      <span>进度 {Math.max(0, Math.min(100, t.progress || 0))}%</span>
-                      {Array.isArray(t.episode_numbers) && t.episode_numbers.length > 0 && (
-                        <span>
-                          集数 {t.episode_numbers.slice(0, 6).join(',')}
-                          {t.episode_numbers.length > 6 ? '…' : ''}
-                        </span>
-                      )}
+                      <span>
+                        进度 {Math.max(0, Math.min(100, t.progress || 0))}%
+                      </span>
+                      {Array.isArray(t.episode_numbers) &&
+                        t.episode_numbers.length > 0 && (
+                          <span>
+                            集数 {t.episode_numbers.slice(0, 6).join(',')}
+                            {t.episode_numbers.length > 6 ? '…' : ''}
+                          </span>
+                        )}
                     </div>
                     {t.error && (
                       <div className='mt-2 text-xs text-red-600 dark:text-red-400'>
@@ -213,4 +220,3 @@ export default function DownloadTaskList() {
     </div>
   );
 }
-

@@ -125,7 +125,8 @@ export default function PlayerPageClient() {
     } catch (err) {
       console.error('URL解析错误:', err);
       setError(
-        '视频地址格式错误: ' + (err instanceof Error ? err.message : String(err))
+        '视频地址格式错误: ' +
+          (err instanceof Error ? err.message : String(err))
       );
       setLoading(false);
     }
@@ -158,7 +159,10 @@ export default function PlayerPageClient() {
       const load = this.load.bind(this);
       this.load = function (context: any, config: any, callbacks: any) {
         // 拦截manifest和level请求
-        if ((context as any).type === 'manifest' || (context as any).type === 'level') {
+        if (
+          (context as any).type === 'manifest' ||
+          (context as any).type === 'level'
+        ) {
           const onSuccess = callbacks.onSuccess;
           callbacks.onSuccess = function (
             response: any,
@@ -254,7 +258,10 @@ export default function PlayerPageClient() {
     if (!isWebkit && artPlayerRef.current) {
       artPlayerRef.current.switch = videoUrl;
       if (artPlayerRef.current?.video) {
-        ensureVideoSource(artPlayerRef.current.video as HTMLVideoElement, videoUrl);
+        ensureVideoSource(
+          artPlayerRef.current.video as HTMLVideoElement,
+          videoUrl
+        );
       }
       return;
     }
@@ -398,7 +405,10 @@ export default function PlayerPageClient() {
               try {
                 localStorage.setItem('enable_blockad', String(newVal));
                 if (artPlayerRef.current) {
-                  if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
+                  if (
+                    artPlayerRef.current.video &&
+                    artPlayerRef.current.video.hls
+                  ) {
                     artPlayerRef.current.video.hls.destroy();
                   }
                   artPlayerRef.current.destroy();
@@ -470,7 +480,10 @@ export default function PlayerPageClient() {
       });
 
       if (artPlayerRef.current?.video) {
-        ensureVideoSource(artPlayerRef.current.video as HTMLVideoElement, videoUrl);
+        ensureVideoSource(
+          artPlayerRef.current.video as HTMLVideoElement,
+          videoUrl
+        );
       }
     } catch (err) {
       console.error('创建播放器失败:', err);
@@ -510,7 +523,12 @@ export default function PlayerPageClient() {
     // 重新设置视频URL以触发重新加载（添加时间戳避免缓存）
     if (videoUrl) {
       const separator = videoUrl.includes('?') ? '&' : '?';
-      setVideoUrl(videoUrl.split('?')[0].split('&')[0] + separator + '_retry=' + Date.now());
+      setVideoUrl(
+        videoUrl.split('?')[0].split('&')[0] +
+          separator +
+          '_retry=' +
+          Date.now()
+      );
     }
   };
 
@@ -526,8 +544,10 @@ export default function PlayerPageClient() {
             className='w-full aspect-video bg-black rounded-lg overflow-hidden shadow-2xl'
             style={{
               maxHeight: 'calc(100vh - 8rem)',
-              visibility: error || (loading && !videoUrl) ? 'hidden' : 'visible',
-              position: error || (loading && !videoUrl) ? 'absolute' : 'relative',
+              visibility:
+                error || (loading && !videoUrl) ? 'hidden' : 'visible',
+              position:
+                error || (loading && !videoUrl) ? 'absolute' : 'relative',
             }}
           ></div>
 
@@ -591,7 +611,9 @@ export default function PlayerPageClient() {
                 <h2 className='text-xl font-semibold text-gray-800 dark:text-gray-200 mb-2'>
                   正在加载视频...
                 </h2>
-                <p className='text-gray-600 dark:text-gray-400'>请稍候，视频正在准备中</p>
+                <p className='text-gray-600 dark:text-gray-400'>
+                  请稍候，视频正在准备中
+                </p>
               </div>
             </div>
           )}
@@ -600,4 +622,3 @@ export default function PlayerPageClient() {
     </PageLayout>
   );
 }
-

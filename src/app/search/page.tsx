@@ -232,9 +232,7 @@ function SearchPageClient() {
 
     // 【修复】防止重复调用：检查是否已有进行中的SSE连接
     if (typeof window !== 'undefined') {
-      const existingStatus = sessionStorage.getItem(
-        `sse_status_${q}`
-      );
+      const existingStatus = sessionStorage.getItem(`sse_status_${q}`);
       if (existingStatus) {
         try {
           const parsed = JSON.parse(existingStatus);
@@ -246,13 +244,19 @@ function SearchPageClient() {
           if (isActive && !isStale) {
             // 这里不 return：因为 sessionStorage 可能来自上一次页面崩溃/HMR/刷新
             // eslint-disable-next-line no-console
-            console.warn('[Search] ⚠️ 检测到 sessionStorage 残留 isActive=true，已忽略并重建 SSE:', {
+            console.warn(
+              '[Search] ⚠️ 检测到 sessionStorage 残留 isActive=true，已忽略并重建 SSE:',
+              {
+                q,
+                ts,
+              }
+            );
+          } else if (isActive && isStale) {
+            // eslint-disable-next-line no-console
+            console.warn('[Search] ⚠️ 检测到 stale SSE 状态，清理后重试:', {
               q,
               ts,
             });
-          } else if (isActive && isStale) {
-            // eslint-disable-next-line no-console
-            console.warn('[Search] ⚠️ 检测到 stale SSE 状态，清理后重试:', { q, ts });
           }
           if (isActive) setSseStatus(q, false);
         } catch (err) {
@@ -341,11 +345,14 @@ function SearchPageClient() {
         const idleMs = Date.now() - (sseLastMessageAtRef.current || 0);
         if (idleMs >= 20_000 && sseQueryRef.current === q) {
           // eslint-disable-next-line no-console
-          console.warn('[SSE] ⏱️ 长时间未收到消息，自动中止本次搜索以避免卡死:', {
-            q,
-            idleMs,
-            url: searchUrl,
-          });
+          console.warn(
+            '[SSE] ⏱️ 长时间未收到消息，自动中止本次搜索以避免卡死:',
+            {
+              q,
+              idleMs,
+              url: searchUrl,
+            }
+          );
           cleanupSse(q);
           setIsLoading(false);
         }
@@ -366,16 +373,16 @@ function SearchPageClient() {
           sseLastMessageAtRef.current = Date.now();
           // 【调试】记录原始消息
           console.log('[SSE] 收到原始消息:', event.data);
-          
+
           const data = JSON.parse(event.data);
-          
+
           // 【调试】记录解析后的数据
           console.log('[SSE] 解析后的数据:', {
             done: data.done,
             resultsCount: data.results?.length || 0,
             source: data.source,
             source_name: data.source_name,
-            timestamp: data.timestamp
+            timestamp: data.timestamp,
           });
 
           if (data.done) {
@@ -431,8 +438,12 @@ function SearchPageClient() {
             Array.isArray(data.results) &&
             data.results.length > 0
           ) {
-            console.log(`[SSE] 📥 收到 ${data.results.length} 个结果，来源: ${data.source || 'unknown'}`);
-            
+            console.log(
+              `[SSE] 📥 收到 ${data.results.length} 个结果，来源: ${
+                data.source || 'unknown'
+              }`
+            );
+
             const newResults = data.results.filter(
               (result: SearchResult) =>
                 !seenResults.has(`${result.source}-${result.id}`)
@@ -440,7 +451,11 @@ function SearchPageClient() {
 
             if (newResults.length > 0) {
               // eslint-disable-next-line no-console
-              console.log(`[SSE] ✅ 过滤后剩余 ${newResults.length} 个新结果（去重了 ${data.results.length - newResults.length} 个）`);
+              console.log(
+                `[SSE] ✅ 过滤后剩余 ${newResults.length} 个新结果（去重了 ${
+                  data.results.length - newResults.length
+                } 个）`
+              );
               newResults.forEach((result: SearchResult) => {
                 seenResults.add(`${result.source}-${result.id}`);
                 accumulatedResults.push(result);
@@ -495,7 +510,9 @@ function SearchPageClient() {
                   });
               }
             } else {
-              console.log(`[SSE] ⚠️ 所有 ${data.results.length} 个结果都已存在（重复），跳过更新`);
+              console.log(
+                `[SSE] ⚠️ 所有 ${data.results.length} 个结果都已存在（重复），跳过更新`
+              );
             }
           } else {
             // 【调试】记录为什么没有处理结果
@@ -509,7 +526,12 @@ function SearchPageClient() {
           }
         } catch (err) {
           // eslint-disable-next-line no-console
-          console.error('[SSE] ❌ Error parsing SSE message:', err, '原始数据:', event.data);
+          console.error(
+            '[SSE] ❌ Error parsing SSE message:',
+            err,
+            '原始数据:',
+            event.data
+          );
         }
       };
 
@@ -523,13 +545,13 @@ function SearchPageClient() {
           'URL:',
           searchUrl
         );
-        
+
         // 检查连接状态
         if (eventSource.readyState === EventSource.CLOSED) {
           console.log('[SSE] 🔴 连接已关闭');
           cleanupSse(q);
           setIsLoading(false);
-          
+
           // 如果还没有收到任何结果，可能是连接失败
           if (!hasReceivedResults && accumulatedResults.length === 0) {
             console.warn('[SSE] ⚠️ 连接关闭且未收到任何结果，可能存在问题');

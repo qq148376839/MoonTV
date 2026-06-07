@@ -30,4 +30,3 @@ export async function GET(request: NextRequest) {
   cache.set(videoUrl, { url: m3u8Url, ts: now });
   return NextResponse.redirect(m3u8Url, 302);
 }
-

@@ -66,11 +66,15 @@ if (typeof globalThis.Request === 'undefined') {
       }
 
       async json() {
-        return typeof this.body === 'string' ? JSON.parse(this.body) : this.body;
+        return typeof this.body === 'string'
+          ? JSON.parse(this.body)
+          : this.body;
       }
 
       async text() {
-        return typeof this.body === 'string' ? this.body : JSON.stringify(this.body);
+        return typeof this.body === 'string'
+          ? this.body
+          : JSON.stringify(this.body);
       }
 
       // 静态方法 json()
@@ -161,9 +165,7 @@ if (typeof globalThis.ReadableStream === 'undefined') {
 if (typeof globalThis.TextEncoder === 'undefined') {
   globalThis.TextEncoder = class MockTextEncoder {
     encode(str) {
-      return new Uint8Array(
-        str.split('').map((char) => char.charCodeAt(0))
-      );
+      return new Uint8Array(str.split('').map((char) => char.charCodeAt(0)));
     }
   };
 }

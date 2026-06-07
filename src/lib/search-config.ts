@@ -11,12 +11,12 @@
 export function getSearchApiBaseUrl(): string {
   // 检查是否配置了 Cloudflare Worker URL
   const cfWorkerUrl = process.env.NEXT_PUBLIC_CF_SEARCH_WORKER_URL;
-  
+
   if (cfWorkerUrl && cfWorkerUrl.trim()) {
     // 移除末尾的斜杠（如果有）
     return cfWorkerUrl.replace(/\/$/, '');
   }
-  
+
   // 默认使用本地 API
   return '';
 }
@@ -26,12 +26,12 @@ export function getSearchApiBaseUrl(): string {
  */
 export function getStreamSearchUrl(query: string): string {
   const baseUrl = getSearchApiBaseUrl();
-  
+
   if (baseUrl) {
     // 使用 Cloudflare Worker
     return `${baseUrl}?q=${encodeURIComponent(query)}`;
   }
-  
+
   // 使用本地 API
   return `/api/search/stream?q=${encodeURIComponent(query)}`;
 }
@@ -41,12 +41,12 @@ export function getStreamSearchUrl(query: string): string {
  */
 export function getSearchUrl(query: string): string {
   const baseUrl = getSearchApiBaseUrl();
-  
+
   if (baseUrl) {
     // 使用 Cloudflare Worker（注意：Worker 只支持流式，这里返回流式 URL）
     return `${baseUrl}?q=${encodeURIComponent(query)}`;
   }
-  
+
   // 使用本地 API
   return `/api/search?q=${encodeURIComponent(query)}`;
 }

@@ -53,7 +53,9 @@ export default function LocalResourceList() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const base = items.slice().sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    const base = items
+      .slice()
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     if (!q) return base;
     return base.filter((it) => (it.title || '').toLowerCase().includes(q));
   }, [items, query]);
@@ -100,7 +102,8 @@ export default function LocalResourceList() {
               className='rounded-lg border border-gray-200/60 dark:border-gray-700/60 bg-white/40 dark:bg-gray-900/40 p-4 hover:border-green-500/40 transition-colors'
             >
               <div className='font-medium text-gray-900 dark:text-gray-100 truncate'>
-                {it.title || `${it.source}_${it.id}`} {it.year ? `(${it.year})` : ''}
+                {it.title || `${it.source}_${it.id}`}{' '}
+                {it.year ? `(${it.year})` : ''}
               </div>
               <div className='mt-1 text-xs text-gray-600 dark:text-gray-300 flex flex-wrap gap-2'>
                 <span className='border border-gray-500/40 rounded px-2 py-0.5'>
@@ -120,4 +123,3 @@ export default function LocalResourceList() {
     </div>
   );
 }
-

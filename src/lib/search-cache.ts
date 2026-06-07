@@ -248,12 +248,17 @@ class SearchCacheManager {
       const keysToRemove: string[] = [];
       for (let i = 0; i < sessionStorage.length; i++) {
         const key = sessionStorage.key(i);
-        if (key && (key.startsWith('search_results_') || key.startsWith('sse_status_'))) {
+        if (
+          key &&
+          (key.startsWith('search_results_') || key.startsWith('sse_status_'))
+        ) {
           keysToRemove.push(key);
         }
       }
       keysToRemove.forEach((key) => sessionStorage.removeItem(key));
-      console.log(`[SearchCache] 已清理 ${keysToRemove.length} 个 sessionStorage 缓存项`);
+      console.log(
+        `[SearchCache] 已清理 ${keysToRemove.length} 个 sessionStorage 缓存项`
+      );
     } catch (error) {
       console.warn('[SearchCache] 清理 sessionStorage 缓存失败:', error);
     }

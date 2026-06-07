@@ -2,7 +2,16 @@
 
 'use client';
 
-import { Clover, Download, Film, Home, Menu, Search, Star, Tv } from 'lucide-react';
+import {
+  Clover,
+  Download,
+  Film,
+  Home,
+  Menu,
+  Search,
+  Star,
+  Tv,
+} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {

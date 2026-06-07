@@ -19,18 +19,18 @@ export class M3U8Cleaner {
   static clean(content: string, baseUrl: string): string {
     const lines = content.split('\n');
     const cleanLines: string[] = [];
-    
+
     // 1. First pass: Identify "majority" domain for absolute URLs
     // This helps identify injected segments that point to different domains
     const absoluteUrls = lines
-      .map(l => l.trim())
-      .filter(l => l.startsWith('http://') || l.startsWith('https://'));
-    
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('http://') || l.startsWith('https://'));
+
     const majorityDomains = new Set<string>();
-    
+
     if (absoluteUrls.length > 0) {
       const domainCounts = new Map<string, number>();
-      
+
       for (const url of absoluteUrls) {
         try {
           const domain = new URL(url).hostname;
@@ -39,7 +39,7 @@ export class M3U8Cleaner {
           // Ignore invalid URLs
         }
       }
-      
+
       // Find the max count
       let maxCount = 0;
       // Use Array.from() to avoid downlevelIteration issue
@@ -48,7 +48,7 @@ export class M3U8Cleaner {
         const count = counts[i];
         if (count > maxCount) maxCount = count;
       }
-      
+
       // Add all domains with maxCount to majority set
       for (const [domain, count] of domainCounts.entries()) {
         if (count === maxCount) {
@@ -63,14 +63,17 @@ export class M3U8Cleaner {
       const line = lines[i];
       const trimmedLine = line.trim();
       let shouldRemove = false;
-      
+
       // Check if it's a URL line (absolute or relative)
       // A line is a URL if it doesn't start with # and is not empty
       const isUrl = trimmedLine.length > 0 && !trimmedLine.startsWith('#');
-      
+
       if (isUrl) {
         // Check absolute URLs against majority domain
-        if (trimmedLine.startsWith('http://') || trimmedLine.startsWith('https://')) {
+        if (
+          trimmedLine.startsWith('http://') ||
+          trimmedLine.startsWith('https://')
+        ) {
           try {
             const domain = new URL(trimmedLine).hostname;
             // If we have majority domains identified, and this one isn't one of them, remove it
@@ -81,7 +84,7 @@ export class M3U8Cleaner {
             // Invalid URL, keep it safe or remove? Let's keep for now unless it matches patterns
           }
         }
-        
+
         // Check regex patterns (for both absolute and relative)
         if (!shouldRemove) {
           for (const pattern of this.CLEAN_PATTERNS) {
@@ -104,7 +107,11 @@ export class M3U8Cleaner {
 
       if (shouldRemove) {
         // If this is a URL line and we're removing it, we should also remove the preceding #EXTINF if it exists
-        if (isUrl && cleanLines.length > 0 && cleanLines[cleanLines.length - 1].trim().startsWith('#EXTINF')) {
+        if (
+          isUrl &&
+          cleanLines.length > 0 &&
+          cleanLines[cleanLines.length - 1].trim().startsWith('#EXTINF')
+        ) {
           cleanLines.pop();
         }
         i++;
@@ -124,7 +131,7 @@ export class M3U8Cleaner {
       } else {
         cleanLines.push(line);
       }
-      
+
       i++;
     }
 
@@ -136,13 +143,13 @@ export class M3U8Cleaner {
     while (j < cleanLines.length) {
       const line = cleanLines[j];
       const trimmedLine = line.trim();
-      
+
       if (trimmedLine.startsWith('#EXTINF')) {
         // Look ahead
         if (j + 1 < cleanLines.length) {
           const nextLine = cleanLines[j + 1].trim();
           const nextIsUrl = nextLine.length > 0 && !nextLine.startsWith('#');
-          
+
           if (nextIsUrl) {
             finalLines.push(line); // Keep EXTINF
             finalLines.push(cleanLines[j + 1]); // Keep URL

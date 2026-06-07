@@ -67,8 +67,12 @@ async function getLocalResourceInfo(
   try {
     // 构建 API 路径
     const apiPath = baseUrl
-      ? `${baseUrl}/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`
-      : `/api/local-resource?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`;
+      ? `${baseUrl}/api/local-resource?source=${encodeURIComponent(
+          source
+        )}&id=${encodeURIComponent(id)}`
+      : `/api/local-resource?source=${encodeURIComponent(
+          source
+        )}&id=${encodeURIComponent(id)}`;
 
     // 调用本地资源检测 API
     const response = await fetch(apiPath, {
@@ -163,7 +167,8 @@ export async function GET(request: Request) {
 
     const merged: SearchResult[] = [];
     if (officialRes.status === 'fulfilled') merged.push(...officialRes.value);
-    if (unofficialRes.status === 'fulfilled') merged.push(...unofficialRes.value);
+    if (unofficialRes.status === 'fulfilled')
+      merged.push(...unofficialRes.value);
 
     let result = merged
       .filter((r) => r && r.title === query && r.source === resourceId)
@@ -171,7 +176,9 @@ export async function GET(request: Request) {
 
     // 兜底：如果没有命中（比如 source 字段缺失/不一致），再尝试 CMS 站点搜索（若配置存在）
     if (result.length === 0) {
-      const apiSites = (config.SourceConfig || []).filter((site) => !site.disabled);
+      const apiSites = (config.SourceConfig || []).filter(
+        (site) => !site.disabled
+      );
       const targetSiteConfig = apiSites.find((site) => site.key === resourceId);
       if (targetSiteConfig) {
         const targetSite = {
@@ -185,19 +192,23 @@ export async function GET(request: Request) {
         result = cmsResults.filter((r) => r.title === query).slice(0, 1);
       }
     }
-    
+
     // 对资源的 episodes 进行预处理（OrionTV 兼容性）
     for (const item of result) {
       if (item.episodes && item.episodes.length > 0) {
         const totalEpisodes = item.episodes.length;
 
         // 先检测本地资源（只在 search 阶段做“已完整下载才切本地”；不完整则在线）
-        const localInfo = await getLocalResourceInfo(item.source, item.id, baseUrl);
+        const localInfo = await getLocalResourceInfo(
+          item.source,
+          item.id,
+          baseUrl
+        );
 
         // 判断是官方资源还是非官方资源
         const isOfficial =
           item.source_type === 'official' || resourceId === 'official';
-        
+
         if (isOfficial) {
           // 官方资源：episodes 全量改写为 official-play.m3u8（播放时按需解析 + 触发下载）
           item.episodes = item.episodes.map((ep: string, idx: number) =>
@@ -235,12 +246,14 @@ export async function GET(request: Request) {
             const p = typeof paths[i] === 'string' ? paths[i].trim() : '';
             if (!ok || !p) continue;
             const prefix = origin ? `${origin}` : '';
-            item.episodes[i] = `${prefix}/api/local-video?path=${encodeURIComponent(p)}`;
+            item.episodes[
+              i
+            ] = `${prefix}/api/local-video?path=${encodeURIComponent(p)}`;
           }
         }
       }
     }
-    
+
     if (!config.SiteConfig.DisableYellowFilter) {
       result = result.filter((result) => {
         const typeName = result.type_name || '';

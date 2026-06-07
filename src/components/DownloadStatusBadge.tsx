@@ -27,15 +27,20 @@ const statusClass: Record<string, string> = {
   cancelled: 'bg-gray-500/10 text-gray-700 dark:text-gray-200',
 };
 
-export default function DownloadStatusBadge({ status }: { status: DownloadStatus }) {
+export default function DownloadStatusBadge({
+  status,
+}: {
+  status: DownloadStatus;
+}) {
   const text = statusText[status] ?? status;
   const cls =
     statusClass[status] ?? 'bg-gray-500/10 text-gray-700 dark:text-gray-200';
 
   return (
-    <span className={`inline-flex items-center px-2 py-1 rounded text-xs ${cls}`}>
+    <span
+      className={`inline-flex items-center px-2 py-1 rounded text-xs ${cls}`}
+    >
       {text}
     </span>
   );
 }
-

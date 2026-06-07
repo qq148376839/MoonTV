@@ -14,10 +14,15 @@ const recentTriggers = new Map<string, number>();
 
 function getOrigin(request: NextRequest): string {
   const originHeader = request.headers.get('origin');
-  if (originHeader) return originHeader.includes('0.0.0.0') ? originHeader.replace('0.0.0.0', 'localhost') : originHeader;
+  if (originHeader)
+    return originHeader.includes('0.0.0.0')
+      ? originHeader.replace('0.0.0.0', 'localhost')
+      : originHeader;
   const host = request.headers.get('host') || 'localhost:51000';
   const proto = request.headers.get('x-forwarded-proto') || 'http';
-  return `${proto}://${host.includes('0.0.0.0') ? host.replace('0.0.0.0', 'localhost') : host}`;
+  return `${proto}://${
+    host.includes('0.0.0.0') ? host.replace('0.0.0.0', 'localhost') : host
+  }`;
 }
 
 function isHttpUrl(u: string): boolean {
@@ -36,7 +41,11 @@ function getDownloadNextCount(): number {
   return Math.min(n, 50);
 }
 
-function getLocalEpisodeM3u8Path(source: string, id: string, episodeNo: number): string | null {
+function getLocalEpisodeM3u8Path(
+  source: string,
+  id: string,
+  episodeNo: number
+): string | null {
   const storageManager = getStorageManager();
   if (!storageManager.isEnabled()) return null;
 
@@ -45,7 +54,10 @@ function getLocalEpisodeM3u8Path(source: string, id: string, episodeNo: number):
   const key = `${source}_${id}`;
   const entry = index[key];
   if (!entry) return null;
-  const resourcePath = PathUtils.resolveResourcePath(entry.local_path, storageManager.getStoragePath());
+  const resourcePath = PathUtils.resolveResourcePath(
+    entry.local_path,
+    storageManager.getStoragePath()
+  );
   const epNo = String(episodeNo).padStart(2, '0');
   return `${resourcePath}/episode_${epNo}.m3u8`;
 }
@@ -77,12 +89,21 @@ async function triggerDownloadIfNeeded(params: {
     limit: 1,
     source,
   });
-  const resource = list.find((r) => r && String(r.id) === String(id) && r.source === source);
-  if (!resource || !Array.isArray(resource.episodes) || resource.episodes.length === 0) return;
+  const resource = list.find(
+    (r) => r && String(r.id) === String(id) && r.source === source
+  );
+  if (
+    !resource ||
+    !Array.isArray(resource.episodes) ||
+    resource.episodes.length === 0
+  )
+    return;
 
   const epNumbers: number[] = [];
   for (let n = start; n <= end; n++) epNumbers.push(n);
-  const episodesToDownload = epNumbers.map((n) => resource.episodes[n - 1]).filter(Boolean);
+  const episodesToDownload = epNumbers
+    .map((n) => resource.episodes[n - 1])
+    .filter(Boolean);
   if (episodesToDownload.length === 0) return;
 
   downloadService.createTask(resource, episodesToDownload, epNumbers);
@@ -110,22 +131,32 @@ export async function GET(request: NextRequest) {
   }
 
   const storageManager = getStorageManager();
-  if (storageManager.isEnabled() && storageManager.isEpisodeDownloaded(source, id, ep)) {
+  if (
+    storageManager.isEnabled() &&
+    storageManager.isEpisodeDownloaded(source, id, ep)
+  ) {
     const localM3u8 = getLocalEpisodeM3u8Path(source, id, ep);
     if (localM3u8) {
       const origin = getOrigin(request);
-      const local = `${origin}/api/local-video?path=${encodeURIComponent(localM3u8)}`;
+      const local = `${origin}/api/local-video?path=${encodeURIComponent(
+        localM3u8
+      )}`;
       return NextResponse.redirect(local, 302);
     }
   }
 
   // 异步触发下载（不阻塞播放）
-  triggerDownloadIfNeeded({ q, source, id, episodeNo: ep, total: Number.isFinite(total) && total > 0 ? total : ep }).catch(
-    (err) => console.warn('[unofficial-play] triggerDownload failed', err)
+  triggerDownloadIfNeeded({
+    q,
+    source,
+    id,
+    episodeNo: ep,
+    total: Number.isFinite(total) && total > 0 ? total : ep,
+  }).catch((err) =>
+    console.warn('[unofficial-play] triggerDownload failed', err)
   );
 
   const origin = getOrigin(request);
   const proxied = `${origin}/api/proxy/m3u8?url=${encodeURIComponent(url)}`;
   return NextResponse.redirect(proxied, 302);
 }
-

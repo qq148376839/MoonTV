@@ -23,8 +23,7 @@ export async function GET(request: Request) {
     if (sourceCode === 'official' || sourceCode === 'unofficial') {
       return NextResponse.json(
         {
-          error:
-            '官方和非官方资源已在搜索结果中包含完整信息，无需调用详情接口',
+          error: '官方和非官方资源已在搜索结果中包含完整信息，无需调用详情接口',
         },
         { status: 400 }
       );

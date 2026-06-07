@@ -22,7 +22,11 @@ type DetailResponse = {
     downloaded_episodes: number;
     total_episodes: number;
   };
-  episode_status: Array<{ episode: number; downloaded: boolean; file_path: string }>;
+  episode_status: Array<{
+    episode: number;
+    downloaded: boolean;
+    file_path: string;
+  }>;
 };
 
 async function safeJson(res: Response) {
@@ -129,10 +133,12 @@ export default function LocalResourceDetail({
       <div className='flex items-start justify-between gap-3'>
         <div className='min-w-0'>
           <div className='text-xl font-bold text-gray-900 dark:text-gray-100 truncate'>
-            {data.metadata.title || `${source}_${id}`} {data.metadata.year ? `(${data.metadata.year})` : ''}
+            {data.metadata.title || `${source}_${id}`}{' '}
+            {data.metadata.year ? `(${data.metadata.year})` : ''}
           </div>
           <div className='mt-1 text-sm text-gray-600 dark:text-gray-300'>
-            已下载 {data.stats.downloaded_episodes} / {data.stats.total_episodes} 集
+            已下载 {data.stats.downloaded_episodes} /{' '}
+            {data.stats.total_episodes} 集
           </div>
           <div className='mt-1 text-xs text-gray-500 dark:text-gray-400 truncate'>
             {data.local_path}
@@ -156,7 +162,9 @@ export default function LocalResourceDetail({
       </div>
 
       <div className='rounded-lg border border-gray-200/60 dark:border-gray-700/60 bg-white/40 dark:bg-gray-900/40 p-4'>
-        <div className='font-medium text-gray-900 dark:text-gray-100 mb-3'>剧集列表</div>
+        <div className='font-medium text-gray-900 dark:text-gray-100 mb-3'>
+          剧集列表
+        </div>
         <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2'>
           {data.episode_status.map((ep) => (
             <div
@@ -167,7 +175,9 @@ export default function LocalResourceDetail({
                   : 'border-gray-300/60 dark:border-gray-700/60 bg-transparent'
               }`}
             >
-              <span className='text-gray-900 dark:text-gray-100'>第 {ep.episode} 集</span>
+              <span className='text-gray-900 dark:text-gray-100'>
+                第 {ep.episode} 集
+              </span>
               {ep.downloaded ? (
                 <button
                   onClick={() => deleteEpisode(ep.episode)}
@@ -176,7 +186,9 @@ export default function LocalResourceDetail({
                   删除
                 </button>
               ) : (
-                <span className='text-xs text-gray-500 dark:text-gray-400'>未下载</span>
+                <span className='text-xs text-gray-500 dark:text-gray-400'>
+                  未下载
+                </span>
               )}
             </div>
           ))}
@@ -185,4 +197,3 @@ export default function LocalResourceDetail({
     </div>
   );
 }
-

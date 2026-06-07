@@ -55,7 +55,13 @@ export async function DELETE(request: NextRequest) {
     const episodeParam = searchParams.get('episode');
     const episode = Number(episodeParam);
 
-    if (!source || !id || !episodeParam || !Number.isFinite(episode) || episode < 1) {
+    if (
+      !source ||
+      !id ||
+      !episodeParam ||
+      !Number.isFinite(episode) ||
+      episode < 1
+    ) {
       return NextResponse.json(
         { error: '缺少必要参数: source、id、episode' },
         { status: 400 }
@@ -70,7 +76,10 @@ export async function DELETE(request: NextRequest) {
     }
 
     const storagePath = storageManager.getStoragePath();
-    const localPath = PathUtils.resolveResourcePath(entry.local_path, storagePath);
+    const localPath = PathUtils.resolveResourcePath(
+      entry.local_path,
+      storagePath
+    );
     if (!fs.existsSync(localPath)) {
       return NextResponse.json({ error: '资源目录不存在' }, { status: 404 });
     }
@@ -83,7 +92,11 @@ export async function DELETE(request: NextRequest) {
 
     const targets: string[] = [];
     // 1) metadata 指向的真实文件
-    if (recorded && typeof recorded === 'string' && recorded.trim().length > 0) {
+    if (
+      recorded &&
+      typeof recorded === 'string' &&
+      recorded.trim().length > 0
+    ) {
       let abs: string;
       if (path.isAbsolute(recorded)) abs = recorded;
       else if (
@@ -129,7 +142,10 @@ export async function DELETE(request: NextRequest) {
 
     // 删除成功后再更新 metadata.json：将该集置空 + 更新 episodes_info / episode_count
     if (metadata) {
-      if (Array.isArray(metadata.episodes) && metadata.episodes.length >= episode) {
+      if (
+        Array.isArray(metadata.episodes) &&
+        metadata.episodes.length >= episode
+      ) {
         metadata.episodes[episode - 1] = '';
       }
 
@@ -140,12 +156,18 @@ export async function DELETE(request: NextRequest) {
       }
 
       const downloadedCount = Array.isArray(metadata.episodes)
-        ? metadata.episodes.filter((p) => typeof p === 'string' && p.trim().length > 0).length
+        ? metadata.episodes.filter(
+            (p) => typeof p === 'string' && p.trim().length > 0
+          ).length
         : 0;
       metadata.episode_count = downloadedCount;
 
       const metadataPath = path.join(localPath, 'metadata.json');
-      fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8');
+      fs.writeFileSync(
+        metadataPath,
+        JSON.stringify(metadata, null, 2),
+        'utf-8'
+      );
     }
 
     // 更新 index.json 的更新时间
@@ -158,4 +180,3 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: '删除单集失败' }, { status: 500 });
   }
 }
-

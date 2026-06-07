@@ -59,7 +59,9 @@ export function shouldProxyMediaUrl(url: string): boolean {
 
 export function buildProxyM3u8Url(targetUrl: string, clean?: boolean): string {
   const cleanValue = clean ? '1' : '0';
-  return `/api/proxy/m3u8?url=${encodeURIComponent(targetUrl)}&clean=${cleanValue}`;
+  return `/api/proxy/m3u8?url=${encodeURIComponent(
+    targetUrl
+  )}&clean=${cleanValue}`;
 }
 
 export function convertToProxyM3u8UrlIfNeeded(
@@ -71,4 +73,3 @@ export function convertToProxyM3u8UrlIfNeeded(
   if (!shouldProxyMediaUrl(url)) return url;
   return buildProxyM3u8Url(url, options.clean);
 }
-

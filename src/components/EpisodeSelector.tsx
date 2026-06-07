@@ -41,7 +41,10 @@ interface EpisodeSelectorProps {
   /** 预计算的测速结果，避免重复测速 */
   precomputedVideoInfo?: Map<string, VideoInfo>;
   /** 每集下载状态（key 为 1-based 集号） */
-  episodeStatusMap?: Record<number, 'not_downloaded' | 'downloading' | 'downloaded' | 'failed'>;
+  episodeStatusMap?: Record<
+    number,
+    'not_downloaded' | 'downloading' | 'downloaded' | 'failed'
+  >;
 }
 
 /**
@@ -403,7 +406,8 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
               return episodes;
             })().map((episodeNumber) => {
               const isActive = episodeNumber === value;
-              const status = episodeStatusMap?.[episodeNumber] ?? 'not_downloaded';
+              const status =
+                episodeStatusMap?.[episodeNumber] ?? 'not_downloaded';
               const dotClass =
                 status === 'downloaded'
                   ? 'bg-green-500'
@@ -424,7 +428,9 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
                     }`.trim()}
                 >
                   {dotClass !== 'bg-transparent' && (
-                    <span className={`absolute top-1 right-1 w-2 h-2 rounded-full ${dotClass}`} />
+                    <span
+                      className={`absolute top-1 right-1 w-2 h-2 rounded-full ${dotClass}`}
+                    />
                   )}
                   {episodeNumber}
                 </button>

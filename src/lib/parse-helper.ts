@@ -15,8 +15,7 @@ export function isLikelyWebPageUrl(url: string): boolean {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     const p = u.pathname.toLowerCase();
-    const isHtml =
-      p.endsWith('.html') || url.toLowerCase().includes('.html#');
+    const isHtml = p.endsWith('.html') || url.toLowerCase().includes('.html#');
     const isKnownVideoPageHost =
       host.includes('youku.com') ||
       host.includes('iqiyi.com') ||
@@ -48,9 +47,7 @@ export async function parseToM3u8Url(
 
   const parseUrl = `${parseApiUrl}?url=${encodeURIComponent(videoUrl)}`;
 
-  console.log(
-    `[parse-helper] 请求解析API: ${parseUrl.substring(0, 100)}...`
-  );
+  console.log(`[parse-helper] 请求解析API: ${parseUrl.substring(0, 100)}...`);
 
   try {
     const controller = new AbortController();
@@ -94,9 +91,14 @@ export async function parseToM3u8Url(
           hostname.startsWith('169.254.'); // 链路本地地址
 
         if (isPrivateIP && origin) {
-          const proxyUrl = `${origin}/api/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}`;
+          const proxyUrl = `${origin}/api/proxy/m3u8?url=${encodeURIComponent(
+            m3u8Url
+          )}`;
           console.log(
-            `[parse-helper] 检测到内网地址，转换为代理URL: ${proxyUrl.substring(0, 100)}...`
+            `[parse-helper] 检测到内网地址，转换为代理URL: ${proxyUrl.substring(
+              0,
+              100
+            )}...`
           );
           m3u8Url = proxyUrl;
         }
@@ -105,9 +107,7 @@ export async function parseToM3u8Url(
         console.warn(`[parse-helper] URL解析失败，保持原样:`, m3u8Url);
       }
 
-      console.log(
-        `[parse-helper] ✓ 解析成功: ${m3u8Url.substring(0, 100)}...`
-      );
+      console.log(`[parse-helper] ✓ 解析成功: ${m3u8Url.substring(0, 100)}...`);
       return m3u8Url;
     } else {
       console.error(
@@ -142,7 +142,9 @@ export async function convertOfficialEpisodes(
     // OrionTV 兼容：不要在 search 阶段同步调用外部解析（易超时），改为返回“可播放的解析跳转 URL”
     // 播放器真正拉取该 URL 时再由服务端解析并 302 到 m3u8。
     if (origin) {
-      const playable = `${origin}/api/parse-m3u8?url=${encodeURIComponent(firstEpisode)}`;
+      const playable = `${origin}/api/parse-m3u8?url=${encodeURIComponent(
+        firstEpisode
+      )}`;
       return [playable, ...episodes.slice(1)];
     }
 
@@ -197,7 +199,10 @@ export function convertUnofficialEpisodes(
     const proxiedUrl = convertToProxyUrl(firstEpisode, origin);
     if (proxiedUrl !== firstEpisode) {
       console.log(
-        `[parse-helper] 非官方资源 URL 转换为代理 URL: ${firstEpisode.substring(0, 100)}... -> ${proxiedUrl.substring(0, 100)}...`
+        `[parse-helper] 非官方资源 URL 转换为代理 URL: ${firstEpisode.substring(
+          0,
+          100
+        )}... -> ${proxiedUrl.substring(0, 100)}...`
       );
       return [proxiedUrl, ...episodes.slice(1)];
     }

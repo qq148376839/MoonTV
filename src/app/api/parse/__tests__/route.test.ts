@@ -25,7 +25,8 @@ describe('/api/parse', () => {
     };
 
     it('should successfully parse video URL', async () => {
-      const videoUrl = 'https://v.qq.com/x/cover/mzc00200x2xo33l/l4101xix2xn.html';
+      const videoUrl =
+        'https://v.qq.com/x/cover/mzc00200x2xo33l/l4101xix2xn.html';
 
       (global.fetch as jest.Mock).mockResolvedValueOnce({
         ok: true,
@@ -210,7 +211,8 @@ describe('/api/parse', () => {
     });
 
     it('should use custom parse API URL from environment variable', async () => {
-      process.env.NEXT_PUBLIC_PARSE_API_URL = 'https://custom-parse-api.com/api/v1/parse';
+      process.env.NEXT_PUBLIC_PARSE_API_URL =
+        'https://custom-parse-api.com/api/v1/parse';
       const videoUrl = 'https://v.qq.com/x/cover/test.html';
 
       (global.fetch as jest.Mock).mockResolvedValueOnce({

@@ -2,7 +2,10 @@
  * 官方与非官方资源搜索独立功能测试
  */
 
-import { searchOfficialResources, searchUnofficialResources } from '../search-independent';
+import {
+  searchOfficialResources,
+  searchUnofficialResources,
+} from '../search-independent';
 
 // Mock fetch
 global.fetch = jest.fn();
@@ -71,7 +74,9 @@ describe('Search Independent Resources', () => {
         douban_id: 123456,
       });
       expect(results[0].episodes).toHaveLength(3);
-      expect(results[0].episodes[0]).toBe('https://v.qq.com/x/cover/test1.html');
+      expect(results[0].episodes[0]).toBe(
+        'https://v.qq.com/x/cover/test1.html'
+      );
     });
 
     it('should use custom baseUrl when provided', async () => {
@@ -90,7 +95,8 @@ describe('Search Independent Resources', () => {
     });
 
     it('should use environment variable for baseUrl', async () => {
-      process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL = 'https://env-official-api.com';
+      process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL =
+        'https://env-official-api.com';
 
       (global.fetch as jest.Mock).mockResolvedValueOnce({
         ok: true,
@@ -292,7 +298,8 @@ describe('Search Independent Resources', () => {
     });
 
     it('should use environment variable for baseUrl', async () => {
-      process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL = 'https://env-unofficial-api.com';
+      process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL =
+        'https://env-unofficial-api.com';
 
       (global.fetch as jest.Mock).mockResolvedValueOnce({
         ok: true,
@@ -327,9 +334,7 @@ describe('Search Independent Resources', () => {
       const results = await searchUnofficialResources('测试');
 
       expect(results[0].episodes).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining('.m3u8'),
-        ])
+        expect.arrayContaining([expect.stringContaining('.m3u8')])
       );
     });
 

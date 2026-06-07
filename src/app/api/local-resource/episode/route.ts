@@ -56,7 +56,13 @@ export async function DELETE(request: NextRequest) {
     const episodeParam = searchParams.get('episode') || '';
     const episode = Number(episodeParam);
 
-    if (!source || !id || !episodeParam || !Number.isFinite(episode) || episode < 1) {
+    if (
+      !source ||
+      !id ||
+      !episodeParam ||
+      !Number.isFinite(episode) ||
+      episode < 1
+    ) {
       return NextResponse.json(
         { error: '缺少必要参数: source、id、episode' },
         { status: 400 }
@@ -71,7 +77,10 @@ export async function DELETE(request: NextRequest) {
     }
 
     const storagePath = storageManager.getStoragePath();
-    const localPath = PathUtils.resolveResourcePath(entry.local_path, storagePath);
+    const localPath = PathUtils.resolveResourcePath(
+      entry.local_path,
+      storagePath
+    );
     if (!fs.existsSync(localPath)) {
       return NextResponse.json({ error: '资源目录不存在' }, { status: 404 });
     }
@@ -83,7 +92,11 @@ export async function DELETE(request: NextRequest) {
     // 1) metadata 指向的真实文件（优先）
     const metadata = storageManager.readMetadata(localPath);
     const recorded = metadata?.episodes?.[episode - 1];
-    if (recorded && typeof recorded === 'string' && recorded.trim().length > 0) {
+    if (
+      recorded &&
+      typeof recorded === 'string' &&
+      recorded.trim().length > 0
+    ) {
       let abs: string;
       if (path.isAbsolute(recorded)) abs = recorded;
       else if (
@@ -131,7 +144,10 @@ export async function DELETE(request: NextRequest) {
 
     // 删除成功后再更新 metadata/index
     if (metadata) {
-      if (Array.isArray(metadata.episodes) && metadata.episodes.length >= episode) {
+      if (
+        Array.isArray(metadata.episodes) &&
+        metadata.episodes.length >= episode
+      ) {
         metadata.episodes[episode - 1] = '';
       }
       if (Array.isArray(metadata.episodes_info)) {
@@ -140,7 +156,9 @@ export async function DELETE(request: NextRequest) {
         );
       }
       metadata.episode_count = Array.isArray(metadata.episodes)
-        ? metadata.episodes.filter((p) => typeof p === 'string' && p.trim().length > 0).length
+        ? metadata.episodes.filter(
+            (p) => typeof p === 'string' && p.trim().length > 0
+          ).length
         : 0;
       fs.writeFileSync(
         path.join(localPath, 'metadata.json'),
@@ -164,4 +182,3 @@ export async function DELETE(request: NextRequest) {
     );
   }
 }
-

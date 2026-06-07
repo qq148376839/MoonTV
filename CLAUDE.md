@@ -1,18 +1,17 @@
 # CLAUDE.md - MoonTV Project Rules
 
+> 细节规则见 `docs/rules/` 目录下对应文件，此处仅保留索引和关键规则。
+
 ## Project Overview
 
-MoonTV is a Next.js-based video aggregation platform supporting multi-source search, video playback, user favorites, and watch history. Built with TypeScript, Tailwind CSS, and deployed via Docker/Vercel/Cloudflare Pages/Zeabur.
+MoonTV is a Next.js video aggregation platform with multi-source search, playback, favorites, and watch history. Includes an Android TV native client.
 
 ## Tech Stack
 
-- **Framework**: Next.js (App Router) + React 18 + TypeScript 5.9
-- **Styling**: Tailwind CSS + Headless UI
-- **Player**: ArtPlayer + HLS.js
-- **Storage**: localStorage / Redis / Cloudflare D1 / Upstash Redis (unified via `src/lib/db.ts`)
+- **Web**: Next.js (App Router) + React 18 + TypeScript 5.9 + Tailwind CSS + ArtPlayer + HLS.js
+- **Storage**: localStorage / Redis / D1 / Upstash (unified via `src/lib/db.ts`)
 - **Package Manager**: pnpm (v10.12.4)
-- **Testing**: Jest + Testing Library
-- **Linting**: ESLint + Prettier + Commitlint + Husky
+- **Android TV**: Kotlin + Leanback + ExoPlayer + OkHttp → 详见 `android-tv.md`
 
 ## Directory Structure
 
@@ -20,249 +19,90 @@ MoonTV is a Next.js-based video aggregation platform supporting multi-source sea
 src/
 ├── app/              # Next.js App Router (pages + API routes)
 │   ├── api/          # Edge Runtime API routes
-│   │   ├── search/   # Multi-source aggregation search
-│   │   ├── detail/   # Video detail
-│   │   ├── parse/    # Official parser (auto-decryption)
-│   │   ├── favorites/
-│   │   ├── playrecords/
-│   │   └── admin/    # Admin endpoints
 │   ├── play/         # Playback page
-│   ├── player/       # Direct play route
-│   ├── search/       # Search page
-│   ├── admin/        # Admin panel
-│   └── login/        # Authentication
-├── components/       # React components (Server Components by default, 'use client' for interactive)
-└── lib/              # Business logic and utilities
-    ├── downstream.ts # Resource site API integration
-    ├── db.ts         # Database abstraction layer
-    ├── d1.db.ts      # D1 implementation
-    ├── redis.db.ts   # Redis implementation
-    ├── config.ts     # Configuration
-    ├── decrypt.ts    # Parser decryption
-    └── utils.ts      # Utilities
+│   └── search/       # Search page
+├── components/       # React components
+└── lib/              # Business logic (downstream.ts, db.ts, config.ts, utils.ts)
+
+android-tv/          # Android TV native app → 详见 android-tv.md
 ```
 
 ## Critical Rules
 
 ### Confirm Before Coding (Highest Priority)
 
-When requirements are **unclear or ambiguous**, you MUST stop and ask clarifying questions before writing any code. Specifically:
+- **不明确需求** → 必须先提问确认，再写代码
+- **明确指令**（如 "run build and fix errors"）→ 直接执行
 
-- Unclear requirements -> ask about use cases, expected behavior, edge cases
-- Uncertain technical approach -> present options with trade-offs, let user choose
-- Ambiguous business logic -> confirm rules and special cases
-- Unknown data formats -> confirm input/output schemas
-- Unknown integration points -> confirm API specs
-
-When the user gives a **clear, executable instruction** (e.g., "run build and fix errors", "fix until build passes"), execute directly without asking.
-
-### Build Quality Gates (Mandatory)
-
-Every change must pass these gates:
+### Build Quality Gates
 
 ```bash
-pnpm check:fast          # lint:strict + typecheck (run after each small change)
-pnpm run build           # full production build (run before committing)
+pnpm check:fast          # lint + typecheck（每次改动后运行）
+pnpm run build           # production build（提交前必须通过）
 ```
 
-- Run `pnpm check:fast` after every logical change
-- Run `pnpm lint:fix` for auto-fixable format issues
-- `pnpm run build` MUST pass before any commit
-- When fixing build errors: make **minimal changes only**, do not refactor unrelated code
+- 修 build 错误时只做**最小改动**，不重构无关代码
 
-### Git Commit Standards
+### Git Commit
 
 Format: `<type>(<scope>): <subject>`
-
 Types: `feat`, `fix`, `docs`, `chore`, `style`, `refactor`, `ci`, `test`, `perf`, `revert`, `vercel`
 
-Rules:
+- subject 小写，≤72 字符，无句号
+- 中英文均可
+- 禁止 `--no-verify`
+- 提交前 build 必须通过
 
-- Subject must be lowercase (no Sentence case) - commitlint enforces `subject-case`
-- Subject under 72 characters, no trailing period
-- Chinese or English both accepted
-- Never use `--no-verify` to skip hooks
-- Build must pass before committing
-- Small, frequent commits - one logical change per commit
+## Architecture (详见 `architecture.md`)
 
-## Architecture Constraints
+- API routes 薄层化，业务逻辑放 `lib/`
+- DB 操作统一走 `lib/db.ts` 抽象层
+- Server Components 优先，`'use client'` 仅用于交互组件
+- RESTful API，Edge Runtime，`Promise.allSettled` 容错
 
-### Layered Architecture
+## Security
 
-1. **API Route Layer** (`app/api/`) - HTTP handling, Edge Runtime
-2. **Business Logic Layer** (`lib/`) - core logic (search, speed-test, storage)
-3. **Component Layer** (`components/`) - UI, single responsibility
-4. **Config Layer** (`config.json`) - resource site configuration
+- 敏感值用环境变量，禁止硬编码
+- D1 用参数化查询，API 路由验证权限
+- 禁止提交 `.env` 文件
 
-Rules:
+## Coding Standards (详见 `coding-standards.md`)
 
-- API routes must be thin - business logic goes in `lib/`
-- All DB operations go through the abstraction layer (`lib/db.ts`)
-- Resource site logic goes in `lib/downstream.ts`
-- No circular dependencies between components
+- 函数必须有显式类型，避免 `any`
+- 命名：文件 kebab-case，类 PascalCase，变量 camelCase，常量 UPPER_SNAKE_CASE
+- API 路由必须 try/catch，客户端检查 `response.ok`
+- 禁止记录敏感数据
 
-### Frontend
+## MoonTV Business (详见 `moontv-business.md`)
 
-- Server Components by default; `'use client'` only for interactive components
-- Tailwind CSS for all styling; dark mode via `next-themes`
-- ArtPlayer for video playback with HLS.js integration
-- State: React Hooks for simple state, Context API for complex (ThemeProvider, SiteProvider)
-- Player state managed via `useRef` (ArtPlayer instance)
+- 搜索：多源聚合，高优先级 3s 超时，≥10 结果提前返回，2h 缓存
+- 播放：4s 测速超时，支持切源保持进度
+- 存储：多后端统一抽象，支持跨设备同步
 
-### API Design
+## Android TV (详见 `android-tv.md`)
 
-- RESTful routes using nouns (`/api/search`, `/api/detail`)
-- Query params via query string (`/api/search?q=keyword`)
-- Standard error response: `{ "error": "description" }` with proper HTTP status codes
-- Multi-source search: use `Promise.allSettled` for error tolerance
-- Edge Runtime for API routes
-
-## Security Rules
-
-- Sensitive values (API keys, tokens, passwords) MUST use environment variables - never hardcode
-- All user input MUST be validated
-- D1 database queries MUST use parameterized queries (prevent SQL injection)
-- API routes MUST verify permissions
-- Admin operations MUST verify admin privileges
-- User data MUST be isolated (multi-user support)
-- Never commit `.env` files or credentials
-
-## Coding Standards
-
-### TypeScript
-
-- All functions must have explicit parameter types and return types
-- Use `interface` for object structures, `type` for unions/utilities
-- Avoid `any` - use `unknown` or specific types
-- Database query results must be typed
-
-### Naming
-
-- Files: kebab-case (`video-card.tsx`) or PascalCase for components (`VideoCard.tsx`)
-- Classes/Interfaces/Types: PascalCase
-- Functions/Variables: camelCase
-- Constants: UPPER_SNAKE_CASE
-
-### Error Handling
-
-- All API routes must include try/catch with standard error responses
-- Client-side: check `response.ok` before parsing
-- Log errors with `console.error()` including context
-- Never swallow errors silently
-
-### Logging
-
-- `console.error()` for errors, `console.warn()` for warnings
-- `console.info()` for key operations (search, playback records, admin actions)
-- Never log sensitive data (passwords, tokens)
-
-## MoonTV-Specific Rules
-
-### Search
-
-- Must support multi-source aggregation (compatible with Apple CMS V10 API format)
-- Use batch request strategy with timeouts (high-priority 3s, low-priority 5s)
-- Early return when results >= 10
-- Error tolerance: partial source failure must not break overall results
-- Default cache: 2 hours
-
-### Playback
-
-- Speed test timeout: 4 seconds default
-- Cache speed test results
-- Support source switching while preserving playback progress
-- Playback records must persist
-
-### Storage
-
-- Support multiple backends: localStorage, Redis, D1, Upstash
-- All access through unified abstraction layer (`lib/db.ts`)
-- Playback records and favorites must support cross-device sync
+- Kotlin + MVVM + OkHttp + ExoPlayer
+- `FragmentActivity`（非 AppCompatActivity），`Theme.Leanback`
+- 网络调用必须在 `Dispatchers.IO`
+- `./gradlew assembleDebug` 必须通过
+- Release: `gh release create v<ver>-android-tv <apk绝对路径> --title "..." --notes "..."`（单行命令）
 
 ## Documentation
 
-- PRD docs go in `docs/features/` with format: `YYMMDD-功能名称-PRD.md`
-- Before creating docs, check if related docs already exist - update rather than duplicate
-- One document per feature - don't create separate docs for test/summary/implementation
-- Technical docs go in `docs/technical/`
-
-## Android TV App (`android-tv/`)
-
-### Tech Stack
-
-- **Language**: Kotlin 1.9.22, JDK 17
-- **UI**: Leanback (BrowseSupportFragment, SearchSupportFragment, DetailsSupportFragment, VerticalGridSupportFragment)
-- **Architecture**: MVVM + ViewModel + StateFlow + Kotlin Coroutines
-- **Network**: OkHttp + kotlinx.serialization (no Retrofit — API count is small)
-- **Image**: Coil (Kotlin-first)
-- **Player**: ExoPlayer (Media3) with HLS
-- **Build**: Gradle 8.5, AGP 8.2.0, compileSdk 34, minSdk 21
-
-### Directory Structure
-
-```
-android-tv/app/src/main/java/com/moontv/android/
-├── MainActivity.kt              # Fragment host (login or home)
-├── PlayerActivity.kt            # ExoPlayer HLS playback
-├── SettingsActivity.kt          # Server URL config + QR setup
-├── api/
-│   ├── Models.kt                # API data classes (@Serializable)
-│   ├── ApiClient.kt             # OkHttp singleton (all API calls)
-│   ├── CookieStore.kt           # CookieJar → SharedPreferences
-│   └── SseParser.kt             # SSE stream → Kotlin Flow
-├── viewmodel/                   # MVVM ViewModels (StateFlow)
-├── ui/
-│   ├── LoginFragment.kt         # Password login
-│   ├── HomeFragment.kt          # BrowseSupportFragment (Netflix rows)
-│   ├── SearchFragment.kt        # SSE streaming search + pinyin
-│   ├── DetailFragment.kt        # Episode grid + favorite toggle
-│   ├── FavoritesFragment.kt     # VerticalGridSupportFragment
-│   ├── CardPresenter.kt         # Poster card presenter
-│   ├── EpisodePresenter.kt      # Episode button presenter
-│   └── PinyinHelper.kt          # Built-in pinyin initial matching
-└── util/
-    ├── Prefs.kt                 # SharedPreferences helper
-    └── ImageUtils.kt            # Coil image loading
-```
-
-### Build Commands
-
-```bash
-# Environment setup (macOS with Homebrew)
-export JAVA_HOME="/opt/homebrew/opt/openjdk@17"
-export PATH="$JAVA_HOME/bin:$PATH"
-export ANDROID_HOME="$HOME/Library/Android/sdk"
-
-# Build debug APK
-cd android-tv && ./gradlew assembleDebug
-# Output: android-tv/app/build/outputs/apk/debug/app-debug.apk
-
-# Build release APK
-cd android-tv && ./gradlew assembleRelease
-
-# Install to TV via ADB
-adb connect <TV_IP>:5555
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-### Android TV Build Rules
-
-- Theme MUST be `Theme.Leanback` (not `Theme.AppCompat`) — Activities must extend `FragmentActivity`, NOT `AppCompatActivity`
-- All network calls MUST run on `Dispatchers.IO` (Android throws `NetworkOnMainThreadException` on main thread)
-- API data classes MUST have `@Serializable` annotation and `ignoreUnknownKeys = true` in Json config
-- OkHttp `CookieJar` handles auth cookie persistence — do not use Android `CookieManager`
-- `./gradlew assembleDebug` MUST pass before committing Android changes
+- PRD: `docs/features/YYMMDD-功能名称-PRD.md`
+- 技术文档: `docs/technical/`
+- 规则细节: `docs/rules/`
+- 先查已有文档再创建，一功能一文档
 
 ## Common Commands
 
 ```bash
-# --- Web (Next.js) ---
-pnpm dev                 # Start dev server (port 51000)
-pnpm run build           # Production build (6GB memory limit)
-pnpm check:fast          # Quick quality check (lint + typecheck)
-pnpm lint:fix            # Auto-fix lint + format issues
-pnpm test                # Run Jest tests
-pnpm typecheck           # TypeScript type checking only
+# --- Web ---
+pnpm dev                 # dev server (port 51000)
+pnpm run build           # production build
+pnpm check:fast          # lint + typecheck
+pnpm lint:fix            # auto-fix
+pnpm test                # Jest tests
 
 # --- Android TV ---
 cd android-tv && JAVA_HOME="/opt/homebrew/opt/openjdk@17" ./gradlew assembleDebug

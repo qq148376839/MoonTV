@@ -114,7 +114,10 @@ export async function searchOfficialResources(
                     source: OFFICIAL_SOURCE_KEY,
                     source_name: OFFICIAL_SOURCE_NAME,
                     class: item.class || item.vod_class || '',
-                    year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+                    year:
+                      item.year ||
+                      item.vod_year?.match(/\d{4}/)?.[0] ||
+                      'unknown',
                     desc: cleanHtmlTags(item.desc || item.vod_content || ''),
                     type_name: item.type_name,
                     douban_id: item.douban_id || item.vod_douban_id,
@@ -174,17 +177,14 @@ export async function searchOfficialResources(
         };
       } else {
         // 如果两种格式都没有解析到数据，记录详细日志
-        console.warn(
-          `[searchOfficialResources] SSE 解析后数据为空`,
-          {
-            textLength: text.length,
-            linesCount: lines.length,
-            hasSearchResultFormat,
-            allSearchResultsLength: allSearchResults.length,
-            allApiItemsLength: allApiItems.length,
-            firstFewLines: lines.slice(0, 5),
-          }
-        );
+        console.warn(`[searchOfficialResources] SSE 解析后数据为空`, {
+          textLength: text.length,
+          linesCount: lines.length,
+          hasSearchResultFormat,
+          allSearchResultsLength: allSearchResults.length,
+          allApiItemsLength: allApiItems.length,
+          firstFewLines: lines.slice(0, 5),
+        });
         return [];
       }
     } else {
@@ -420,11 +420,13 @@ export async function searchUnofficialResources(
                   typeof doubanRaw === 'number'
                     ? doubanRaw
                     : typeof doubanRaw === 'string'
-                      ? parseInt(doubanRaw, 10)
-                      : undefined;
+                    ? parseInt(doubanRaw, 10)
+                    : undefined;
 
                 const sr: SearchResult = {
-                  id: String(rec.id || (rec.vod_id as string | number | undefined) || ''),
+                  id: String(
+                    rec.id || (rec.vod_id as string | number | undefined) || ''
+                  ),
                   title: String(rec.title || rec.vod_name || ''),
                   poster: String(rec.poster || rec.vod_pic || ''),
                   episodes: episodes as string[],
@@ -432,9 +434,12 @@ export async function searchUnofficialResources(
                   source_name: String(rec.source_name || '非官方资源'),
                   class: String(rec.class || rec.vod_class || ''),
                   year:
-                    String(rec.year || rec.vod_year || '').match(/\d{4}/)?.[0] ||
-                    'unknown',
-                  desc: cleanHtmlTags(String(rec.desc || rec.vod_content || '')),
+                    String(rec.year || rec.vod_year || '').match(
+                      /\d{4}/
+                    )?.[0] || 'unknown',
+                  desc: cleanHtmlTags(
+                    String(rec.desc || rec.vod_content || '')
+                  ),
                   type_name: rec.type_name as string | undefined,
                   douban_id: Number.isFinite(doubanId) ? doubanId : undefined,
                   source_type: 'unofficial',
@@ -467,24 +472,24 @@ export async function searchUnofficialResources(
                     vod_class: rec.vod_class
                       ? String(rec.vod_class)
                       : rec.class
-                        ? String(rec.class)
-                        : undefined,
+                      ? String(rec.class)
+                      : undefined,
                     vod_year: rec.vod_year
                       ? String(rec.vod_year)
                       : rec.year
-                        ? String(rec.year)
-                        : undefined,
+                      ? String(rec.year)
+                      : undefined,
                     vod_content: rec.vod_content
                       ? String(rec.vod_content)
                       : rec.desc
-                        ? String(rec.desc)
-                        : undefined,
+                      ? String(rec.desc)
+                      : undefined,
                     vod_douban_id:
                       typeof rec.vod_douban_id === 'number'
                         ? rec.vod_douban_id
                         : typeof rec.douban_id === 'number'
-                          ? rec.douban_id
-                          : undefined,
+                        ? rec.douban_id
+                        : undefined,
                     type_name: rec.type_name as string | undefined,
                   });
                 }
@@ -529,7 +534,9 @@ export async function searchUnofficialResources(
     const text = await response.text();
     // 如果没有设置 content-type 但实际是 SSE 文本，这里兜底走原逻辑（会慢，但至少不 crash）
     if (text.trim().startsWith('data:')) {
-      console.log(`[searchUnofficialResources] 检测到 SSE 文本响应（非 event-stream）`);
+      console.log(
+        `[searchUnofficialResources] 检测到 SSE 文本响应（非 event-stream）`
+      );
       // 复用旧逻辑：把 data: 行拆出来 JSON.parse
       const lines = text.split('\n');
       const allSearchResults: SearchResult[] = [];

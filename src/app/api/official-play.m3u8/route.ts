@@ -15,10 +15,15 @@ const recentTriggers = new Map<string, number>();
 
 function getOrigin(request: NextRequest): string {
   const originHeader = request.headers.get('origin');
-  if (originHeader) return originHeader.includes('0.0.0.0') ? originHeader.replace('0.0.0.0', 'localhost') : originHeader;
+  if (originHeader)
+    return originHeader.includes('0.0.0.0')
+      ? originHeader.replace('0.0.0.0', 'localhost')
+      : originHeader;
   const host = request.headers.get('host') || 'localhost:51000';
   const proto = request.headers.get('x-forwarded-proto') || 'http';
-  return `${proto}://${host.includes('0.0.0.0') ? host.replace('0.0.0.0', 'localhost') : host}`;
+  return `${proto}://${
+    host.includes('0.0.0.0') ? host.replace('0.0.0.0', 'localhost') : host
+  }`;
 }
 
 function getDownloadNextCount(): number {
@@ -28,7 +33,11 @@ function getDownloadNextCount(): number {
   return Math.min(n, 50);
 }
 
-function getLocalEpisodeM3u8Path(source: string, id: string, episodeNo: number): string | null {
+function getLocalEpisodeM3u8Path(
+  source: string,
+  id: string,
+  episodeNo: number
+): string | null {
   const storageManager = getStorageManager();
   if (!storageManager.isEnabled()) return null;
   const index = storageManager.readIndex();
@@ -65,12 +74,21 @@ async function triggerDownloadIfNeeded(params: {
   recentTriggers.set(key, Date.now());
 
   const list = await searchOfficialResources(q, undefined);
-  const resource = list.find((r) => r && String(r.id) === String(id) && r.source === source);
-  if (!resource || !Array.isArray(resource.episodes) || resource.episodes.length === 0) return;
+  const resource = list.find(
+    (r) => r && String(r.id) === String(id) && r.source === source
+  );
+  if (
+    !resource ||
+    !Array.isArray(resource.episodes) ||
+    resource.episodes.length === 0
+  )
+    return;
 
   const epNumbers: number[] = [];
   for (let n = start; n <= end; n++) epNumbers.push(n);
-  const episodesToDownload = epNumbers.map((n) => resource.episodes[n - 1]).filter(Boolean);
+  const episodesToDownload = epNumbers
+    .map((n) => resource.episodes[n - 1])
+    .filter(Boolean);
   if (episodesToDownload.length === 0) return;
 
   downloadService.createTask(resource, episodesToDownload, epNumbers);
@@ -135,7 +153,9 @@ export async function GET(request: NextRequest) {
       id,
       episodeNo: ep,
       total: Number.isFinite(total) && total > 0 ? total : ep,
-    }).catch((err) => console.warn('[official-play] triggerDownload failed', err));
+    }).catch((err) =>
+      console.warn('[official-play] triggerDownload failed', err)
+    );
   }
 
   const m3u8Url = await parseToM3u8Url(url, origin);
@@ -146,4 +166,3 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.redirect(m3u8Url, 302);
 }
-

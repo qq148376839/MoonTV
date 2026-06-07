@@ -34,10 +34,10 @@ export async function GET(request: Request) {
   let parseApiUrl =
     process.env.NEXT_PUBLIC_PARSE_API_URL ||
     'https://gfjx.riowang.win/api/v1/parse';
-  
+
   // 清理 URL 中的双斜杠（除了协议后的双斜杠）
   parseApiUrl = parseApiUrl.replace(/([^:]\/)\/+/g, '$1');
-  
+
   const parseUrl = `${parseApiUrl}?url=${encodeURIComponent(videoUrl)}`;
 
   console.log(`[parse] 请求解析API: ${parseUrl.substring(0, 100)}...`);
@@ -83,26 +83,26 @@ export async function GET(request: Request) {
     // 检查解析结果
     if (result.success && result.data?.m3u8_url) {
       let m3u8Url = result.data.m3u8_url;
-      
+
       // 检测是否是内网地址，如果是则转换为代理URL
       try {
         const urlObj = new URL(m3u8Url);
         const hostname = urlObj.hostname;
-        
+
         // 检测内网地址模式
-        const isPrivateIP = 
+        const isPrivateIP =
           hostname === 'localhost' ||
           hostname === '127.0.0.1' ||
           hostname.startsWith('192.168.') ||
           hostname.startsWith('10.') ||
           /^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname) ||
           hostname.startsWith('169.254.'); // 链路本地地址
-        
+
         if (isPrivateIP) {
           // 获取当前请求的origin，用于构建代理URL
           // 优先使用 Host 头，避免使用 0.0.0.0 这样的无效地址
           let origin = request.headers.get('origin');
-          
+
           if (!origin) {
             // 如果没有 origin 头，尝试从 Host 头构建
             const host = request.headers.get('host');
@@ -120,22 +120,24 @@ export async function GET(request: Request) {
               }
             }
           }
-          
-          const proxyUrl = `${origin}/api/proxy/m3u8?url=${encodeURIComponent(m3u8Url)}`;
-          
+
+          const proxyUrl = `${origin}/api/proxy/m3u8?url=${encodeURIComponent(
+            m3u8Url
+          )}`;
+
           console.log(`[parse] 检测到内网地址，转换为代理URL:`, {
             original: m3u8Url.substring(0, 100),
             proxied: proxyUrl.substring(0, 100),
             origin,
           });
-          
+
           m3u8Url = proxyUrl;
         }
       } catch (e) {
         // URL解析失败，保持原样
         console.warn(`[parse] URL解析失败，保持原样:`, m3u8Url);
       }
-      
+
       return NextResponse.json({
         success: true,
         data: {
@@ -147,8 +149,7 @@ export async function GET(request: Request) {
       });
     } else {
       // 解析失败：m3u8_url 为空或 success 为 false
-      const errorMsg =
-        result.error || '解析失败：无法获取播放地址';
+      const errorMsg = result.error || '解析失败：无法获取播放地址';
       console.error(`[parse] 解析失败: ${errorMsg}`);
       return NextResponse.json(
         {
@@ -162,8 +163,7 @@ export async function GET(request: Request) {
     }
   } catch (error) {
     console.error(`[parse] 解析请求失败:`, error);
-    const errorMsg =
-      error instanceof Error ? error.message : '解析失败';
+    const errorMsg = error instanceof Error ? error.message : '解析失败';
     return NextResponse.json(
       {
         success: false,

@@ -42,12 +42,18 @@ export class ResourceDetector {
     return relativePath.replace(/\\/g, '/');
   }
 
-  private tryRepairEpisodesByFilename(localPath: string, metadata: LocalResourceMetadata): {
+  private tryRepairEpisodesByFilename(
+    localPath: string,
+    metadata: LocalResourceMetadata
+  ): {
     repaired: boolean;
     repairedEpisodes: number[];
   } {
-    const episodesArr = Array.isArray(metadata.episodes) ? metadata.episodes : [];
-    if (episodesArr.length === 0) return { repaired: false, repairedEpisodes: [] };
+    const episodesArr = Array.isArray(metadata.episodes)
+      ? metadata.episodes
+      : [];
+    if (episodesArr.length === 0)
+      return { repaired: false, repairedEpisodes: [] };
 
     const repairedEpisodes: number[] = [];
     let changed = false;
@@ -161,7 +167,9 @@ export class ResourceDetector {
     // 口径：
     // - metadata 存在且资源目录存在
     // - episodes 中任意一个“非空路径”对应文件存在 => 认为资源存在（部分下载也应视为 exists=true）
-    const episodesArr = Array.isArray(metadata.episodes) ? metadata.episodes : [];
+    const episodesArr = Array.isArray(metadata.episodes)
+      ? metadata.episodes
+      : [];
     const filesExist = episodesArr.some((ep) => {
       if (typeof ep !== 'string') return false;
       const trimmedEp = ep.trim();

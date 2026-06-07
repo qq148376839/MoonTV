@@ -19,7 +19,8 @@ function ensureOrionSearchSources(config: AdminConfig): void {
       key: '789caiji',
       name: '789采集（官方解析）',
       api:
-        process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL || 'https://789jx.riowang.win',
+        process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL ||
+        'https://789jx.riowang.win',
       detail: undefined,
       official_parser: true,
       from: 'config',
@@ -29,7 +30,8 @@ function ensureOrionSearchSources(config: AdminConfig): void {
       key: 'jisu',
       name: '极速资源（非官方）',
       api:
-        process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL || 'https://ss.riowang.win',
+        process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL ||
+        'https://ss.riowang.win',
       detail: undefined,
       official_parser: false,
       from: 'config',

@@ -46,10 +46,10 @@ async function triggerAutoDownload(
     // 电影：total_episodes === 1，只下载当前集
     // 连续剧：total_episodes > 1，下载当前集 + 下2集
     const isMovie = totalEpisodes === 1;
-    
+
     // PlayRecord.index 是从1开始的，需要转换为0-based（episodes数组索引）
     const episodeIndex = currentIndex - 1;
-    
+
     let episodeRange: { start: number; end: number };
     if (isMovie) {
       // 电影：只下载当前集
@@ -57,9 +57,7 @@ async function triggerAutoDownload(
         start: episodeIndex,
         end: episodeIndex,
       };
-      console.log(
-        `[PlayRecords] 检测到电影，只下载当前集: ${episodeIndex}`
-      );
+      console.log(`[PlayRecords] 检测到电影，只下载当前集: ${episodeIndex}`);
     } else {
       // 连续剧：下载当前集 + 下2集
       const downloadNextEpisodes = parseInt(

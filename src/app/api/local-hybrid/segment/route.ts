@@ -45,10 +45,13 @@ function withHybridDebugHeaders(
   out['X-MoonTV-Hybrid-Source'] = info.source;
   out['X-MoonTV-Hybrid-Kind'] = info.kind;
   out['X-MoonTV-Hybrid-Episode'] = String(info.episode);
-  if (typeof info.index === 'number') out['X-MoonTV-Hybrid-Index'] = String(info.index);
-  if (typeof info.k === 'number') out['X-MoonTV-Hybrid-KeyIndex'] = String(info.k);
+  if (typeof info.index === 'number')
+    out['X-MoonTV-Hybrid-Index'] = String(info.index);
+  if (typeof info.k === 'number')
+    out['X-MoonTV-Hybrid-KeyIndex'] = String(info.k);
   if (info.localPath) out['X-MoonTV-Hybrid-Local-Path'] = info.localPath;
-  if (info.upstreamUrl) out['X-MoonTV-Hybrid-Upstream'] = info.upstreamUrl.substring(0, 200);
+  if (info.upstreamUrl)
+    out['X-MoonTV-Hybrid-Upstream'] = info.upstreamUrl.substring(0, 200);
   if (info.note) out['X-MoonTV-Hybrid-Note'] = info.note.substring(0, 200);
   return out;
 }
@@ -80,7 +83,13 @@ export async function GET(request: NextRequest) {
   const index = parseInt(indexStr, 10);
   const k = parseInt(kStr, 10);
 
-  if (!source || !id || !episodeStr || !Number.isFinite(episode) || episode < 1) {
+  if (
+    !source ||
+    !id ||
+    !episodeStr ||
+    !Number.isFinite(episode) ||
+    episode < 1
+  ) {
     return new NextResponse('Missing/invalid source/id/episode', {
       status: 400,
       headers: { ...CORS_HEADERS },
@@ -103,7 +112,11 @@ export async function GET(request: NextRequest) {
   let resourcePath: string | null = null;
   const now = Date.now();
   const cached = resourcePathCache.get(key);
-  if (cached && now - cached.at <= RESOURCE_CACHE_TTL_MS && fs.existsSync(cached.path)) {
+  if (
+    cached &&
+    now - cached.at <= RESOURCE_CACHE_TTL_MS &&
+    fs.existsSync(cached.path)
+  ) {
     resourcePath = cached.path;
   } else if (entry) {
     resourcePath = PathUtils.resolveResourcePath(
@@ -222,9 +235,7 @@ export async function GET(request: NextRequest) {
         // Best-effort fallback: if exactly one key file exists, serve it
         if (fs.existsSync(episodeDir)) {
           const files = fs.readdirSync(episodeDir);
-          const keys = files
-            .filter((f) => /^key_\d{3}\.key$/i.test(f))
-            .sort();
+          const keys = files.filter((f) => /^key_\d{3}\.key$/i.test(f)).sort();
           if (keys.length === 1) {
             const localKeyPath = path.join(episodeDir, keys[0]);
             const st = fs.statSync(localKeyPath);
@@ -296,8 +307,8 @@ export async function GET(request: NextRequest) {
               ? 'index-miss-scan-hit'
               : 'index-miss-scan-miss'
             : !resourcePath
-              ? 'resourcePath-miss'
-              : 'local-miss',
+            ? 'resourcePath-miss'
+            : 'local-miss',
         }
       ),
     };
@@ -320,4 +331,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-

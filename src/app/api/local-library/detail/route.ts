@@ -40,14 +40,20 @@ export async function GET(request: NextRequest) {
     }
 
     const storagePath = storageManager.getStoragePath();
-    const localPath = PathUtils.resolveResourcePath(entry.local_path, storagePath);
+    const localPath = PathUtils.resolveResourcePath(
+      entry.local_path,
+      storagePath
+    );
     if (!fs.existsSync(localPath)) {
       return NextResponse.json({ error: '资源目录不存在' }, { status: 404 });
     }
 
     const metadata = storageManager.readMetadata(localPath);
     if (!metadata) {
-      return NextResponse.json({ error: 'metadata.json 不存在' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'metadata.json 不存在' },
+        { status: 404 }
+      );
     }
 
     const episodeStatus = (metadata.episodes || []).map((p, idx) => ({
@@ -74,7 +80,9 @@ export async function GET(request: NextRequest) {
     );
   } catch (error) {
     console.error('[Local Library Detail API] 获取详情失败:', error);
-    return NextResponse.json({ error: '获取本地资源详情失败' }, { status: 500 });
+    return NextResponse.json(
+      { error: '获取本地资源详情失败' },
+      { status: 500 }
+    );
   }
 }
-

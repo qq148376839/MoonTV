@@ -9,7 +9,6 @@ import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs'; // 需要使用 config.ts，改为 Node.js runtime
 
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
@@ -21,13 +20,16 @@ export async function GET(request: Request) {
   // 【优化】如果配置了 Cloudflare Worker URL，直接转发流式数据
   const cfWorkerUrl = process.env.NEXT_PUBLIC_CF_SEARCH_WORKER_URL;
   if (cfWorkerUrl && cfWorkerUrl.trim()) {
-    const workerUrl = `${cfWorkerUrl.replace(/\/$/, '')}?q=${encodeURIComponent(query)}`;
+    const workerUrl = `${cfWorkerUrl.replace(/\/$/, '')}?q=${encodeURIComponent(
+      query
+    )}`;
     console.log('[SSE] 使用 Cloudflare Worker，转发流式数据:', workerUrl);
-    
+
     try {
       const workerResponse = await fetch(workerUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           Accept: 'text/event-stream',
         },
       });
@@ -164,22 +166,23 @@ export async function GET(request: Request) {
       const officialSearchTask = (async () => {
         try {
           console.log('[SSE] 官方资源搜索任务开始执行');
-          
+
           // 【优化】如果配置了官方资源搜索URL，直接流式处理SSE响应
           const officialSearchUrl =
             process.env.NEXT_PUBLIC_OFFICIAL_SEARCH_URL ||
             'https://789jx.riowang.win';
-          
+
           const apiUrl = `${officialSearchUrl}/?q=${encodeURIComponent(query)}`;
           console.log(`[SSE] 官方资源搜索URL: ${apiUrl}`);
-          
+
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
-          
+
           try {
             const response = await fetch(apiUrl, {
               headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 Accept: 'application/json, text/event-stream',
               },
               signal: controller.signal,
@@ -192,15 +195,15 @@ export async function GET(request: Request) {
             }
 
             const contentType = response.headers.get('content-type') || '';
-            
+
             // 如果是SSE格式，流式处理
             if (contentType.includes('text/event-stream') || response.body) {
               console.log('[SSE] 检测到SSE格式，开始流式处理');
-              
+
               const reader = response.body?.getReader();
               const decoder = new TextDecoder();
               let buffer = '';
-              
+
               if (!reader) {
                 throw new Error('无法获取响应流');
               }
@@ -222,12 +225,18 @@ export async function GET(request: Request) {
                       const sseData = JSON.parse(jsonStr);
 
                       // 处理结果
-                      if (sseData.results && Array.isArray(sseData.results) && sseData.results.length > 0) {
+                      if (
+                        sseData.results &&
+                        Array.isArray(sseData.results) &&
+                        sseData.results.length > 0
+                      ) {
                         const newResults: SearchResult[] = [];
                         // eslint-disable-next-line @typescript-eslint/no-explicit-any
                         sseData.results.forEach((item: any) => {
                           if (item.episodes && Array.isArray(item.episodes)) {
-                            const key = `${item.source_type || 'official'}-${item.id}`;
+                            const key = `${item.source_type || 'official'}-${
+                              item.id
+                            }`;
                             if (!seenResults.has(key)) {
                               seenResults.add(key);
                               newResults.push({
@@ -238,7 +247,10 @@ export async function GET(request: Request) {
                                 source: item.source || 'official',
                                 source_name: item.source_name || '官方资源',
                                 class: item.class || item.vod_class || '',
-                                year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+                                year:
+                                  item.year ||
+                                  item.vod_year?.match(/\d{4}/)?.[0] ||
+                                  'unknown',
                                 desc: item.desc || item.vod_content || '',
                                 type_name: item.type_name,
                                 douban_id: item.douban_id || item.vod_douban_id,
@@ -249,7 +261,9 @@ export async function GET(request: Request) {
                         });
 
                         if (newResults.length > 0) {
-                          console.log(`[SSE Stream] 流式推送 ${newResults.length} 个官方资源结果`);
+                          console.log(
+                            `[SSE Stream] 流式推送 ${newResults.length} 个官方资源结果`
+                          );
                           pushResult(newResults, false, {
                             source: 'official',
                             sourceName: '官方资源',
@@ -264,19 +278,27 @@ export async function GET(request: Request) {
                       }
                     } catch (e) {
                       // 忽略解析错误，继续处理下一行
-                      console.warn('[SSE] SSE行解析失败:', trimmedLine.substring(0, 100));
+                      console.warn(
+                        '[SSE] SSE行解析失败:',
+                        trimmedLine.substring(0, 100)
+                      );
                     }
                   }
                 }
               }
-              
+
               console.log('[SSE] 官方资源搜索流式处理完成');
               return true;
             } else {
               // 如果不是SSE格式，回退到原来的方法
               console.log('[SSE] 非SSE格式，使用原有方法');
-              const officialResults = await searchOfficialResources(query, undefined);
-              console.log(`[SSE] 官方资源搜索完成，结果数: ${officialResults.length}`);
+              const officialResults = await searchOfficialResources(
+                query,
+                undefined
+              );
+              console.log(
+                `[SSE] 官方资源搜索完成，结果数: ${officialResults.length}`
+              );
               if (officialResults.length > 0) {
                 const newResults: SearchResult[] = [];
                 officialResults.forEach((result) => {
@@ -323,23 +345,26 @@ export async function GET(request: Request) {
       const unofficialSearchTask = (async () => {
         try {
           console.log('[SSE] 非官方资源搜索任务开始执行');
-          
+
           // 【优化】如果配置了非官方资源搜索URL，直接流式处理SSE响应
           const unofficialSearchUrl =
             process.env.NEXT_PUBLIC_UNOFFICIAL_SEARCH_URL ||
             process.env.NEXT_PUBLIC_CF_SEARCH_WORKER_URL ||
             'https://ss.riowang.win';
-          
-          const apiUrl = `${unofficialSearchUrl}/?q=${encodeURIComponent(query)}`;
+
+          const apiUrl = `${unofficialSearchUrl}/?q=${encodeURIComponent(
+            query
+          )}`;
           console.log(`[SSE] 非官方资源搜索URL: ${apiUrl}`);
-          
+
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超时
-          
+
           try {
             const response = await fetch(apiUrl, {
               headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 Accept: 'application/json, text/event-stream',
               },
               signal: controller.signal,
@@ -352,15 +377,15 @@ export async function GET(request: Request) {
             }
 
             const contentType = response.headers.get('content-type') || '';
-            
+
             // 如果是SSE格式，流式处理
             if (contentType.includes('text/event-stream') || response.body) {
               console.log('[SSE] 检测到SSE格式，开始流式处理');
-              
+
               const reader = response.body?.getReader();
               const decoder = new TextDecoder();
               let buffer = '';
-              
+
               if (!reader) {
                 throw new Error('无法获取响应流');
               }
@@ -382,12 +407,18 @@ export async function GET(request: Request) {
                       const sseData = JSON.parse(jsonStr);
 
                       // 处理结果
-                      if (sseData.results && Array.isArray(sseData.results) && sseData.results.length > 0) {
+                      if (
+                        sseData.results &&
+                        Array.isArray(sseData.results) &&
+                        sseData.results.length > 0
+                      ) {
                         const newResults: SearchResult[] = [];
                         // eslint-disable-next-line @typescript-eslint/no-explicit-any
                         sseData.results.forEach((item: any) => {
                           if (item.episodes && Array.isArray(item.episodes)) {
-                            const key = `${item.source_type || 'unofficial'}-${item.id}`;
+                            const key = `${item.source_type || 'unofficial'}-${
+                              item.id
+                            }`;
                             if (!seenResults.has(key)) {
                               seenResults.add(key);
                               newResults.push({
@@ -398,7 +429,10 @@ export async function GET(request: Request) {
                                 source: item.source || 'unofficial',
                                 source_name: item.source_name || '非官方资源',
                                 class: item.class || item.vod_class || '',
-                                year: item.year || item.vod_year?.match(/\d{4}/)?.[0] || 'unknown',
+                                year:
+                                  item.year ||
+                                  item.vod_year?.match(/\d{4}/)?.[0] ||
+                                  'unknown',
                                 desc: item.desc || item.vod_content || '',
                                 type_name: item.type_name,
                                 douban_id: item.douban_id || item.vod_douban_id,
@@ -409,7 +443,9 @@ export async function GET(request: Request) {
                         });
 
                         if (newResults.length > 0) {
-                          console.log(`[SSE Stream] 流式推送 ${newResults.length} 个非官方资源结果`);
+                          console.log(
+                            `[SSE Stream] 流式推送 ${newResults.length} 个非官方资源结果`
+                          );
                           pushResult(newResults, false, {
                             source: 'unofficial',
                             sourceName: '非官方资源',
@@ -424,19 +460,27 @@ export async function GET(request: Request) {
                       }
                     } catch (e) {
                       // 忽略解析错误，继续处理下一行
-                      console.warn('[SSE] SSE行解析失败:', trimmedLine.substring(0, 100));
+                      console.warn(
+                        '[SSE] SSE行解析失败:',
+                        trimmedLine.substring(0, 100)
+                      );
                     }
                   }
                 }
               }
-              
+
               console.log('[SSE] 非官方资源搜索流式处理完成');
               return true;
             } else {
               // 如果不是SSE格式，回退到原来的方法
               console.log('[SSE] 非SSE格式，使用原有方法');
-              const unofficialResults = await searchUnofficialResources(query, undefined);
-              console.log(`[SSE] 非官方资源搜索完成，结果数: ${unofficialResults.length}`);
+              const unofficialResults = await searchUnofficialResources(
+                query,
+                undefined
+              );
+              console.log(
+                `[SSE] 非官方资源搜索完成，结果数: ${unofficialResults.length}`
+              );
               if (unofficialResults.length > 0) {
                 const newResults: SearchResult[] = [];
                 unofficialResults.forEach((result) => {

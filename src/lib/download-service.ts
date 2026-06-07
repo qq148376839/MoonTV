@@ -7,6 +7,7 @@ import fs from 'fs';
 import pLimit from 'p-limit';
 import path from 'path';
 
+import { filterM3U8Ads } from './ad-filter';
 import { getStorageManager, StorageManager } from './local-storage';
 import { SearchResult } from './types';
 
@@ -70,7 +71,8 @@ async function fetchWithRetry(
 
 function isLikelyWebPageUrl(url: string): boolean {
   try {
-    if (!(url.startsWith('http://') || url.startsWith('https://'))) return false;
+    if (!(url.startsWith('http://') || url.startsWith('https://')))
+      return false;
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     const p = u.pathname.toLowerCase();
@@ -89,7 +91,8 @@ function isLikelyWebPageUrl(url: string): boolean {
 
 async function parseToM3u8Url(videoUrl: string): Promise<string | null> {
   let parseApiUrl =
-    process.env.NEXT_PUBLIC_PARSE_API_URL || 'https://gfjx.riowang.win/api/v1/parse';
+    process.env.NEXT_PUBLIC_PARSE_API_URL ||
+    'https://gfjx.riowang.win/api/v1/parse';
   parseApiUrl = parseApiUrl.replace(/([^:]\/)\/+/g, '$1');
   const parseUrl = `${parseApiUrl}?url=${encodeURIComponent(videoUrl)}`;
 
@@ -114,7 +117,10 @@ async function parseToM3u8Url(videoUrl: string): Promise<string | null> {
         : undefined;
     return typeof m3u8 === 'string' && m3u8.trim().length > 0 ? m3u8 : null;
   } catch (e) {
-    console.warn('[DownloadService] 解析 API 失败:', e instanceof Error ? e.message : e);
+    console.warn(
+      '[DownloadService] 解析 API 失败:',
+      e instanceof Error ? e.message : e
+    );
     return null;
   }
 }
@@ -221,7 +227,9 @@ export class DownloadService {
       }
 
       // 检查剧集是否相同（排序后比较）
-      const taskEpisodesKey = [...task.episodeNumbers].sort((a, b) => a - b).join(',');
+      const taskEpisodesKey = [...task.episodeNumbers]
+        .sort((a, b) => a - b)
+        .join(',');
       if (taskEpisodesKey === episodesKey) {
         return task;
       }
@@ -251,7 +259,8 @@ export class DownloadService {
       );
 
       console.log(
-        `[DownloadService] 剧集 ${episodeIndex} 下载状态: ${isDownloaded ? '✓ 已下载' : '✗ 未下载'
+        `[DownloadService] 剧集 ${episodeIndex} 下载状态: ${
+          isDownloaded ? '✓ 已下载' : '✗ 未下载'
         }`
       );
 
@@ -277,9 +286,12 @@ export class DownloadService {
     episodes: string[],
     episodeNumbers?: number[]
   ): DownloadTask {
-    const episodesToDownload = Array.isArray(episodes) ? episodes.filter(Boolean) : [];
+    const episodesToDownload = Array.isArray(episodes)
+      ? episodes.filter(Boolean)
+      : [];
     const numbersToDownload =
-      Array.isArray(episodeNumbers) && episodeNumbers.length === episodesToDownload.length
+      Array.isArray(episodeNumbers) &&
+      episodeNumbers.length === episodesToDownload.length
         ? episodeNumbers
         : episodesToDownload.map((_, i) => i + 1);
 
@@ -295,8 +307,9 @@ export class DownloadService {
         `[DownloadService] 所有剧集已完全下载: ${resource.source}_${resource.id}, 剧集数: ${episodesToDownload.length}`
       );
       // 返回一个已完成的任务
-      const completedTaskId = `completed_${resource.source}_${resource.id
-        }_${Date.now()}`;
+      const completedTaskId = `completed_${resource.source}_${
+        resource.id
+      }_${Date.now()}`;
       const completedTask: DownloadTask = {
         id: completedTaskId,
         source: resource.source,
@@ -421,10 +434,20 @@ export class DownloadService {
         : 0;
       const existingMetadata = this.storageManager.readMetadata(localPath);
       const existingEpisodes = existingMetadata?.episodes;
-      const alignedEpisodes: string[] =
-        Array.isArray(existingEpisodes) && existingEpisodes.length === totalEpisodes
-          ? [...existingEpisodes]
-          : new Array(totalEpisodes).fill('');
+      let alignedEpisodes: string[];
+      if (Array.isArray(existingEpisodes) && existingEpisodes.length === totalEpisodes) {
+        alignedEpisodes = [...existingEpisodes];
+      } else if (Array.isArray(existingEpisodes) && existingEpisodes.length > 0) {
+        // 集数变化时保留已有数据，扩展或截断数组
+        alignedEpisodes = new Array(totalEpisodes).fill('');
+        for (let j = 0; j < Math.min(existingEpisodes.length, totalEpisodes); j++) {
+          if (existingEpisodes[j]) {
+            alignedEpisodes[j] = existingEpisodes[j];
+          }
+        }
+      } else {
+        alignedEpisodes = new Array(totalEpisodes).fill('');
+      }
 
       for (let i = 0; i < task.episodes.length; i++) {
         // 支持 pause：仅在“集边界”生效（TS 片段并发下载中不强行中断）
@@ -496,6 +519,25 @@ export class DownloadService {
             alignedEpisodes[episodeIndex - 1] = localFilePath;
           }
           console.log(`[DownloadService] ✓ 剧集 ${episodeIndex} 下载完成`);
+
+          // 增量更新 metadata/index，使已完成集数立即在 TVBox 可见
+          try {
+            await this.storageManager.generateMetadata(
+              task.resource,
+              localPath,
+              alignedEpisodes.length > 0 ? alignedEpisodes : downloadedEpisodes,
+              totalSize
+            );
+            this.storageManager.updateIndex(
+              task.source,
+              task.resourceId,
+              task.resource.title,
+              task.resource.year,
+              localPath
+            );
+          } catch (e) {
+            console.warn(`[DownloadService] 增量更新 metadata 失败（不影响下载）:`, e);
+          }
         } catch (error) {
           console.error(
             `[DownloadService] ✗ 下载剧集 ${episodeIndex} 失败: ${episodeUrl}`,
@@ -614,22 +656,39 @@ export class DownloadService {
     // - official 资源（SearchResult.source_type === 'official'）的剧集通常是站外播放页 URL
     // - 或者 URL 本身看起来就是站外播放页（*.html / youku 等）
     if (preferParse || isLikelyWebPageUrl(url)) {
-      console.log(`[DownloadService] 检测到站外播放页，先解析: ${url.substring(0, 120)}`);
+      console.log(
+        `[DownloadService] 检测到站外播放页，先解析: ${url.substring(0, 120)}`
+      );
       const m3u8Url = await parseToM3u8Url(url);
       if (m3u8Url) {
         console.log(
-          `[DownloadService] ✓ 解析成功，开始下载 M3U8: ${m3u8Url.substring(0, 120)}`
+          `[DownloadService] ✓ 解析成功，开始下载 M3U8: ${m3u8Url.substring(
+            0,
+            120
+          )}`
         );
-        return this.downloadM3U8(m3u8Url, localPath, episodeIndex, progressCallback);
+        return this.downloadM3U8(
+          m3u8Url,
+          localPath,
+          episodeIndex,
+          progressCallback
+        );
       }
       if (preferParse) {
         // official 资源解析失败时，避免落盘成不可播放的 .html 文件，直接让该集失败
         throw new Error('解析失败：无法获取 m3u8_url（官方资源需要解析）');
       }
-      console.warn('[DownloadService] ✗ 解析失败，回退为直接文件下载（可能不可播放）');
+      console.warn(
+        '[DownloadService] ✗ 解析失败，回退为直接文件下载（可能不可播放）'
+      );
     }
 
-    return this.downloadDirectFile(url, localPath, episodeIndex, progressCallback);
+    return this.downloadDirectFile(
+      url,
+      localPath,
+      episodeIndex,
+      progressCallback
+    );
   }
 
   /**
@@ -730,6 +789,25 @@ export class DownloadService {
       fs.mkdirSync(episodeDir, { recursive: true });
     }
 
+    // 落盘前去广告：源 m3u8 含原始 URL，可用全部策略（关键词+域名+DISCONTINUITY）
+    {
+      const adResult = filterM3U8Ads(mediaPlaylistContent, {
+        enableDomain: true,
+        enableKeyword: true,
+        enableDiscontinuity: true,
+      });
+      if (adResult.applied) {
+        console.log(
+          `[DownloadService] 去广告: 删除 ${
+            adResult.removedSegments
+          } 片段 / ${adResult.removedDurationSec.toFixed(1)}s`
+        );
+        mediaPlaylistContent = adResult.content;
+      } else if (adResult.reason) {
+        console.log(`[DownloadService] 未去广告: ${adResult.reason}`);
+      }
+    }
+
     // 解析媒体播放列表内容，提取 TS 片段 URL
     const tsUrls: string[] = [];
     const lines = mediaPlaylistContent.split('\n');
@@ -804,7 +882,8 @@ export class DownloadService {
           let keyAbsUrl = rawKeyUri;
           try {
             keyAbsUrl =
-              rawKeyUri.startsWith('http://') || rawKeyUri.startsWith('https://')
+              rawKeyUri.startsWith('http://') ||
+              rawKeyUri.startsWith('https://')
                 ? rawKeyUri
                 : new URL(rawKeyUri, mediaBaseUrl).href;
           } catch {
@@ -891,7 +970,8 @@ export class DownloadService {
               const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
               const speed = (completed / parseFloat(elapsed)).toFixed(1);
               console.log(
-                `[DownloadService] TS 片段进度: ${completed}/${tsUrls.length
+                `[DownloadService] TS 片段进度: ${completed}/${
+                  tsUrls.length
                 } (${((completed / tsUrls.length) * 100).toFixed(
                   1
                 )}%) - 已跳过: ${skipped}, 速度: ${speed} 片段/秒`
@@ -929,7 +1009,8 @@ export class DownloadService {
           }
         } catch (error) {
           console.error(
-            `[DownloadService] 下载 TS 片段失败 [${i + 1}/${tsUrls.length
+            `[DownloadService] 下载 TS 片段失败 [${i + 1}/${
+              tsUrls.length
             }]: ${tsUrl}`,
             error
           );
@@ -950,7 +1031,8 @@ export class DownloadService {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const downloadedCount = completed - skipped;
     console.log(
-      `[DownloadService] ✓ TS 片段处理完成: ${completed}/${tsUrls.length
+      `[DownloadService] ✓ TS 片段处理完成: ${completed}/${
+        tsUrls.length
       } 个片段 (已跳过: ${skipped}, 新下载: ${downloadedCount})，总大小: ${(
         totalSize /
         1024 /
@@ -976,7 +1058,8 @@ export class DownloadService {
           let keyAbsUrl = rawKeyUri;
           try {
             keyAbsUrl =
-              rawKeyUri.startsWith('http://') || rawKeyUri.startsWith('https://')
+              rawKeyUri.startsWith('http://') ||
+              rawKeyUri.startsWith('https://')
                 ? rawKeyUri
                 : new URL(rawKeyUri, mediaBaseUrl).href;
           } catch {
@@ -984,7 +1067,10 @@ export class DownloadService {
           }
           const idx = keyUrlToIndex.get(keyAbsUrl);
           if (idx == null) return ln;
-          const keyRel = `${episodePrefix}/key_${String(idx).padStart(3, '0')}.key`;
+          const keyRel = `${episodePrefix}/key_${String(idx).padStart(
+            3,
+            '0'
+          )}.key`;
           return ln.replace(/URI="([^"]+)"/, `URI="${keyRel}"`);
         })
         .join('\n');

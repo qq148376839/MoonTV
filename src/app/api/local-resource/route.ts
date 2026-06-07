@@ -56,7 +56,10 @@ export async function GET(request: NextRequest) {
         const key = `${source}_${id}`;
         const entry = index[key];
         const resourcePath = entry
-          ? PathUtils.resolveResourcePath(entry.local_path, storageManager.getStoragePath())
+          ? PathUtils.resolveResourcePath(
+              entry.local_path,
+              storageManager.getStoragePath()
+            )
           : null;
 
         for (let ep = 1; ep <= total; ep++) {
@@ -67,7 +70,10 @@ export async function GET(request: NextRequest) {
             const epNo = String(ep).padStart(2, '0');
             const m3u8Abs = `${resourcePath}/episode_${epNo}.m3u8`;
             // 返回 project-relative（更适配 local-video 的安全检查）
-            const rel = PathUtils.resolveResourcePath(m3u8Abs).replace(/\\/g, '/');
+            const rel = PathUtils.resolveResourcePath(m3u8Abs).replace(
+              /\\/g,
+              '/'
+            );
             // 注意：这里 rel 是“规范化后的绝对路径”，PathUtils.resolveResourcePath 对绝对路径会原样返回
             // local-video 支持绝对路径（且会校验必须在 storagePath 内）
             episodeM3u8Paths.push(rel);
