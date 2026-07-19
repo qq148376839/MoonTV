@@ -59,6 +59,12 @@ interface Seg {
 
 const DISCONTINUITY_RE = /^#EXT-X-DISCONTINUITY\s*$/;
 
+// HLS 广告插入常用 cue 标记；这类广告片段经常与正片使用同一域名。
+const CUE_OUT_RE = /^#EXT-X-CUE-OUT(?::|$)/i;
+const CUE_IN_RE = /^#EXT-X-CUE-IN\s*$/i;
+const AD_DATERANGE_RE =
+  /^#EXT-X-DATERANGE:.*(?:CLASS="[^"]*(?:ad|interstitial|scte)[^"]*"|SCTE35-OUT=)/i;
+
 export function filterM3U8Ads(
   content: string,
   opts: AdFilterOptions = {}
@@ -89,6 +95,16 @@ export function filterM3U8Ads(
         discIdx.push(i);
         curGroup++;
       }
+      continue;
+    }
+    if (CUE_OUT_RE.test(t) || AD_DATERANGE_RE.test(t)) {
+      // 将 cue 后的片段放入独立分组，复用现有的短广告组判定。
+      curGroup++;
+      continue;
+    }
+    if (CUE_IN_RE.test(t)) {
+      // cue-in 后的正片进入新分组，避免与广告组混合统计。
+      curGroup++;
       continue;
     }
     if (t.startsWith('#EXTINF')) {
