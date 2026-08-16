@@ -16,7 +16,10 @@ import {
   DownloadCancelledError,
   DownloadScheduler,
 } from './download-scheduler';
-import { DownloadStateStore } from './download-state-store';
+import {
+  assertSafeGenerationId,
+  DownloadStateStore,
+} from './download-state-store';
 import type {
   ParsedMediaPlaylistResources,
   RemappedMediaPlaylistResources,
@@ -328,6 +331,23 @@ let globalScheduler: DownloadScheduler | null = null;
 function sharedScheduler(concurrency: number): DownloadScheduler {
   globalScheduler ??= new DownloadScheduler({ concurrency });
   return globalScheduler;
+}
+
+function containedGenerationPath(
+  resourcePath: string,
+  episode: number,
+  generationId: string
+): string {
+  assertSafeGenerationId(generationId);
+  const generationsRoot = path.resolve(
+    resourcePath,
+    `episode_${String(episode).padStart(2, '0')}_generations`
+  );
+  const generationPath = path.resolve(generationsRoot, generationId);
+  if (path.dirname(generationPath) !== generationsRoot) {
+    throw new Error('Invalid generation path: outside generations directory');
+  }
+  return generationPath;
 }
 
 // 下载服务类
@@ -2551,6 +2571,18 @@ export class DownloadService {
       return { ok: false, status: 'conflict' };
     }
     this.bumpTaskLifecycle(taskId);
+    const scheduled = this.scheduler.getTaskStats(taskId);
+    if ((scheduled?.active ?? 0) > 0 || (scheduled?.queued ?? 0) > 0) {
+      this.scheduler.resumeTask(taskId);
+      snapshot.status = 'downloading';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'paused' || episode.stage === 'pausing') {
+          episode.stage = 'downloading';
+        }
+      });
+      this.flushSnapshot(snapshot, 'task.updated');
+      return { ok: true, status: snapshot.status };
+    }
     const resourcePath = this.storageManager.getResourcePath(
       snapshot.title,
       snapshot.year,
@@ -2577,9 +2609,9 @@ export class DownloadService {
           new Set([...episode.failedSegmentIndices, ...validation.invalid])
         );
         episode.completedBytes = validation.bytes;
-        const generationRoot = path.join(
+        const generationRoot = containedGenerationPath(
           resourcePath,
-          `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+          episode.episode,
           episode.generationId
         );
         const cleanedPlaylistPath = path.join(
@@ -2696,9 +2728,9 @@ export class DownloadService {
       );
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
-        const generationRoot = path.join(
+        const generationRoot = containedGenerationPath(
           resourcePath,
-          `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+          episode.episode,
           episode.generationId
         );
         fs.rmSync(generationRoot, { recursive: true, force: true });

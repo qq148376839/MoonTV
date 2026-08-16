@@ -131,6 +131,18 @@ function assertString(value: unknown, label: string): void {
     throw new Error(`Invalid ${label}: expected string`);
 }
 
+export function assertSafeGenerationId(
+  value: unknown,
+  label = 'generationId'
+): asserts value is string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
+  ) {
+    throw new Error(`Invalid ${label}: unsafe identifier`);
+  }
+}
+
 function assertBoolean(value: unknown, label: string): void {
   if (typeof value !== 'boolean')
     throw new Error(`Invalid ${label}: expected boolean`);
@@ -171,7 +183,7 @@ function assertEpisodeFields(
 ): void {
   const episode = assertRecord(value, label);
   assertFiniteNumber(required(episode, 'episode', label), `${label}.episode`);
-  assertString(
+  assertSafeGenerationId(
     required(episode, 'generationId', label),
     `${label}.generationId`
   );
@@ -238,7 +250,7 @@ function assertEpisodeFields(
       required(workItem, 'episode', `${label}.activeItems[${index}]`),
       `${label}.activeItems[${index}].episode`
     );
-    assertString(
+    assertSafeGenerationId(
       required(workItem, 'generationId', `${label}.activeItems[${index}]`),
       `${label}.activeItems[${index}].generationId`
     );

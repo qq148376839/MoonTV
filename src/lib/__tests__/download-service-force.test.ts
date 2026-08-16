@@ -810,6 +810,73 @@ describe('DownloadService force redownload', () => {
     await secondPromise;
   });
 
+  test('pause then resume keeps one generation owner and downloads each segment once', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-pause-resume-'));
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const snapshot = activeSnapshot();
+    const { service, publishProgress } = serviceForSnapshot(snapshot, {
+      scheduler,
+      resourcePath: root,
+    });
+    const renameSpy = jest.spyOn(fs, 'renameSync');
+    const requests = new Map<string, number>();
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstStart = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const playlist = '#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts';
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.set(url, (requests.get(url) ?? 0) + 1);
+      if (url.endsWith('list.m3u8')) return playlistResponse(playlist);
+      if (url.endsWith('first.ts')) {
+        firstStarted();
+        await firstGate;
+        return responseFor('first', 5);
+      }
+      return responseFor('second', 6);
+    });
+    const download = invokeDownloadM3U8(service, 'task-1', root);
+
+    await firstStart;
+    expect(service.pauseTask('task-1')).toMatchObject({ ok: true });
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getSnapshot('task-1')?.status).toBe('paused');
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'downloading',
+    });
+    await expect(download).resolves.toBeDefined();
+
+    expect(requests.get('https://media.example/first.ts')).toBe(1);
+    expect(requests.get('https://media.example/second.ts')).toBe(1);
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe(
+      'completed'
+    );
+    expect(
+      renameSpy.mock.calls.filter(
+        ([, destination]) =>
+          String(destination) === path.join(root, 'episode_01.m3u8')
+      )
+    ).toHaveLength(1);
+    expect(
+      publishProgress.mock.calls.filter(
+        ([, payload]) => payload.status === 'completed'
+      )
+    ).toHaveLength(1);
+    renameSpy.mockRestore();
+    expect(
+      fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')
+    ).toContain('segments/segment_001.ts');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('default cancel retains generation and state while clean cancel removes only uncommitted data', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-cancel-'));
     const generationRoot = path.join(
@@ -916,6 +983,29 @@ describe('DownloadService force redownload', () => {
     expect(stateStore.deleteTaskState).toHaveBeenCalledWith('task-1');
     expect(service.getSnapshot('task-1')).toBeNull();
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('clean cancel rejects an unsafe generationId without touching an outside sentinel', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-clean-safe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-outside-'));
+    const sentinel = path.join(outside, 'sentinel');
+    fs.writeFileSync(sentinel, 'keep');
+    const snapshot = activeSnapshot();
+    snapshot.episodes['1'].generationId = path.relative(
+      path.join(root, 'episode_01_generations'),
+      outside
+    );
+    const { service, stateStore } = serviceForSnapshot(snapshot, {
+      resourcePath: root,
+    });
+
+    await expect(service.cancelTask('task-1', true)).rejects.toThrow(
+      /generationId|generation path/i
+    );
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('keep');
+    expect(stateStore.deleteTaskState).not.toHaveBeenCalled();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 
   test('clean cancel invalidates a pending pause settle callback', async () => {

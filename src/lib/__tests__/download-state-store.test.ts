@@ -462,6 +462,45 @@ describe('DownloadStateStore', () => {
     expect(() => store.deleteTaskState('nested/task')).toThrow(/taskId/i);
   });
 
+  test.each([
+    '../outside',
+    '..',
+    '.',
+    '/absolute',
+    'nested/generation',
+    'nested\\generation',
+    'generation with spaces',
+  ])('rejects unsafe persisted generationId %p', (generationId) => {
+    store.saveTask(snapshot());
+    const taskDir = path.join(root, 'download-tasks', 'task-1');
+    const taskPath = path.join(taskDir, 'task.json');
+    const episodePath = path.join(taskDir, 'episodes', '01.json');
+    const taskState = JSON.parse(fs.readFileSync(taskPath, 'utf8'));
+    const episodeState = JSON.parse(fs.readFileSync(episodePath, 'utf8'));
+    taskState.episodes['1'].generationId = generationId;
+    episodeState.generationId = generationId;
+    fs.writeFileSync(taskPath, JSON.stringify(taskState));
+    fs.writeFileSync(episodePath, JSON.stringify(episodeState));
+
+    expect(() => store.loadTask('task-1')).toThrow(/generationId/i);
+  });
+
+  test('rejects unsafe generationId in persisted active work', () => {
+    store.saveTask(snapshot());
+    const episodePath = path.join(
+      root,
+      'download-tasks',
+      'task-1',
+      'episodes',
+      '01.json'
+    );
+    const episodeState = JSON.parse(fs.readFileSync(episodePath, 'utf8'));
+    episodeState.activeItems[0].generationId = '../../outside';
+    fs.writeFileSync(episodePath, JSON.stringify(episodeState));
+
+    expect(() => store.loadTask('task-1')).toThrow(/generationId/i);
+  });
+
   test('rejects a symbolic-link task directory before saving or listing', () => {
     const stateRoot = path.join(root, 'download-tasks');
     const outside = path.join(root, 'outside-task');
