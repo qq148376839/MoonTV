@@ -297,7 +297,12 @@ describe('download routes', () => {
     const response = await GET_DOWNLOADS(
       request('http://localhost/api/download')
     );
-    const serialized = JSON.stringify(await response.json());
+    const body = await response.json();
+    expect(body.tasks[0]).toMatchObject({
+      task_id: 'legacy-1',
+      progress_estimated: true,
+    });
+    const serialized = JSON.stringify(body);
     expect(serialized).toContain('https://images.invalid/poster.jpg');
     expect(serialized).not.toContain('legacy-secret');
     expect(serialized).not.toContain('list-secret');
@@ -318,7 +323,12 @@ describe('download routes', () => {
     const response = await GET_DOWNLOADS(
       request('http://localhost/api/download?task_id=legacy-1')
     );
-    const serialized = JSON.stringify(await response.json());
+    const body = await response.json();
+    expect(body).toMatchObject({
+      task_id: 'legacy-1',
+      progress_estimated: true,
+    });
+    const serialized = JSON.stringify(body);
     expect(serialized).toContain('https://cdn.invalid/segment.ts');
     expect(serialized).not.toContain('single-secret');
     expect(serialized).not.toContain('#fragment');
