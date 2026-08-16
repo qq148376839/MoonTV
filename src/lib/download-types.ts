@@ -13,6 +13,13 @@ export type DownloadStage =
 
 export type DownloadUnitKind = 'segment' | 'key' | 'map';
 
+export type DownloadAddressSource =
+  | 'direct'
+  | 'parsed'
+  | 'refreshed'
+  | 'client_fallback'
+  | 'historical_fallback';
+
 export interface DownloadFailure {
   kind: DownloadUnitKind;
   index: number;
@@ -36,6 +43,7 @@ export interface DownloadWorkItem {
   kind: DownloadUnitKind;
   index: number;
   attempt: number;
+  speedBytesPerSecond?: number;
 }
 
 export interface EpisodeDownloadState {
@@ -60,6 +68,7 @@ export interface EpisodeDownloadState {
   oldEntryRetained: boolean;
   recoverable: boolean;
   refreshCount: number;
+  addressSource?: DownloadAddressSource;
   updatedAt: number;
 }
 

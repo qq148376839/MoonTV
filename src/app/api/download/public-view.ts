@@ -2,7 +2,15 @@ import {
   redactDownloadUrl,
   redactUrlsInText,
 } from '@/lib/download-transaction';
-import { DownloadTaskSnapshot } from '@/lib/download-types';
+import {
+  DownloadAddressSource,
+  DownloadTaskSnapshot,
+} from '@/lib/download-types';
+
+export interface PublicSchedulerDiagnostics {
+  globalConcurrency: number;
+  globalActive: number;
+}
 
 export interface PublicAdFilterSummary {
   original_segments: number;
@@ -92,10 +100,24 @@ export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
 
 export function detailDownloadTask(
   snapshot: DownloadTaskSnapshot,
-  adFilterByEpisode: Record<string, PublicAdFilterSummary> = {}
+  adFilterByEpisode: Record<string, PublicAdFilterSummary> = {},
+  scheduler: PublicSchedulerDiagnostics = {
+    globalConcurrency: 0,
+    globalActive: 0,
+  },
+  addressSourceByEpisode: Record<string, DownloadAddressSource> = {}
 ) {
+  const taskActiveSlots = Object.values(snapshot.episodes).reduce(
+    (total, episode) => total + episode.activeItems.length,
+    0
+  );
   return {
     ...summarizeDownloadTask(snapshot),
+    scheduler_slots: {
+      task_active: taskActiveSlots,
+      global_active: scheduler.globalActive,
+      global_total: scheduler.globalConcurrency,
+    },
     episodes: Object.values(snapshot.episodes).map((episode) => ({
       episode: episode.episode,
       stage: episode.stage,
@@ -112,9 +134,14 @@ export function detailDownloadTask(
       },
       key: { total: episode.keyTotal, completed: episode.keyCompleted },
       map: { total: episode.mapTotal, completed: episode.mapCompleted },
-      active_items: episode.activeItems.map(
-        ({ taskId: _taskId, ...item }) => item
-      ),
+      active_items: episode.activeItems.map((item) => ({
+        episode: item.episode,
+        generation_id: item.generationId,
+        kind: item.kind,
+        index: item.index,
+        attempt: item.attempt,
+        speed_bytes_per_second: item.speedBytesPerSecond ?? 0,
+      })),
       failures: episode.failures.map((failure) => ({
         ...failure,
         path: publicPath(failure.path),
@@ -130,6 +157,10 @@ export function detailDownloadTask(
       recoverable: episode.recoverable,
       refresh_count: episode.refreshCount,
       ad_filter: adFilterByEpisode[String(episode.episode)] ?? null,
+      address_source:
+        episode.addressSource ??
+        addressSourceByEpisode[String(episode.episode)] ??
+        null,
       updated_at: episode.updatedAt,
     })),
   };

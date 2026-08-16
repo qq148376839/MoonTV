@@ -7,7 +7,11 @@ import path from 'path';
 
 import { filterM3U8Ads } from './ad-filter';
 import { getAvailableApiSites } from './config';
-import { calculateEpisodeProgress } from './download-progress';
+import { getDownloadEventBus } from './download-event-bus';
+import {
+  calculateEpisodeProgress,
+  DownloadSpeedWindow,
+} from './download-progress';
 import {
   DownloadCancelledError,
   DownloadScheduler,
@@ -17,7 +21,6 @@ import type {
   ParsedMediaPlaylistResources,
   RemappedMediaPlaylistResources,
 } from './download-transaction';
-import { getDownloadEventBus } from './download-event-bus';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
@@ -372,6 +375,10 @@ export class DownloadService {
     return this.snapshots.get(taskId) ?? null;
   }
 
+  public getSchedulerDiagnostics() {
+    return this.scheduler.getGlobalStats();
+  }
+
   public getRecoverableTaskIds(): string[] {
     return Array.from(this.snapshots.keys());
   }
@@ -460,19 +467,42 @@ export class DownloadService {
     episode: EpisodeDownloadState,
     item: DownloadWorkItem,
     filePath: string,
-    operation: () => Promise<number>,
+    operation: (
+      reportWrittenBytes?: (bytes: number) => void
+    ) => Promise<number>,
     refresh?: () => Promise<void>
   ): Promise<number> {
     try {
-      const bytes = await this.scheduler.enqueue(item, () =>
-        this.runWithRetry((attempt) => {
-          item.attempt = attempt;
-          return operation();
-        }, refresh).catch((error) => {
-          this.scheduler.cancelQueued(item.taskId);
-          throw error;
-        })
-      );
+      const bytes = await this.scheduler.enqueue(item, async () => {
+        const activeItem: DownloadWorkItem = {
+          ...item,
+          speedBytesPerSecond: 0,
+        };
+        episode.activeItems.push(activeItem);
+        const speedWindow = new DownloadSpeedWindow(10);
+        speedWindow.addSample(Date.now(), 0);
+        const reportWrittenBytes = (writtenBytes: number) => {
+          speedWindow.addSample(Date.now(), writtenBytes);
+          activeItem.speedBytesPerSecond =
+            speedWindow.getEstimate(0).bytesPerSecond;
+          this.queueSnapshotFlush(item.taskId);
+        };
+        try {
+          return await this.runWithRetry((attempt) => {
+            item.attempt = attempt;
+            activeItem.attempt = attempt;
+            return operation(reportWrittenBytes);
+          }, refresh).catch((error) => {
+            this.scheduler.cancelQueued(item.taskId);
+            throw error;
+          });
+        } finally {
+          episode.activeItems = episode.activeItems.filter(
+            (current) => current !== activeItem
+          );
+          this.queueSnapshotFlush(item.taskId);
+        }
+      });
       this.failedWork.delete(this.workKey(item));
       this.markUnitCompleted(episode, item, bytes);
       this.queueSnapshotFlush(item.taskId);
@@ -1261,6 +1291,7 @@ export class DownloadService {
       episodeIndex,
       generationId
     );
+    episodeState.addressSource = auditContext.addressMethod;
     const episodeDir = generation.segmentsDir;
     const originalSegmentCount = mediaPlaylistContent
       .split('\n')
@@ -1319,6 +1350,8 @@ export class DownloadService {
             reacquired.playlistUrl
           );
           episodeState.refreshCount += 1;
+          episodeState.addressSource = 'refreshed';
+          auditContext.addressMethod = 'refreshed';
           const remapped = remapMediaPlaylistResources(
             originalResources,
             refreshedResources,
@@ -1626,10 +1659,12 @@ export class DownloadService {
               episodeState,
               workItem,
               segmentFilePath,
-              () =>
+              (reportWrittenBytes) =>
                 this.downloadFile(
                   currentResources.segments[i]?.url ?? tsUrl,
-                  segmentFilePath
+                  segmentFilePath,
+                  (_progress, writtenBytes) =>
+                    reportWrittenBytes?.(writtenBytes)
                 ),
               refreshResources
             );
@@ -1940,7 +1975,7 @@ export class DownloadService {
   private async downloadFile(
     url: string,
     filePath: string,
-    progressCallback?: (progress: number) => void
+    progressCallback?: (progress: number, writtenBytes: number) => void
   ): Promise<number> {
     // 使用带重试的 fetch（TS 片段下载使用更长的超时时间）
     const response = await fetchWithRetry(url, {}, 1, 60000);
@@ -1978,9 +2013,10 @@ export class DownloadService {
           });
         }
         downloaded += value.length;
-        if (progressCallback && contentLength > 0) {
-          progressCallback((downloaded / contentLength) * 100);
-        }
+        progressCallback?.(
+          contentLength > 0 ? (downloaded / contentLength) * 100 : 0,
+          downloaded
+        );
       }
       fileStream.end();
       await streamCompletion;
@@ -2419,7 +2455,12 @@ export class DownloadService {
           attempt: 1,
         },
         segmentPath,
-        () => this.downloadFile(segment.url, segmentPath)
+        (reportWrittenBytes) =>
+          this.downloadFile(
+            segment.url,
+            segmentPath,
+            (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
+          )
       );
     }
 
@@ -2503,6 +2544,7 @@ export class DownloadService {
           enableDiscontinuity: true,
         });
         episode.refreshCount = Math.max(1, episode.refreshCount);
+        episode.addressSource = 'refreshed';
         const refreshed = parseMediaPlaylistResources(
           refreshedAdResult.content,
           reacquired.playlistUrl

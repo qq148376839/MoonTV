@@ -255,6 +255,12 @@ function assertEpisodeFields(
       required(workItem, 'attempt', `${label}.activeItems[${index}]`),
       `${label}.activeItems[${index}].attempt`
     );
+    if ('speedBytesPerSecond' in workItem) {
+      assertFiniteNumber(
+        workItem.speedBytesPerSecond,
+        `${label}.activeItems[${index}].speedBytesPerSecond`
+      );
+    }
   });
   const failures = required(episode, 'failures', label);
   if (!Array.isArray(failures)) {
@@ -289,6 +295,19 @@ function assertEpisodeFields(
       `${label}.failures[${index}].message`
     );
   });
+  if ('addressSource' in episode) {
+    assertEnum(
+      episode.addressSource,
+      new Set([
+        'direct',
+        'parsed',
+        'refreshed',
+        'client_fallback',
+        'historical_fallback',
+      ]),
+      `${label}.addressSource`
+    );
+  }
 }
 
 function assertPersistedTask(value: unknown, label: string): void {

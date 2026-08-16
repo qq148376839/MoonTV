@@ -8,6 +8,13 @@ const service = {
   getTask: jest.fn(),
   getAllTasks: jest.fn<Array<Record<string, unknown>>, []>(() => []),
   getRecoverableTaskIds: jest.fn<string[], []>(() => []),
+  getSchedulerDiagnostics: jest.fn(() => ({
+    concurrency: 8,
+    active: 3,
+    queued: 4,
+    tasks: 2,
+    pausedTasks: 0,
+  })),
   pauseTask: jest.fn(),
   resumeTask: jest.fn(),
   cancelTask: jest.fn(),
@@ -22,6 +29,7 @@ const storage = {
     episode_audits: {
       '1': {
         generation_id: 'generation',
+        address_method: 'client_fallback',
         original_segments: 23,
         removed_segments: 2,
         final_segments: 21,
@@ -106,6 +114,7 @@ function snapshot(): DownloadTaskSnapshot {
             kind: 'segment',
             index: 14,
             attempt: 2,
+            speedBytesPerSecond: 4096,
           },
         ],
         keyTotal: 1,
@@ -172,6 +181,21 @@ describe('download routes', () => {
     });
     expect(JSON.stringify(body.episodes[0].ad_filter)).not.toContain(
       'source.invalid'
+    );
+    expect(body.scheduler_slots).toEqual({
+      task_active: 1,
+      global_active: 3,
+      global_total: 8,
+    });
+    expect(body.episodes[0].active_items[0]).toMatchObject({
+      kind: 'segment',
+      index: 14,
+      attempt: 2,
+      speed_bytes_per_second: 4096,
+    });
+    expect(body.episodes[0].address_source).toBe('client_fallback');
+    expect(JSON.stringify(body.episodes[0].address_source)).not.toContain(
+      'http'
     );
   });
 

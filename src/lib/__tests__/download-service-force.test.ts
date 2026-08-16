@@ -310,6 +310,9 @@ describe('DownloadService force redownload', () => {
     expect(service.getSnapshot('task-1')?.episodes['1'].failures).toEqual([
       expect.objectContaining({ kind: 'key', index: 0, attempts: 3 }),
     ]);
+    expect(service.getSnapshot('task-1')?.episodes['1'].addressSource).toBe(
+      'direct'
+    );
     expect(fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')).toBe(
       'old-entry'
     );
@@ -364,6 +367,7 @@ describe('DownloadService force redownload', () => {
       completedSegmentIndices: [0, 1],
       failedSegmentIndices: [],
       refreshCount: 1,
+      addressSource: 'refreshed',
       oldEntryRetained: false,
     });
     const recoveryPlans = (
@@ -971,6 +975,54 @@ describe('DownloadService force redownload', () => {
     execute.markUnitCompleted(episode, workItem(0), 5);
     expect(episode.completedSegmentIndices).toEqual([0]);
     expect(episode.completedBytes).toBe(5);
+  });
+
+  test('reports truthful per-active-slot speed and scheduler concurrency', async () => {
+    const snapshot = activeSnapshot();
+    const scheduler = new DownloadScheduler({ concurrency: 5 });
+    const { service } = serviceForSnapshot(snapshot, { scheduler });
+    const episode = snapshot.episodes['1'];
+    let now = 0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const execute = service as unknown as {
+      executeScheduled: (
+        episodeState: typeof episode,
+        item: ReturnType<typeof workItem>,
+        filePath: string,
+        operation: (
+          reportWrittenBytes?: (bytes: number) => void
+        ) => Promise<number>
+      ) => Promise<number>;
+    };
+    const completion = execute.executeScheduled(
+      episode,
+      workItem(0),
+      '/tmp/active-speed.ts',
+      async (reportWrittenBytes) => {
+        now = 1000;
+        reportWrittenBytes?.(2000);
+        await gate;
+        return 2000;
+      }
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(service.getSchedulerDiagnostics().concurrency).toBe(5);
+    expect(episode.activeItems).toHaveLength(1);
+    expect(episode.activeItems[0]).toMatchObject({
+      index: 0,
+      attempt: 1,
+      speedBytesPerSecond: 2000,
+    });
+
+    finish();
+    await expect(completion).resolves.toBe(2000);
+    expect(episode.activeItems).toEqual([]);
   });
 });
 
