@@ -152,39 +152,109 @@ describe('DownloadStateStore', () => {
     expect(persisted).toContain('https://cdn.example/segment.ts');
   });
 
-  test('uses atomic replacements without tmp remnants and preserves old JSON when rename fails', () => {
-    const first = snapshot();
-    store.saveTask(first);
-    const taskPath = path.join(
-      root,
-      'download-tasks',
-      first.taskId,
-      'task.json'
+  test('recursively redacts signed URLs and path-like sensitive tails before persistence', () => {
+    const state = snapshot();
+    state.poster = 'https://images.example/poster.jpg?signature=secret#preview';
+    state.episodes['1'].failures[0].path =
+      'segments/a.ts?signature=secret#part';
+    state.episodes['1'].failures[0].message =
+      'failed segments/a.ts?signature=secret#part';
+    Object.assign(
+      state.episodes['1'].failures[0] as unknown as Record<string, unknown>,
+      {
+        nested: {
+          path: 'keys/key.bin?token=secret#fragment',
+          message: 'nested https://cdn.example/key.bin?token=secret#fragment',
+          note: '普通中文问号？必须保留',
+        },
+        manifestUrl: 'https://cdn.example/manifest.m3u8?token=secret#part',
+      }
     );
-    const original = fs.readFileSync(taskPath, 'utf8');
-    const originalRename = fs.renameSync;
-    const rename = jest.spyOn(fs, 'renameSync').mockImplementation(((
-      source: fs.PathLike,
-      destination: fs.PathLike
-    ) => {
-      if (String(destination) === taskPath) throw new Error('rename failed');
-      return originalRename(source, destination);
-    }) as typeof fs.renameSync);
 
-    try {
-      expect(() =>
-        store.saveTask(snapshot('task-1', { title: 'new title' }))
-      ).toThrow('rename failed');
-    } finally {
-      rename.mockRestore();
-    }
+    store.saveTask(state);
 
-    expect(fs.readFileSync(taskPath, 'utf8')).toBe(original);
-    expect(fs.readdirSync(path.dirname(taskPath))).not.toContainEqual(
-      expect.stringContaining('.tmp')
-    );
-    expect(store.loadTask('task-1').title).toBe('A title');
+    const taskDir = path.join(root, 'download-tasks', state.taskId);
+    const persisted = [
+      fs.readFileSync(path.join(taskDir, 'task.json'), 'utf8'),
+      fs.readFileSync(path.join(taskDir, 'episodes', '01.json'), 'utf8'),
+    ].join('\n');
+    expect(persisted).not.toContain('signature=secret');
+    expect(persisted).not.toContain('token=secret');
+    expect(persisted).not.toContain('#part');
+    expect(persisted).not.toContain('#fragment');
+    expect(persisted).toContain('segments/a.ts');
+    expect(persisted).toContain('普通中文问号？必须保留');
   });
+
+  test.each([
+    ['task', 'rename'],
+    ['episode', 'rename'],
+    ['task', 'write'],
+    ['episode', 'write'],
+  ] as const)(
+    'keeps old %s JSON readable and removes temporary files when its atomic %s fails',
+    (target, operation) => {
+      const first = snapshot();
+      store.saveTask(first);
+      const taskPath = path.join(
+        root,
+        'download-tasks',
+        first.taskId,
+        'task.json'
+      );
+      const episodePath = path.join(
+        root,
+        'download-tasks',
+        first.taskId,
+        'episodes',
+        '01.json'
+      );
+      const targetPath = target === 'task' ? taskPath : episodePath;
+      const original = fs.readFileSync(targetPath, 'utf8');
+      const originalRename = fs.renameSync;
+      const originalWrite = fs.writeFileSync;
+      const spy =
+        operation === 'rename'
+          ? jest.spyOn(fs, 'renameSync').mockImplementation(((
+              source: fs.PathLike,
+              destination: fs.PathLike
+            ) => {
+              if (String(destination) === targetPath) {
+                throw new Error('rename failed');
+              }
+              return originalRename(source, destination);
+            }) as typeof fs.renameSync)
+          : jest.spyOn(fs, 'writeFileSync').mockImplementation(((
+              ...args: Parameters<typeof fs.writeFileSync>
+            ) => {
+              if (String(args[0]).startsWith(`${targetPath}.`)) {
+                throw new Error('write failed');
+              }
+              return originalWrite(...args);
+            }) as typeof fs.writeFileSync);
+
+      try {
+        expect(() =>
+          store.saveTask(
+            snapshot('task-1', {
+              title: 'new title',
+              episodes: {
+                '1': episode(1, { progress: 75 }),
+                '2': episode(2, { stage: 'paused' }),
+              },
+            })
+          )
+        ).toThrow(operation === 'rename' ? 'rename failed' : 'write failed');
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe(original);
+      expect(fs.readdirSync(path.dirname(targetPath))).not.toContainEqual(
+        expect.stringContaining('.tmp')
+      );
+    }
+  );
 
   test('loads incomplete tasks as recovery_wait without fetching', () => {
     store.saveTask(snapshot());
@@ -198,6 +268,27 @@ describe('DownloadStateStore', () => {
     expect(recovered[0].episodes['1'].stage).toBe('recovery_wait');
     expect(recovered[0].episodes['2'].stage).toBe('recovery_wait');
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test('never recovers terminal tasks even if their episode files contain active stages', () => {
+    for (const status of [
+      'completed',
+      'failed',
+      'partial_completed',
+      'cancelled_resumable',
+    ] as const) {
+      store.saveTask(
+        snapshot(`terminal-${status}`, {
+          status,
+          episodes: {
+            '1': episode(1, { stage: 'downloading' }),
+            '2': episode(2, { stage: 'queued' }),
+          },
+        })
+      );
+    }
+
+    expect(store.loadRecoverableTasks()).toEqual([]);
   });
 
   test('cleans completed after seven days and historical terminal tasks after thirty days, retaining active tasks', () => {
@@ -268,6 +359,41 @@ describe('DownloadStateStore', () => {
     store.saveTask(snapshot());
     fs.rmSync(path.join(taskDir, 'episodes', '02.json'));
     expect(() => store.loadTask('task-1')).toThrow(/episode.*02\.json/i);
+  });
+
+  test('forces schema version one on save and rejects invalid task or episode structures', () => {
+    const state = snapshot();
+    (state as unknown as { schemaVersion: number }).schemaVersion = 99;
+    store.saveTask(state);
+    const taskDir = path.join(root, 'download-tasks', 'task-1');
+    const taskPath = path.join(taskDir, 'task.json');
+    const episodePath = path.join(taskDir, 'episodes', '01.json');
+    expect(JSON.parse(fs.readFileSync(taskPath, 'utf8')).schemaVersion).toBe(1);
+
+    const invalidTask = JSON.parse(fs.readFileSync(taskPath, 'utf8'));
+    invalidTask.status = 'invalid';
+    fs.writeFileSync(taskPath, JSON.stringify(invalidTask));
+    expect(() => store.loadTask('task-1')).toThrow(/status/i);
+
+    store.saveTask(snapshot());
+    const missingTaskField = JSON.parse(fs.readFileSync(taskPath, 'utf8'));
+    delete missingTaskField.title;
+    fs.writeFileSync(taskPath, JSON.stringify(missingTaskField));
+    expect(() => store.loadTask('task-1')).toThrow(/title/i);
+
+    store.saveTask(snapshot());
+    const invalidEpisode = JSON.parse(fs.readFileSync(episodePath, 'utf8'));
+    invalidEpisode.stage = 'invalid';
+    fs.writeFileSync(episodePath, JSON.stringify(invalidEpisode));
+    expect(() => store.loadTask('task-1')).toThrow(/stage/i);
+
+    store.saveTask(snapshot());
+    const missingEpisodeField = JSON.parse(
+      fs.readFileSync(episodePath, 'utf8')
+    );
+    delete missingEpisodeField.activeItems;
+    fs.writeFileSync(episodePath, JSON.stringify(missingEpisodeField));
+    expect(() => store.loadTask('task-1')).toThrow(/activeItems/i);
   });
 
   test('rejects traversal task IDs', () => {
