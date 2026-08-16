@@ -49,6 +49,50 @@ describe('download progress', () => {
     ).toEqual({ progress: 52.5, estimated: true });
   });
 
+  test('keeps calculated progress finite and clamps invalid byte and segment data', () => {
+    expect(
+      calculateEpisodeProgress(
+        episode({ completedBytes: Number.NaN, estimatedBytes: 100 })
+      )
+    ).toEqual({ progress: 10, estimated: false });
+    expect(
+      calculateEpisodeProgress(
+        episode({
+          completedBytes: Number.POSITIVE_INFINITY,
+          estimatedBytes: null,
+          totalSegments: Number.NaN,
+          completedSegmentIndices: [
+            0,
+            -1,
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+          ],
+        })
+      )
+    ).toEqual({ progress: 10, estimated: true });
+    expect(
+      calculateEpisodeProgress(
+        episode({ completedBytes: 200, estimatedBytes: 100 })
+      )
+    ).toEqual({ progress: 95, estimated: false });
+  });
+
+  test('keeps recorded non-downloading progress finite and clamped', () => {
+    expect(
+      calculateEpisodeProgress(
+        episode({ stage: 'paused', progress: Number.NaN })
+      )
+    ).toEqual({ progress: 0, estimated: false });
+    expect(
+      calculateEpisodeProgress(
+        episode({ stage: 'paused', progress: Number.POSITIVE_INFINITY })
+      )
+    ).toEqual({ progress: 0, estimated: false });
+    expect(
+      calculateEpisodeProgress(episode({ stage: 'paused', progress: -10 }))
+    ).toEqual({ progress: 0, estimated: false });
+  });
+
   test('computes a ten second speed window and ETA', () => {
     const window = new DownloadSpeedWindow();
     window.addSample(0, 0);
@@ -75,6 +119,61 @@ describe('download progress', () => {
     expect(window.getEstimate(1_000)).toEqual({
       bytesPerSecond: 0,
       etaSeconds: null,
+    });
+  });
+
+  test('returns a null ETA for invalid or non-positive remaining bytes', () => {
+    const window = new DownloadSpeedWindow();
+    window.addSample(0, 0);
+    window.addSample(10_000, 10 * 1024 * 1024);
+
+    expect(window.getEstimate(0).etaSeconds).toBeNull();
+    expect(window.getEstimate(-1).etaSeconds).toBeNull();
+    expect(window.getEstimate(Number.NaN).etaSeconds).toBeNull();
+    expect(window.getEstimate(Number.POSITIVE_INFINITY).etaSeconds).toBeNull();
+  });
+
+  test('sorts samples by timestamp and replaces samples at the same timestamp', () => {
+    const window = new DownloadSpeedWindow();
+    window.addSample(10_000, 10 * 1024 * 1024);
+    window.addSample(0, 0);
+    window.addSample(0, 5 * 1024 * 1024);
+    window.addSample(10_000, 15 * 1024 * 1024);
+
+    expect(window.getEstimate(10 * 1024 * 1024)).toEqual({
+      bytesPerSecond: 1024 * 1024,
+      etaSeconds: 10,
+    });
+  });
+
+  test('resets after cumulative bytes roll back and recovers on later samples', () => {
+    const window = new DownloadSpeedWindow();
+    window.addSample(0, 0);
+    window.addSample(5_000, 5 * 1024 * 1024);
+    window.addSample(6_000, 4 * 1024 * 1024);
+
+    expect(window.getEstimate(1_000)).toEqual({
+      bytesPerSecond: 0,
+      etaSeconds: null,
+    });
+
+    window.addSample(16_000, 14 * 1024 * 1024);
+    expect(window.getEstimate(10 * 1024 * 1024)).toEqual({
+      bytesPerSecond: 1024 * 1024,
+      etaSeconds: 10,
+    });
+  });
+
+  test('ignores non-finite speed samples', () => {
+    const window = new DownloadSpeedWindow();
+    window.addSample(Number.NaN, 0);
+    window.addSample(0, Number.POSITIVE_INFINITY);
+    window.addSample(0, 0);
+    window.addSample(10_000, 10 * 1024 * 1024);
+
+    expect(window.getEstimate(10 * 1024 * 1024)).toEqual({
+      bytesPerSecond: 1024 * 1024,
+      etaSeconds: 10,
     });
   });
 
@@ -118,6 +217,27 @@ describe('download progress', () => {
         episode({ episode: 2, estimatedBytes: null }),
       ])
     ).toEqual({ progress: 76.25, estimated: true });
+  });
+
+  test('uses equal weighting for zero, negative, and non-finite sizes', () => {
+    const valid = episode({ episode: 1, stage: 'completed', progress: 100 });
+    const invalid = episode({
+      episode: 2,
+      stage: 'paused',
+      progress: 50,
+      estimatedBytes: 0,
+    });
+    expect(aggregateTaskProgress([valid, invalid])).toEqual({
+      progress: 75,
+      estimated: true,
+    });
+    expect(
+      aggregateTaskProgress([
+        valid,
+        { ...invalid, estimatedBytes: -1 },
+        { ...invalid, estimatedBytes: Number.POSITIVE_INFINITY },
+      ])
+    ).toEqual({ progress: 66.66666666666667, estimated: true });
   });
 
   test.each([
