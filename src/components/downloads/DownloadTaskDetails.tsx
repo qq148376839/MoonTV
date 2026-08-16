@@ -26,6 +26,7 @@ export interface DownloadEpisodeDetail {
     kind: 'segment' | 'key' | 'map';
     index: number;
     attempt: number;
+    speed_bytes_per_second?: number;
   }>;
   failures: Array<{
     kind: 'segment' | 'key' | 'map';
@@ -54,9 +55,21 @@ export interface DownloadEpisodeDetail {
     matched_reasons?: string[];
     validation_passed: boolean;
   };
+  address_source?:
+    | 'direct'
+    | 'parsed'
+    | 'refreshed'
+    | 'client_fallback'
+    | 'historical_fallback'
+    | null;
   updated_at: number;
 }
 export interface DownloadTaskDetail extends DownloadTaskSummary {
+  scheduler_slots?: {
+    task_active: number;
+    global_active: number;
+    global_total: number;
+  };
   episodes: DownloadEpisodeDetail[];
 }
 export default function DownloadTaskDetails({
@@ -79,6 +92,7 @@ export default function DownloadTaskDetails({
       <SegmentDiagnostics
         taskId={detail.task_id}
         episodes={detail.episodes}
+        schedulerSlots={detail.scheduler_slots}
         onCommand={onCommand}
       />
     </div>

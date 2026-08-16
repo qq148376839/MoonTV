@@ -15,6 +15,14 @@ const stageOrder: Record<string, number> = {
   recovery_wait: 0,
 };
 
+const addressSourceNames: Record<string, string> = {
+  direct: '直接获取',
+  parsed: '解析获取',
+  refreshed: '刷新后获取',
+  client_fallback: '客户端回退获取',
+  historical_fallback: '历史记录回退获取',
+};
+
 export default function EpisodeProgressPanel({
   episode,
 }: {
@@ -63,6 +71,12 @@ export default function EpisodeProgressPanel({
           MAP {episode.map.completed} / {episode.map.total}
         </span>
         <span>{episode.recoverable ? '可恢复' : '不可恢复'}</span>
+        <span>
+          地址来源：
+          {episode.address_source
+            ? addressSourceNames[episode.address_source] ?? '未知来源'
+            : '未知来源'}
+        </span>
         <span>
           {episode.old_entry_retained
             ? '旧播放入口已保留'

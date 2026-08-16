@@ -46,6 +46,11 @@ function summaryFixture(): DownloadTaskSummary {
 function detailFixture(): DownloadTaskDetail {
   return {
     ...summaryFixture(),
+    scheduler_slots: {
+      task_active: 1,
+      global_active: 5,
+      global_total: 8,
+    },
     episodes: [
       {
         episode: 1,
@@ -65,6 +70,7 @@ function detailFixture(): DownloadTaskDetail {
             kind: 'segment',
             index: 318,
             attempt: 2,
+            speed_bytes_per_second: 2.5 * 1024 * 1024,
           },
         ],
         failures: [
@@ -94,6 +100,7 @@ function detailFixture(): DownloadTaskDetail {
           filter_version: 'v2',
           validation_passed: true,
         },
+        address_source: 'refreshed',
         updated_at: 2,
       },
     ],
@@ -111,12 +118,34 @@ describe('DownloadTaskDetails', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('KEY 1 / 1')).toBeInTheDocument();
     expect(screen.getByText('MAP 1 / 1')).toBeInTheDocument();
-    expect(screen.getByText('任务槽位 1 / 全局 —')).toBeInTheDocument();
+    expect(
+      screen.getByText('本任务占用 1 · 全局占用 5 / 总槽位 8')
+    ).toBeInTheDocument();
+    expect(screen.getByText('2.5 MB/s')).toBeInTheDocument();
+    expect(screen.getByText('地址来源：刷新后获取')).toBeInTheDocument();
     expect(screen.getByText(/过滤 6 个分片/)).toBeInTheDocument();
     expect(screen.getByText(/旧播放入口已保留/)).toBeInTheDocument();
     expect(screen.getByText('segment-319.ts')).toBeInTheDocument();
     expect(screen.getByText(/timeout · 3 次/)).toBeInTheDocument();
     expect(screen.queryByText(/generation-private/)).not.toBeInTheDocument();
+  });
+
+  test('uses safe legacy fallbacks when new detail fields are absent', () => {
+    const detail = detailFixture();
+    delete detail.scheduler_slots;
+    delete detail.episodes[0].address_source;
+    delete detail.episodes[0].active_items[0].speed_bytes_per_second;
+
+    render(<DownloadTaskDetails detail={detail} onCommand={jest.fn()} />);
+
+    expect(
+      screen.getByText('本任务占用 1 · 全局占用 — / 总槽位 —')
+    ).toBeInTheDocument();
+    expect(screen.getByText('地址来源：未知来源')).toBeInTheDocument();
+    expect(
+      screen.getByRole('columnheader', { name: '当前速度' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: '—' })).toBeInTheDocument();
   });
 
   test('retries only failed items', async () => {

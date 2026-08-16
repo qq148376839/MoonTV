@@ -17,10 +17,16 @@ const redactSignedUrls = (value: string) =>
 export default function SegmentDiagnostics({
   taskId,
   episodes,
+  schedulerSlots,
   onCommand,
 }: {
   taskId: string;
   episodes: DownloadEpisodeDetail[];
+  schedulerSlots?: {
+    task_active: number;
+    global_active: number;
+    global_total: number;
+  };
   onCommand: (
     taskId: string,
     action: DownloadCommandAction
@@ -53,7 +59,9 @@ export default function SegmentDiagnostics({
           分片诊断
         </h4>
         <span className='text-xs text-gray-500'>
-          任务槽位 {active.length} / 全局 —
+          本任务占用 {schedulerSlots?.task_active ?? active.length} · 全局占用{' '}
+          {schedulerSlots?.global_active ?? '—'} / 总槽位{' '}
+          {schedulerSlots?.global_total ?? '—'}
         </span>
       </div>
       <div className='grid grid-cols-2 gap-2 text-xs sm:grid-cols-5'>
@@ -93,6 +101,7 @@ export default function SegmentDiagnostics({
                 <th>类型</th>
                 <th>分片</th>
                 <th>尝试</th>
+                <th>当前速度</th>
               </tr>
             </thead>
             <tbody>
@@ -105,6 +114,7 @@ export default function SegmentDiagnostics({
                   <td>{item.kind.toUpperCase()}</td>
                   <td>{item.index}</td>
                   <td>{item.attempt}</td>
+                  <td>{formatSpeed(item.speed_bytes_per_second)}</td>
                 </tr>
               ))}
             </tbody>
@@ -143,4 +153,12 @@ export default function SegmentDiagnostics({
       )}
     </section>
   );
+}
+
+function formatSpeed(value: number | undefined): string {
+  if (!Number.isFinite(value) || !value || value <= 0) return '—';
+  const megabytes = value / 1024 / 1024;
+  return `${
+    megabytes >= 10 ? megabytes.toFixed(0) : megabytes.toFixed(1)
+  } MB/s`;
 }
