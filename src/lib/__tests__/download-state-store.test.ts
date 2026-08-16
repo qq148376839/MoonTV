@@ -87,6 +87,25 @@ function snapshot(
   };
 }
 
+function createSymlinkOrSkip(
+  target: string,
+  linkPath: string,
+  type: 'dir' | 'file'
+): boolean {
+  try {
+    fs.symlinkSync(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (
+      process.platform === 'win32' &&
+      (error as NodeJS.ErrnoException).code === 'EPERM'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 describe('DownloadStateStore', () => {
   let root: string;
   let store: DownloadStateStore;
@@ -198,6 +217,26 @@ describe('DownloadStateStore', () => {
     expect(persisted).toContain('目录/片段.ts');
     expect(persisted).not.toContain('signature=secret');
     expect(persisted).not.toContain('#part');
+  });
+
+  test('redacts Chinese relative paths embedded in messages without truncating Chinese questions', () => {
+    const state = snapshot();
+    state.episodes['1'].failures[0].message =
+      '下载失败：目录/片段.ts?signature=secret#part';
+    Object.assign(
+      state.episodes['1'].failures[0] as unknown as Record<string, unknown>,
+      { nested: { message: '为什么失败？' } }
+    );
+    store.saveTask(state);
+
+    const persisted = fs.readFileSync(
+      path.join(root, 'download-tasks', state.taskId, 'episodes', '01.json'),
+      'utf8'
+    );
+    expect(persisted).toContain('下载失败：目录/片段.ts');
+    expect(persisted).not.toContain('signature=secret');
+    expect(persisted).not.toContain('#part');
+    expect(persisted).toContain('为什么失败？');
   });
 
   test.each([
@@ -364,6 +403,13 @@ describe('DownloadStateStore', () => {
     ).toBe('video');
   });
 
+  test('requires a finite cleanup timestamp', () => {
+    expect(() => store.cleanupHistory(Number.NaN)).toThrow(TypeError);
+    expect(() => store.cleanupHistory(Number.POSITIVE_INFINITY)).toThrow(
+      TypeError
+    );
+  });
+
   test('explicitly fails for malformed task JSON and missing episode state', () => {
     store.saveTask(snapshot());
     const taskDir = path.join(root, 'download-tasks', 'task-1');
@@ -414,6 +460,66 @@ describe('DownloadStateStore', () => {
     expect(() => store.saveTask(snapshot('../escape'))).toThrow(/taskId/i);
     expect(() => store.loadTask('../task-1')).toThrow(/taskId/i);
     expect(() => store.deleteTaskState('nested/task')).toThrow(/taskId/i);
+  });
+
+  test('rejects a symbolic-link task directory before saving or listing', () => {
+    const stateRoot = path.join(root, 'download-tasks');
+    const outside = path.join(root, 'outside-task');
+    fs.mkdirSync(stateRoot);
+    fs.mkdirSync(outside);
+    if (
+      !createSymlinkOrSkip(outside, path.join(stateRoot, 'task-link'), 'dir')
+    ) {
+      return;
+    }
+
+    expect(() => store.saveTask(snapshot('task-link'))).toThrow(
+      /symbolic link/i
+    );
+    expect(() => store.listTasks()).toThrow(/symbolic link/i);
+  });
+
+  test('rejects a symbolic-link episodes directory before saving or loading', () => {
+    const stateRoot = path.join(root, 'download-tasks');
+    const taskDir = path.join(stateRoot, 'task-1');
+    const outside = path.join(root, 'outside-episodes');
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.mkdirSync(outside);
+    if (!createSymlinkOrSkip(outside, path.join(taskDir, 'episodes'), 'dir')) {
+      return;
+    }
+
+    expect(() => store.saveTask(snapshot())).toThrow(/symbolic link/i);
+    expect(() => store.loadTask('task-1')).toThrow(/symbolic link/i);
+  });
+
+  test('rejects a symbolic-link task JSON before reading, writing, or deleting', () => {
+    store.saveTask(snapshot());
+    const taskPath = path.join(root, 'download-tasks', 'task-1', 'task.json');
+    const outside = path.join(root, 'outside-task.json');
+    fs.renameSync(taskPath, outside);
+    if (!createSymlinkOrSkip(outside, taskPath, 'file')) return;
+
+    expect(() => store.loadTask('task-1')).toThrow(/symbolic link/i);
+    expect(() => store.saveTask(snapshot())).toThrow(/symbolic link/i);
+    expect(() => store.deleteTaskState('task-1')).toThrow(/symbolic link/i);
+    expect(fs.existsSync(outside)).toBe(true);
+  });
+
+  test('cleanup rejects symbolic task directories without deleting their external target', () => {
+    const stateRoot = path.join(root, 'download-tasks');
+    const outside = path.join(root, 'outside-cleanup');
+    fs.mkdirSync(stateRoot);
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+    if (!createSymlinkOrSkip(outside, path.join(stateRoot, 'done'), 'dir')) {
+      return;
+    }
+
+    expect(() => store.cleanupHistory(Date.now())).toThrow(/symbolic link/i);
+    expect(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8')).toBe(
+      'keep'
+    );
   });
 
   test('lists valid task directories while ignoring files and orphaned temporary files', () => {

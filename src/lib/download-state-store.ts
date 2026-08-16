@@ -85,6 +85,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function lstatIfExists(filePath: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function assertNotSymbolicLink(filePath: string, label: string): void {
+  if (lstatIfExists(filePath)?.isSymbolicLink()) {
+    throw new Error(`Refusing symbolic link for ${label}: ${filePath}`);
+  }
+}
+
+function assertExistingDirectory(filePath: string, label: string): boolean {
+  const stats = lstatIfExists(filePath);
+  if (!stats) return false;
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Refusing symbolic link for ${label}: ${filePath}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Invalid ${label}: expected directory at ${filePath}`);
+  }
+  return true;
+}
+
 function assertRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`Invalid ${label}: expected object`);
   return value;
@@ -326,12 +353,17 @@ export class DownloadStateStore {
     const episodesDir = path.join(taskDir, 'episodes');
     const sanitized = this.sanitizeSnapshot(snapshot);
 
-    fs.mkdirSync(episodesDir, { recursive: true });
+    this.ensureSafeDirectory(this.stateRoot, 'download state root');
+    this.ensureSafeDirectory(taskDir, 'task directory');
+    this.ensureSafeDirectory(episodesDir, 'episodes directory');
+    assertNotSymbolicLink(path.join(taskDir, 'task.json'), 'task JSON');
     for (const state of Object.values(sanitized.episodes)) {
-      this.writeJsonAtomically(
-        path.join(episodesDir, episodeFileName(state.episode)),
-        state
+      const episodePath = path.join(
+        episodesDir,
+        episodeFileName(state.episode)
       );
+      assertNotSymbolicLink(episodePath, 'episode JSON');
+      this.writeJsonAtomically(episodePath, state);
     }
     this.writeJsonAtomically(
       path.join(taskDir, 'task.json'),
@@ -342,8 +374,10 @@ export class DownloadStateStore {
   loadTask(taskId: string): DownloadTaskSnapshot {
     this.assertTaskId(taskId);
     const taskDir = this.taskDirectory(taskId);
+    const episodesDir = path.join(taskDir, 'episodes');
+    this.assertTaskPathsSafe(taskDir, episodesDir);
     this.removeTemporaryFiles(taskDir);
-    this.removeTemporaryFiles(path.join(taskDir, 'episodes'));
+    this.removeTemporaryFiles(episodesDir);
     const persisted = this.readPersistedTask(path.join(taskDir, 'task.json'));
     if (persisted.taskId !== taskId) {
       throw new Error(`Download task state taskId mismatch for ${taskId}`);
@@ -352,10 +386,10 @@ export class DownloadStateStore {
     const episodes: Record<string, EpisodeDownloadState> = {};
     for (const [key, summary] of Object.entries(persisted.episodes)) {
       const episodePath = path.join(
-        taskDir,
-        'episodes',
+        episodesDir,
         episodeFileName(summary.episode)
       );
+      assertNotSymbolicLink(episodePath, 'episode JSON');
       const state = this.readEpisodeState(episodePath);
       if (state.episode !== summary.episode) {
         throw new Error(`Episode state mismatch in ${episodePath}`);
@@ -367,13 +401,26 @@ export class DownloadStateStore {
   }
 
   listTasks(): DownloadTaskSnapshot[] {
-    if (!fs.existsSync(this.stateRoot)) return [];
+    if (!assertExistingDirectory(this.stateRoot, 'download state root'))
+      return [];
 
     this.removeTemporaryFiles(this.stateRoot);
-    return fs
-      .readdirSync(this.stateRoot, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && this.isSafeTaskId(entry.name))
-      .map((entry) => this.loadTask(entry.name));
+    const taskIds: string[] = [];
+    for (const entry of fs.readdirSync(this.stateRoot, {
+      withFileTypes: true,
+    })) {
+      if (!this.isSafeTaskId(entry.name)) continue;
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          `Refusing symbolic link for task directory: ${path.join(
+            this.stateRoot,
+            entry.name
+          )}`
+        );
+      }
+      if (entry.isDirectory()) taskIds.push(entry.name);
+    }
+    return taskIds.map((taskId) => this.loadTask(taskId));
   }
 
   loadRecoverableTasks(): DownloadTaskSnapshot[] {
@@ -394,23 +441,41 @@ export class DownloadStateStore {
 
   deleteTaskState(taskId: string): void {
     this.assertTaskId(taskId);
-    fs.rmSync(this.taskDirectory(taskId), { recursive: true, force: true });
+    const taskDir = this.taskDirectory(taskId);
+    this.assertTaskPathsSafe(taskDir, path.join(taskDir, 'episodes'));
+    fs.rmSync(taskDir, { recursive: true, force: true });
   }
 
   cleanupHistory(now: number): { removed: string[] } {
-    if (!fs.existsSync(this.stateRoot)) return { removed: [] };
+    if (!Number.isFinite(now)) {
+      throw new TypeError('cleanupHistory now must be a finite number');
+    }
+    if (!assertExistingDirectory(this.stateRoot, 'download state root')) {
+      return { removed: [] };
+    }
 
     this.removeTemporaryFiles(this.stateRoot);
     const removed: string[] = [];
     for (const entry of fs.readdirSync(this.stateRoot, {
       withFileTypes: true,
     })) {
-      if (!entry.isDirectory() || !this.isSafeTaskId(entry.name)) continue;
+      if (!this.isSafeTaskId(entry.name)) continue;
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          `Refusing symbolic link for task directory: ${path.join(
+            this.stateRoot,
+            entry.name
+          )}`
+        );
+      }
+      if (!entry.isDirectory()) continue;
 
       const taskId = entry.name;
       const taskDir = this.taskDirectory(taskId);
+      const episodesDir = path.join(taskDir, 'episodes');
+      this.assertTaskPathsSafe(taskDir, episodesDir);
       this.removeTemporaryFiles(taskDir);
-      this.removeTemporaryFiles(path.join(taskDir, 'episodes'));
+      this.removeTemporaryFiles(episodesDir);
       const persisted = this.readPersistedTask(path.join(taskDir, 'task.json'));
       if (persisted.taskId !== taskId) {
         throw new Error(`Download task state taskId mismatch for ${taskId}`);
@@ -454,7 +519,7 @@ export class DownloadStateStore {
 
     const redactedUrls = redactUrlsInText(value);
     const withoutPathTails = redactedUrls.replace(
-      /((?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?:\?[^\s#]*(?:#[^\s]*)?|#[^\s]*)/g,
+      /((?:[^\s/?#：:，,。！？!?]+\/)+[^\s/?#：:，,。！？!?]+|[^\s/?#：:，,。！？!?]+\.[^\s/?#：:，,。！？!?]+)(?:\?[^\s#]*(?:#[^\s]*)?|#[^\s]*)/g,
       '$1'
     );
     if (key === 'path') {
@@ -506,12 +571,17 @@ export class DownloadStateStore {
   }
 
   private writeJsonAtomically(filePath: string, value: unknown): void {
+    assertNotSymbolicLink(filePath, 'JSON state file');
     const temporaryPath = `${filePath}.${
       process.pid
     }.${crypto.randomUUID()}.tmp`;
     try {
-      fs.writeFileSync(temporaryPath, JSON.stringify(value), 'utf8');
+      fs.writeFileSync(temporaryPath, JSON.stringify(value), {
+        encoding: 'utf8',
+        flag: 'wx',
+      });
       fs.renameSync(temporaryPath, filePath);
+      assertNotSymbolicLink(filePath, 'JSON state file');
     } catch (error) {
       fs.rmSync(temporaryPath, { force: true });
       throw error;
@@ -549,8 +619,35 @@ export class DownloadStateStore {
     return /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(taskId);
   }
 
+  private ensureSafeDirectory(directory: string, label: string): void {
+    assertNotSymbolicLink(directory, label);
+    fs.mkdirSync(directory, { recursive: true });
+    assertExistingDirectory(directory, label);
+  }
+
+  private assertTaskPathsSafe(taskDir: string, episodesDir: string): void {
+    assertNotSymbolicLink(this.stateRoot, 'download state root');
+    assertNotSymbolicLink(taskDir, 'task directory');
+    assertNotSymbolicLink(episodesDir, 'episodes directory');
+    assertNotSymbolicLink(path.join(taskDir, 'task.json'), 'task JSON');
+    if (assertExistingDirectory(episodesDir, 'episodes directory')) {
+      for (const entry of fs.readdirSync(episodesDir, {
+        withFileTypes: true,
+      })) {
+        if (entry.isSymbolicLink()) {
+          throw new Error(
+            `Refusing symbolic link for episode state: ${path.join(
+              episodesDir,
+              entry.name
+            )}`
+          );
+        }
+      }
+    }
+  }
+
   private removeTemporaryFiles(directory: string): void {
-    if (!fs.existsSync(directory)) return;
+    if (!assertExistingDirectory(directory, 'state directory')) return;
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       if (entry.isFile() && entry.name.endsWith('.tmp')) {
         fs.rmSync(path.join(directory, entry.name), { force: true });
