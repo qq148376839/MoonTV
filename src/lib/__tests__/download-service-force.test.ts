@@ -1008,6 +1008,28 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(outside, { recursive: true, force: true });
   });
 
+  test('clean cancel rejects a symlinked generations directory without touching its external target', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-clean-link-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-external-'));
+    const externalGeneration = path.join(outside, 'generation-a');
+    const sentinel = path.join(externalGeneration, 'sentinel');
+    fs.mkdirSync(externalGeneration);
+    fs.writeFileSync(sentinel, 'keep');
+    fs.symlinkSync(outside, path.join(root, 'episode_01_generations'), 'dir');
+    const { service, stateStore } = serviceForSnapshot(activeSnapshot(), {
+      resourcePath: root,
+    });
+
+    await expect(service.cancelTask('task-1', true)).rejects.toThrow(
+      /symbolic link|generation path/i
+    );
+    expect(fs.readFileSync(sentinel, 'utf8')).toBe('keep');
+    expect(fs.existsSync(externalGeneration)).toBe(true);
+    expect(stateStore.deleteTaskState).not.toHaveBeenCalled();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
   test('clean cancel invalidates a pending pause settle callback', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-pause-cancel-'));
     const generationRoot = path.join(

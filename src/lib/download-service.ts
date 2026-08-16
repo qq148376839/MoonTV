@@ -350,6 +350,61 @@ function containedGenerationPath(
   return generationPath;
 }
 
+function realDirectoryWithoutSymlink(
+  directoryPath: string,
+  label: string
+): string {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(directoryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Invalid generation path: missing ${label}`);
+    }
+    throw error;
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Invalid generation path: symbolic link ${label}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Invalid generation path: ${label} is not a directory`);
+  }
+  return fs.realpathSync(directoryPath);
+}
+
+function generationPathForRemoval(
+  resourcePath: string,
+  episode: number,
+  generationId: string
+): string {
+  const generationPath = containedGenerationPath(
+    resourcePath,
+    episode,
+    generationId
+  );
+  const resourceRoot = path.resolve(resourcePath);
+  const generationsRoot = path.dirname(generationPath);
+  const realResourceRoot = realDirectoryWithoutSymlink(
+    resourceRoot,
+    'resource root'
+  );
+  const realGenerationsRoot = realDirectoryWithoutSymlink(
+    generationsRoot,
+    'generations directory'
+  );
+  if (path.dirname(realGenerationsRoot) !== realResourceRoot) {
+    throw new Error('Invalid generation path: escaped resource root');
+  }
+  const realGenerationPath = realDirectoryWithoutSymlink(
+    generationPath,
+    'generation directory'
+  );
+  if (path.dirname(realGenerationPath) !== realGenerationsRoot) {
+    throw new Error('Invalid generation path: escaped generations directory');
+  }
+  return realGenerationPath;
+}
+
 // 下载服务类
 export class DownloadService {
   private storageManager: StorageManager;
@@ -1933,7 +1988,10 @@ export class DownloadService {
         rollback: () => {
           if (hadActive) fs.renameSync(backupPath, m3u8FilePath);
           else fs.rmSync(m3u8FilePath, { force: true });
-          fs.rmSync(generation.rootDir, { recursive: true, force: true });
+          fs.rmSync(
+            generationPathForRemoval(localPath, episodeIndex, generationId),
+            { recursive: true, force: true }
+          );
         },
         finalize: () => fs.rmSync(backupPath, { force: true }),
       };
@@ -2728,7 +2786,7 @@ export class DownloadService {
       );
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
-        const generationRoot = containedGenerationPath(
+        const generationRoot = generationPathForRemoval(
           resourcePath,
           episode.episode,
           episode.generationId
