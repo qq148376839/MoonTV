@@ -14,54 +14,52 @@ export type DownloadStage =
 export type DownloadUnitKind = 'segment' | 'key' | 'map';
 
 export interface DownloadFailure {
-  code: string;
+  kind: DownloadUnitKind;
+  index: number;
+  category:
+    | 'timeout'
+    | 'http_auth'
+    | 'http_server'
+    | 'io'
+    | 'empty'
+    | 'length'
+    | 'other';
+  attempts: number;
+  path: string;
   message: string;
-  unitId?: string;
-  retryable?: boolean;
-  occurredAt: number;
 }
 
 export interface DownloadWorkItem {
-  id: string;
   taskId: string;
-  episodeId: string;
-  generation: number;
+  episode: number;
+  generationId: string;
   kind: DownloadUnitKind;
-  stage: DownloadStage;
-  index?: number;
-  expectedBytes?: number | null;
-  completedBytes: number;
-  failure?: DownloadFailure;
+  index: number;
+  attempt: number;
 }
 
 export interface EpisodeDownloadState {
-  taskId: string;
-  episodeId: string;
-  generation: number;
+  episode: number;
+  generationId: string;
   stage: DownloadStage;
   totalSegments: number;
-  completedSegments: number;
-  failedSegments: number;
-  activeSegments: number;
-  totalKeys: number;
-  completedKeys: number;
-  failedKeys?: number;
-  activeKeys?: number;
-  totalMaps: number;
-  completedMaps: number;
-  failedMaps?: number;
-  activeMaps?: number;
-  completedBytes: number | null;
-  expectedBytes: number | null;
-  progress?: number;
-  estimated?: boolean;
-  bytesPerSecond?: number;
-  etaSeconds?: number | null;
+  completedSegmentIndices: number[];
+  failedSegmentIndices: number[];
+  activeItems: DownloadWorkItem[];
+  keyTotal: number;
+  keyCompleted: number;
+  mapTotal: number;
+  mapCompleted: number;
+  completedBytes: number;
+  estimatedBytes: number | null;
+  progress: number;
+  progressEstimated: boolean;
+  speedBytesPerSecond: number;
+  etaSeconds: number | null;
   failures: DownloadFailure[];
-  legacyEntry: boolean;
-  resumable: boolean;
+  oldEntryRetained: boolean;
+  recoverable: boolean;
   refreshCount: number;
-  createdAt: number;
   updatedAt: number;
 }
 
@@ -75,35 +73,32 @@ export type DownloadTaskStatus =
   | 'failed'
   | 'cancelled_resumable';
 
-export type DownloadPriority = 'normal' | 'high';
-
 export interface DownloadTaskSnapshot {
+  schemaVersion: 1;
   taskId: string;
-  generation: number;
+  source: string;
+  resourceId: string;
+  title: string;
+  year: string;
+  poster?: string;
+  episodeNumbers: number[];
   status: DownloadTaskStatus;
-  priority: DownloadPriority;
-  episodes: EpisodeDownloadState[];
-  totalEpisodes: number;
-  completedEpisodes: number;
-  failedEpisodes: number;
-  activeEpisodes: number;
-  completedBytes: number | null;
-  expectedBytes: number | null;
+  priority: 'normal' | 'high';
+  currentEpisode: number | null;
   progress: number;
-  estimated: boolean;
-  bytesPerSecond?: number;
-  etaSeconds?: number | null;
-  failures: DownloadFailure[];
-  legacyEntry: boolean;
-  resumable: boolean;
-  refreshCount: number;
+  progressEstimated: boolean;
+  speedBytesPerSecond: number;
+  etaSeconds: number | null;
+  completedBytes: number;
   createdAt: number;
   updatedAt: number;
+  episodes: Record<string, EpisodeDownloadState>;
 }
 
 export type DownloadCommand =
-  | { type: 'enqueue'; taskId: string; priority?: DownloadPriority }
-  | {
-      type: 'pause' | 'resume' | 'cancel' | 'retry' | 'recover' | 'refresh';
-      taskId: string;
-    };
+  | 'pause'
+  | 'resume'
+  | 'cancel'
+  | 'cancel_and_clean'
+  | 'retry_failed'
+  | 'prioritize';

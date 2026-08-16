@@ -8,28 +8,28 @@ export interface DownloadProgress {
 const clampProgress = (value: number): number =>
   Math.min(100, Math.max(0, value));
 
-const segmentRatio = (episode: EpisodeDownloadState): number => {
-  if (episode.totalSegments <= 0) return 0;
-  return episode.completedSegments / episode.totalSegments;
-};
+const clampRatio = (value: number): number => Math.min(1, Math.max(0, value));
 
-const mediaRatio = (
+const downloadingProgress = (
   episode: EpisodeDownloadState
-): { ratio: number; estimated: boolean } => {
-  if (
-    episode.expectedBytes !== null &&
-    episode.expectedBytes !== undefined &&
-    episode.expectedBytes > 0 &&
-    episode.completedBytes !== null &&
-    episode.completedBytes !== undefined
-  ) {
+): DownloadProgress => {
+  if (episode.estimatedBytes !== null && episode.estimatedBytes > 0) {
     return {
-      ratio: episode.completedBytes / episode.expectedBytes,
+      progress: clampProgress(
+        10 + clampRatio(episode.completedBytes / episode.estimatedBytes) * 85
+      ),
       estimated: false,
     };
   }
 
-  return { ratio: segmentRatio(episode), estimated: true };
+  const ratio =
+    episode.totalSegments > 0
+      ? episode.completedSegmentIndices.length / episode.totalSegments
+      : 0;
+  return {
+    progress: clampProgress(10 + clampRatio(ratio) * 85),
+    estimated: true,
+  };
 };
 
 export function calculateEpisodeProgress(
@@ -39,20 +39,20 @@ export function calculateEpisodeProgress(
     case 'queued':
       return { progress: 0, estimated: false };
     case 'preparing':
-      return { progress: 2.5, estimated: true };
+      return { progress: 2.5, estimated: false };
+    case 'downloading':
+      return downloadingProgress(episode);
     case 'validating':
       return { progress: 95, estimated: false };
     case 'committing':
       return { progress: 97.5, estimated: false };
     case 'completed':
       return { progress: 100, estimated: false };
-    default: {
-      const media = mediaRatio(episode);
+    default:
       return {
-        progress: clampProgress(10 + media.ratio * 85),
-        estimated: media.estimated,
+        progress: clampProgress(episode.progress),
+        estimated: episode.progressEstimated,
       };
-    }
   }
 }
 
@@ -100,8 +100,7 @@ export function aggregateTaskProgress(
   if (episodes.length === 0) return { progress: 0, estimated: false };
 
   const hasUnknownSize = episodes.some(
-    (episode) =>
-      episode.expectedBytes === null || episode.expectedBytes === undefined
+    (episode) => episode.estimatedBytes === null
   );
   const progresses = episodes.map(calculateEpisodeProgress);
 
@@ -116,7 +115,7 @@ export function aggregateTaskProgress(
   }
 
   const totalBytes = episodes.reduce(
-    (sum, episode) => sum + (episode.expectedBytes ?? 0),
+    (sum, episode) => sum + (episode.estimatedBytes ?? 0),
     0
   );
   if (totalBytes <= 0) {
@@ -129,16 +128,12 @@ export function aggregateTaskProgress(
     };
   }
 
-  const weightedProgress = episodes.reduce((sum, episode) => {
-    const completedBytes = episode.completedBytes ?? 0;
-    const byteProgress = episode.expectedBytes
-      ? (completedBytes / episode.expectedBytes) * 100
-      : 0;
-    return sum + clampProgress(byteProgress) * (episode.expectedBytes ?? 0);
+  const weightedProgress = episodes.reduce((sum, episode, index) => {
+    return sum + progresses[index].progress * (episode.estimatedBytes ?? 0);
   }, 0);
 
   return {
     progress: clampProgress(weightedProgress / totalBytes),
-    estimated: progresses.some((current) => current.estimated),
+    estimated: false,
   };
 }

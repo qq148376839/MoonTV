@@ -8,25 +8,27 @@ import type { EpisodeDownloadState } from '../download-types';
 const episode = (
   overrides: Partial<EpisodeDownloadState> = {}
 ): EpisodeDownloadState => ({
-  taskId: 'task-1',
-  episodeId: 'episode-1',
-  generation: 1,
+  episode: 1,
+  generationId: 'generation-1',
   stage: 'downloading',
-  totalSegments: 2,
-  completedSegments: 1,
-  failedSegments: 0,
-  activeSegments: 1,
-  totalKeys: 0,
-  completedKeys: 0,
-  totalMaps: 0,
-  completedMaps: 0,
-  expectedBytes: 100,
+  totalSegments: 4,
+  completedSegmentIndices: [0, 1],
+  failedSegmentIndices: [],
+  activeItems: [],
+  keyTotal: 0,
+  keyCompleted: 0,
+  mapTotal: 0,
+  mapCompleted: 0,
   completedBytes: 50,
+  estimatedBytes: 100,
+  progress: 52.5,
+  progressEstimated: false,
+  speedBytesPerSecond: 0,
+  etaSeconds: null,
   failures: [],
-  legacyEntry: false,
-  resumable: true,
+  oldEntryRetained: false,
+  recoverable: true,
   refreshCount: 0,
-  createdAt: 0,
   updatedAt: 0,
   ...overrides,
 });
@@ -42,7 +44,7 @@ describe('download progress', () => {
   test('falls back to segment counts when total bytes are unknown', () => {
     expect(
       calculateEpisodeProgress(
-        episode({ expectedBytes: null, completedBytes: null })
+        episode({ estimatedBytes: null, completedBytes: 0 })
       )
     ).toEqual({ progress: 52.5, estimated: true });
   });
@@ -58,9 +60,17 @@ describe('download progress', () => {
     });
   });
 
-  test('returns a null ETA without enough samples', () => {
+  test('returns a null ETA without samples', () => {
+    expect(new DownloadSpeedWindow().getEstimate(1_000)).toEqual({
+      bytesPerSecond: 0,
+      etaSeconds: null,
+    });
+  });
+
+  test('returns a null ETA when the measured speed is not positive', () => {
     const window = new DownloadSpeedWindow();
-    window.addSample(1_000, 100);
+    window.addSample(0, 10);
+    window.addSample(10_000, 5);
 
     expect(window.getEstimate(1_000)).toEqual({
       bytesPerSecond: 0,
@@ -68,17 +78,70 @@ describe('download progress', () => {
     });
   });
 
-  test('aggregates known episode sizes by byte weight', () => {
+  test('drops samples older than the ten second window', () => {
+    const window = new DownloadSpeedWindow();
+    window.addSample(0, 0);
+    window.addSample(5_000, 5_000);
+    window.addSample(16_000, 6_000);
+
+    expect(window.getEstimate(1_000)).toEqual({
+      bytesPerSecond: 0,
+      etaSeconds: null,
+    });
+  });
+
+  test('aggregates known episode sizes by weighted episode progress', () => {
     expect(
       aggregateTaskProgress([
         episode({
-          episodeId: 'a',
-          expectedBytes: 100,
-          completedBytes: 100,
+          episode: 1,
           stage: 'completed',
+          completedBytes: 100,
+          estimatedBytes: 100,
+          progress: 100,
         }),
-        episode({ episodeId: 'b', expectedBytes: 300, completedBytes: 150 }),
+        episode({
+          episode: 2,
+          stage: 'paused',
+          completedBytes: 150,
+          estimatedBytes: 300,
+          progress: 50,
+        }),
       ])
     ).toEqual({ progress: 62.5, estimated: false });
+  });
+
+  test('uses equal weighting when any episode size is unknown', () => {
+    expect(
+      aggregateTaskProgress([
+        episode({ episode: 1, stage: 'completed', progress: 100 }),
+        episode({ episode: 2, estimatedBytes: null }),
+      ])
+    ).toEqual({ progress: 76.25, estimated: true });
+  });
+
+  test.each([
+    ['validating', 95],
+    ['committing', 97.5],
+    ['completed', 100],
+  ] as const)('%s has its fixed progress', (stage, progress) => {
+    expect(calculateEpisodeProgress(episode({ stage }))).toEqual({
+      progress,
+      estimated: false,
+    });
+  });
+
+  test.each([
+    'pausing',
+    'paused',
+    'partial_failed',
+    'cancelled_resumable',
+    'recovery_wait',
+  ] as const)('%s keeps its recorded progress', (stage) => {
+    expect(
+      calculateEpisodeProgress(
+        episode({ stage, progress: 41.25, progressEstimated: true })
+      )
+    ).toEqual({ progress: 41.25, estimated: true });
   });
 });
