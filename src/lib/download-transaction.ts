@@ -187,7 +187,10 @@ export function validateResumeFiles(files: ResumeFile[]): {
   bytes: number;
 } {
   const result = { valid: [] as number[], invalid: [] as number[], bytes: 0 };
+  const seenIndices = new Set<number>();
   for (const file of files) {
+    if (seenIndices.has(file.index)) continue;
+    seenIndices.add(file.index);
     try {
       const size = fs.statSync(file.path).size;
       if (

@@ -13,6 +13,7 @@ jest.mock('p-limit', () => ({
 
 import { DownloadScheduler } from '../download-scheduler';
 import { DownloadService, DownloadStatus } from '../download-service';
+import type { DownloadTaskSnapshot } from '../download-types';
 
 const resource = {
   id: 'movie-1',
@@ -350,9 +351,237 @@ describe('DownloadService force redownload', () => {
     expect(fs.readFileSync(active, 'utf8')).toContain('old-entry.ts');
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  test('pause enters pausing immediately, stops dispatch, and waits for active work to finish', async () => {
+    const snapshot = activeSnapshot();
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    let finishActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      finishActive = resolve;
+    });
+    const second = jest.fn().mockResolvedValue(undefined);
+    const firstPromise = scheduler.enqueue(workItem(0), () => activeGate);
+    const secondPromise = scheduler
+      .enqueue(workItem(1), second)
+      .catch(() => undefined);
+    await Promise.resolve();
+    const { service } = serviceForSnapshot(snapshot, { scheduler });
+
+    expect(service.pauseTask('task-1')).toMatchObject({ ok: true });
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe('pausing');
+    expect(service.getSnapshot('task-1')?.status).toBe('downloading');
+    expect(second).not.toHaveBeenCalled();
+
+    finishActive();
+    await firstPromise;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(second).not.toHaveBeenCalled();
+    expect(service.getSnapshot('task-1')).toMatchObject({ status: 'paused' });
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe('paused');
+    scheduler.cancelQueued('task-1');
+    await secondPromise;
+  });
+
+  test('default cancel retains generation and state while clean cancel removes only uncommitted data', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-cancel-'));
+    const generationRoot = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(generationRoot, { recursive: true });
+    fs.writeFileSync(path.join(generationRoot, 'segment.ts'), 'partial');
+    const committedGeneration = path.join(
+      root,
+      'episode_02_generations',
+      'generation-b'
+    );
+    fs.mkdirSync(committedGeneration, { recursive: true });
+    fs.writeFileSync(path.join(committedGeneration, 'segment.ts'), 'committed');
+    const active = path.join(root, 'episode_01.m3u8');
+    fs.writeFileSync(active, '#EXTM3U\nold-entry.ts');
+    const snapshot = activeSnapshot();
+    snapshot.episodeNumbers.push(2);
+    snapshot.episodes['2'] = {
+      ...snapshot.episodes['1'],
+      episode: 2,
+      generationId: 'generation-b',
+      stage: 'completed',
+      completedSegmentIndices: [0],
+      recoverable: false,
+    };
+    const stateStore = {
+      loadRecoverableTasks: () => [snapshot],
+      saveTask: jest.fn(),
+      deleteTaskState: jest.fn(),
+    };
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore,
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    await expect(service.cancelTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'cancelled_resumable',
+    });
+    expect(fs.existsSync(generationRoot)).toBe(true);
+    expect(fs.readFileSync(active, 'utf8')).toContain('old-entry.ts');
+    expect(stateStore.deleteTaskState).not.toHaveBeenCalled();
+    expect(stateStore.saveTask).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'cancelled_resumable' })
+    );
+
+    await expect(service.cancelTask('task-1', true)).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(fs.existsSync(generationRoot)).toBe(false);
+    expect(fs.existsSync(committedGeneration)).toBe(true);
+    expect(fs.readFileSync(active, 'utf8')).toContain('old-entry.ts');
+    expect(stateStore.deleteTaskState).toHaveBeenCalledWith('task-1');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('retryFailed runs only recorded failed work and never completed work', async () => {
+    const snapshot = activeSnapshot();
+    snapshot.status = 'failed';
+    snapshot.episodes['1'].stage = 'partial_failed';
+    snapshot.episodes['1'].completedSegmentIndices = [0];
+    snapshot.episodes['1'].failedSegmentIndices = [1];
+    const { service } = serviceForSnapshot(snapshot);
+    const completedOperation = jest.fn().mockResolvedValue(4);
+    const failedOperation = jest.fn().mockResolvedValue(5);
+    const failedWork = (
+      service as unknown as {
+        failedWork: Map<
+          string,
+          {
+            item: ReturnType<typeof workItem>;
+            operation: () => Promise<number>;
+            path: string;
+          }
+        >;
+      }
+    ).failedWork;
+    failedWork.set('task-1:1:g:segment:1', {
+      item: workItem(1),
+      operation: failedOperation,
+      path: '/tmp/segment-1.ts',
+    });
+
+    await expect(service.retryFailed('task-1')).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(failedOperation).toHaveBeenCalledTimes(1);
+    expect(completedOperation).not.toHaveBeenCalled();
+    expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+      completedSegmentIndices: [0, 1],
+      failedSegmentIndices: [],
+    });
+  });
+
+  test('batches segment persistence at 250ms or 20 changes and flushes terminals immediately', () => {
+    jest.useFakeTimers();
+    try {
+      const snapshot = activeSnapshot();
+      const { service, stateStore, publishProgress } =
+        serviceForSnapshot(snapshot);
+      const queue = (
+        service as unknown as { queueSnapshotFlush: (taskId: string) => void }
+      ).queueSnapshotFlush.bind(service);
+      const flush = (
+        service as unknown as {
+          flushSnapshotForTask: (taskId: string, type: 'task.updated') => void;
+        }
+      ).flushSnapshotForTask.bind(service);
+
+      for (let index = 0; index < 19; index += 1) queue('task-1');
+      expect(stateStore.saveTask).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(249);
+      expect(stateStore.saveTask).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1);
+      expect(stateStore.saveTask).toHaveBeenCalledTimes(1);
+      expect(publishProgress).toHaveBeenLastCalledWith(
+        'segment.batch',
+        expect.objectContaining({ taskId: 'task-1' })
+      );
+
+      stateStore.saveTask.mockClear();
+      publishProgress.mockClear();
+      for (let index = 0; index < 20; index += 1) queue('task-1');
+      expect(stateStore.saveTask).toHaveBeenCalledTimes(1);
+
+      snapshot.episodes['1'].stage = 'partial_failed';
+      flush('task-1', 'task.updated');
+      expect(stateStore.saveTask).toHaveBeenCalledTimes(2);
+      expect(publishProgress).toHaveBeenLastCalledWith(
+        'task.updated',
+        expect.objectContaining({ status: 'failed' })
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('records completion once and only after a validated writer finish', async () => {
+    let finishValidatedWrite!: (bytes: number) => void;
+    const validatedWrite = new Promise<number>((resolve) => {
+      finishValidatedWrite = resolve;
+    });
+    const snapshot = activeSnapshot();
+    const { service } = serviceForSnapshot(snapshot);
+    const episode = snapshot.episodes['1'];
+    const execute = service as unknown as {
+      executeScheduled: (
+        episodeState: typeof episode,
+        item: ReturnType<typeof workItem>,
+        filePath: string,
+        operation: () => Promise<number>
+      ) => Promise<number>;
+      markUnitCompleted: (
+        episodeState: typeof episode,
+        item: ReturnType<typeof workItem>,
+        bytes: number
+      ) => void;
+    };
+    await expect(
+      execute.executeScheduled(
+        episode,
+        workItem(1),
+        '/tmp/invalid-segment.ts',
+        async () => {
+          throw new Error('download length mismatch');
+        }
+      )
+    ).rejects.toThrow(/length mismatch/);
+    expect(episode.completedSegmentIndices).toEqual([]);
+
+    const completion = execute.executeScheduled(
+      episode,
+      workItem(0),
+      '/tmp/validated-segment.ts',
+      () => validatedWrite
+    );
+    await Promise.resolve();
+    expect(episode.completedSegmentIndices).toEqual([]);
+
+    finishValidatedWrite(5);
+    await expect(completion).resolves.toBe(5);
+    expect(episode.completedSegmentIndices).toEqual([0]);
+    expect(episode.completedBytes).toBe(5);
+    execute.markUnitCompleted(episode, workItem(0), 5);
+    expect(episode.completedSegmentIndices).toEqual([0]);
+    expect(episode.completedBytes).toBe(5);
+  });
 });
 
-function recoverySnapshot(generationId: string) {
+function recoverySnapshot(generationId: string): DownloadTaskSnapshot {
   return {
     schemaVersion: 1 as const,
     taskId: 'task-1',
@@ -398,6 +627,48 @@ function recoverySnapshot(generationId: string) {
       },
     },
   };
+}
+
+function activeSnapshot() {
+  const snapshot = recoverySnapshot('generation-a');
+  snapshot.status = 'downloading';
+  snapshot.episodes['1'].stage = 'downloading';
+  snapshot.episodes['1'].completedSegmentIndices = [];
+  snapshot.episodes['1'].failedSegmentIndices = [];
+  snapshot.episodes['1'].completedBytes = 0;
+  return snapshot;
+}
+
+function workItem(index: number) {
+  return {
+    taskId: 'task-1',
+    episode: 1,
+    generationId: 'g',
+    kind: 'segment' as const,
+    index,
+    attempt: 1,
+  };
+}
+
+function serviceForSnapshot(
+  snapshot: ReturnType<typeof activeSnapshot>,
+  overrides: { scheduler?: DownloadScheduler } = {}
+) {
+  const stateStore = {
+    loadRecoverableTasks: () => [snapshot],
+    saveTask: jest.fn(),
+    deleteTaskState: jest.fn(),
+  };
+  const publishProgress = jest.fn();
+  const service = new DownloadService({
+    storageManager: storageMock as never,
+    stateStore,
+    scheduler: overrides.scheduler ?? new DownloadScheduler({ concurrency: 1 }),
+    publishProgress,
+    timer: async () => undefined,
+    random: () => 0,
+  });
+  return { service, stateStore, publishProgress };
 }
 import fs from 'fs';
 import os from 'os';

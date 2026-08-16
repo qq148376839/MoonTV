@@ -119,6 +119,18 @@ describe('download transaction', () => {
     ).toEqual({ valid: [0], invalid: [1, 2, 3], bytes: 5 });
   });
 
+  test('counts a duplicated resumable index only once', () => {
+    const valid = path.join(root, 'valid.ts');
+    fs.writeFileSync(valid, 'valid');
+
+    expect(
+      validateResumeFiles([
+        { index: 0, path: valid, expectedLength: 5 },
+        { index: 0, path: valid, expectedLength: 5 },
+      ])
+    ).toEqual({ valid: [0], invalid: [], bytes: 5 });
+  });
+
   test('remaps by media sequence and excludes already completed segments', () => {
     const original = parseMediaPlaylistResources(
       '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:1,\nold-40.ts?token=old\n#EXTINF:1,\nold-41.ts?token=old',
