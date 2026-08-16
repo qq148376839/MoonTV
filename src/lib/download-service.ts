@@ -17,6 +17,7 @@ import type {
   ParsedMediaPlaylistResources,
   RemappedMediaPlaylistResources,
 } from './download-transaction';
+import { getDownloadEventBus } from './download-event-bus';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
@@ -309,7 +310,7 @@ function defaultDependencies(): DownloadServiceDependencies {
           path.join(process.cwd(), 'data', 'videos')
     ),
     scheduler: sharedScheduler(concurrency),
-    publishProgress: () => undefined,
+    publishProgress: (type, data) => getDownloadEventBus().publish(type, data),
     timer: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     random: Math.random,
@@ -369,6 +370,10 @@ export class DownloadService {
 
   public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
     return this.snapshots.get(taskId) ?? null;
+  }
+
+  public getRecoverableTaskIds(): string[] {
+    return Array.from(this.snapshots.keys());
   }
 
   private async runWithRetry<T>(
