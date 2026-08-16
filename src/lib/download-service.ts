@@ -6,15 +6,19 @@ import fs from 'fs';
 import path from 'path';
 
 import { filterM3U8Ads } from './ad-filter';
+import { getAvailableApiSites } from './config';
 import { calculateEpisodeProgress } from './download-progress';
 import { DownloadScheduler } from './download-scheduler';
 import { DownloadStateStore } from './download-state-store';
+import type { RemappedMediaPlaylistResources } from './download-transaction';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
   createEpisodeGeneration,
+  parseMediaPlaylistResources,
   redactDownloadUrl,
   releaseEpisodeLock,
+  remapMediaPlaylistResources,
   validateLocalPlaylist,
   validateResumeFiles,
 } from './download-transaction';
@@ -24,6 +28,7 @@ import type {
   DownloadWorkItem,
   EpisodeDownloadState,
 } from './download-types';
+import { getDetailFromApi } from './downstream';
 import {
   EpisodeDownloadAuditSummary,
   getStorageManager,
@@ -215,6 +220,69 @@ export interface DownloadServiceDependencies {
   ) => void;
   timer: (milliseconds: number) => Promise<void>;
   random: () => number;
+  reacquireEpisode?: (
+    task: DownloadTaskSnapshot,
+    episode: number
+  ) => Promise<{ playlistUrl: string; content: string }>;
+}
+
+async function defaultReacquireEpisode(
+  task: DownloadTaskSnapshot,
+  episode: number
+): Promise<{ playlistUrl: string; content: string }> {
+  const sites = await getAvailableApiSites();
+  const site = sites.find((candidate) => candidate.key === task.source);
+  if (!site)
+    throw new Error('unable to reacquire playlist: source unavailable');
+  const detail = await getDetailFromApi(site, task.resourceId);
+  let playlistUrl = detail.episodes[episode - 1];
+  if (!playlistUrl)
+    throw new Error('unable to reacquire playlist: episode unavailable');
+  if (!playlistUrl.toLowerCase().includes('m3u8')) {
+    const parsed = await parseToM3u8Url(playlistUrl);
+    if (!parsed) throw new Error('unable to reacquire playlist URL');
+    playlistUrl = parsed;
+  }
+  return fetchCurrentMediaPlaylist(playlistUrl);
+}
+
+async function fetchCurrentMediaPlaylist(
+  playlistUrl: string
+): Promise<{ playlistUrl: string; content: string }> {
+  const response = await fetchWithRetry(playlistUrl, {}, 3, 30000);
+  if (!response.ok) {
+    throw new Error(`playlist refresh failed: ${response.status}`);
+  }
+  const content = await response.text();
+  if (!content.includes('#EXT-X-STREAM-INF')) return { playlistUrl, content };
+
+  const lines = content.split('\n');
+  let selectedUrl = '';
+  let selectedBandwidth = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+    const bandwidth = Number.parseInt(
+      line.match(/BANDWIDTH=(\d+)/)?.[1] ?? '0',
+      10
+    );
+    const candidate = lines[index + 1]?.trim();
+    if (
+      candidate &&
+      !candidate.startsWith('#') &&
+      bandwidth > selectedBandwidth
+    ) {
+      selectedBandwidth = bandwidth;
+      selectedUrl = new URL(candidate, playlistUrl).href;
+    }
+  }
+  if (!selectedUrl)
+    throw new Error('playlist refresh master has no media stream');
+  const mediaResponse = await fetchWithRetry(selectedUrl, {}, 3, 30000);
+  if (!mediaResponse.ok) {
+    throw new Error(`playlist refresh failed: ${mediaResponse.status}`);
+  }
+  return { playlistUrl: selectedUrl, content: await mediaResponse.text() };
 }
 
 function defaultDependencies(): DownloadServiceDependencies {
@@ -239,6 +307,7 @@ function defaultDependencies(): DownloadServiceDependencies {
     timer: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     random: Math.random,
+    reacquireEpisode: defaultReacquireEpisode,
   };
 }
 
@@ -259,6 +328,9 @@ export class DownloadService {
   private readonly publishProgress: DownloadServiceDependencies['publishProgress'];
   private readonly timer: DownloadServiceDependencies['timer'];
   private readonly random: DownloadServiceDependencies['random'];
+  private readonly reacquireEpisode: NonNullable<
+    DownloadServiceDependencies['reacquireEpisode']
+  >;
   private readonly snapshots = new Map<string, DownloadTaskSnapshot>();
   private readonly failedWork = new Map<
     string,
@@ -268,6 +340,10 @@ export class DownloadService {
     string,
     { changes: number; timer: NodeJS.Timeout | null }
   >();
+  private readonly recoveryPlans = new Map<
+    string,
+    RemappedMediaPlaylistResources
+  >();
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
     this.storageManager = deps.storageManager;
@@ -276,6 +352,7 @@ export class DownloadService {
     this.publishProgress = deps.publishProgress;
     this.timer = deps.timer;
     this.random = deps.random;
+    this.reacquireEpisode = deps.reacquireEpisode ?? defaultReacquireEpisode;
     this.maxConcurrent =
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
     for (const snapshot of this.stateStore.loadRecoverableTasks()) {
@@ -287,13 +364,25 @@ export class DownloadService {
     return this.snapshots.get(taskId) ?? null;
   }
 
-  private async runWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+  private async runWithRetry<T>(
+    operation: () => Promise<T>,
+    refresh?: () => Promise<void>
+  ): Promise<T> {
     let lastError: unknown;
+    let refreshed = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         return await operation();
       } catch (error) {
         lastError = error;
+        if (
+          this.classifyFailure(error) === 'http_auth' &&
+          refresh &&
+          !refreshed
+        ) {
+          refreshed = true;
+          await refresh();
+        }
         if (attempt === 3 || !this.isRetryable(error)) {
           if (error instanceof Error) {
             Object.assign(error, { downloadAttempts: attempt });
@@ -359,11 +448,12 @@ export class DownloadService {
     episode: EpisodeDownloadState,
     item: DownloadWorkItem,
     filePath: string,
-    operation: () => Promise<number>
+    operation: () => Promise<number>,
+    refresh?: () => Promise<void>
   ): Promise<number> {
     try {
       const bytes = await this.scheduler.enqueue(item, () =>
-        this.runWithRetry(operation)
+        this.runWithRetry(operation, refresh)
       );
       this.failedWork.delete(this.workKey(item));
       this.markUnitCompleted(episode, item, bytes);
@@ -1182,10 +1272,61 @@ export class DownloadService {
         'utf-8'
       );
 
+      const originalResources = parseMediaPlaylistResources(
+        mediaPlaylistContent,
+        mediaPlaylistUrl
+      );
+      let currentResources = originalResources;
+      let refreshPromise: Promise<void> | null = null;
+      const refreshResources = (): Promise<void> => {
+        if (refreshPromise) return refreshPromise;
+        refreshPromise = (async () => {
+          if (episodeState.refreshCount >= 1) {
+            throw new Error('playlist refresh limit reached');
+          }
+          const snapshot = this.snapshots.get(auditContext.taskId);
+          if (!snapshot) throw new Error('download task snapshot unavailable');
+          const reacquired = await this.reacquireEpisode(
+            snapshot,
+            episodeIndex
+          );
+          const refreshedAdResult = filterM3U8Ads(reacquired.content, {
+            enableDomain: true,
+            enableKeyword: true,
+            enableDiscontinuity: true,
+          });
+          const refreshedContent = refreshedAdResult.content;
+          const refreshedResources = parseMediaPlaylistResources(
+            refreshedContent,
+            reacquired.playlistUrl
+          );
+          episodeState.refreshCount += 1;
+          const remapped = remapMediaPlaylistResources(
+            originalResources,
+            refreshedResources,
+            episodeState.completedSegmentIndices
+          );
+          currentResources = refreshedResources;
+          mediaPlaylistUrl = reacquired.playlistUrl;
+          mediaPlaylistContent = refreshedContent;
+          this.recoveryPlans.set(
+            `${auditContext.taskId}:${episodeIndex}`,
+            remapped
+          );
+          fs.writeFileSync(
+            generation.cleanedPlaylistPath,
+            mediaPlaylistContent,
+            'utf-8'
+          );
+          this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
+        })();
+        return refreshPromise;
+      };
+
       // 解析媒体播放列表内容，提取 TS 片段 URL
       const tsUrls: string[] = [];
       const lines = mediaPlaylistContent.split('\n');
-      const mediaBaseUrl = new URL(mediaPlaylistUrl);
+      let mediaBaseUrl = new URL(mediaPlaylistUrl);
 
       // 先处理 KEY：下载并改写 URI 为本地相对路径（episode_XX/key_000.key）
       const keyUrlToIndex = new Map<string, number>();
@@ -1298,13 +1439,14 @@ export class DownloadService {
                 ),
                 async () => {
                   const result = await downloadKeyByUrl(
-                    keyAbsUrl,
+                    currentResources.keys[scheduledKeyIndex]?.url ?? keyAbsUrl,
                     scheduledKeyIndex
                   );
                   return fs.statSync(
                     path.join(generation.keysDir, result.keyFileName)
                   ).size;
-                }
+                },
+                refreshResources
               );
             }
           }
@@ -1338,9 +1480,13 @@ export class DownloadService {
                 item,
                 mapPath,
                 async () => {
-                  await downloadMapByUrl(mapAbsUrl, scheduledMapIndex);
+                  await downloadMapByUrl(
+                    currentResources.maps[scheduledMapIndex]?.url ?? mapAbsUrl,
+                    scheduledMapIndex
+                  );
                   return fs.statSync(mapPath).size;
-                }
+                },
+                refreshResources
               );
             }
           }
@@ -1444,7 +1590,12 @@ export class DownloadService {
               episodeState,
               workItem,
               segmentFilePath,
-              () => this.downloadFile(tsUrl, segmentFilePath)
+              () =>
+                this.downloadFile(
+                  currentResources.segments[i]?.url ?? tsUrl,
+                  segmentFilePath
+                ),
+              refreshResources
             );
             if (segmentSize <= 0) {
               throw new Error(`下载片段为空: index=${i}`);
@@ -1501,6 +1652,15 @@ export class DownloadService {
       // 更新 M3U8 文件中的路径为相对路径（TS + KEY）
       // 始终保存媒体播放列表的内容（因为实际下载的是媒体播放列表的 TS 片段）
       let updatedM3U8Content = mediaPlaylistContent;
+      mediaBaseUrl = new URL(mediaPlaylistUrl);
+      keyUrlToIndex.clear();
+      currentResources.keys.forEach((key) =>
+        keyUrlToIndex.set(key.url, key.index)
+      );
+      mapUrlToIndex.clear();
+      currentResources.maps.forEach((map) =>
+        mapUrlToIndex.set(map.url, map.index)
+      );
 
       // 改写 KEY URI 为本地相对路径：episode_XX/key_000.key
       if (keyUrlToIndex.size > 0) {
@@ -2029,24 +2189,84 @@ export class DownloadService {
       snapshot.source,
       snapshot.resourceId
     );
-    for (const episode of Object.values(snapshot.episodes)) {
-      const files = episode.completedSegmentIndices.map((index) => ({
-        index,
-        path: path.join(
+    try {
+      for (const episode of Object.values(snapshot.episodes)) {
+        if (episode.stage === 'completed') continue;
+        const files = episode.completedSegmentIndices.map((index) => ({
+          index,
+          path: path.join(
+            resourcePath,
+            `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+            episode.generationId,
+            'segments',
+            `segment_${String(index).padStart(3, '0')}.ts`
+          ),
+        }));
+        const validation = validateResumeFiles(files);
+        episode.completedSegmentIndices = validation.valid;
+        episode.failedSegmentIndices = Array.from(
+          new Set([...episode.failedSegmentIndices, ...validation.invalid])
+        );
+        episode.completedBytes = validation.bytes;
+        const generationRoot = path.join(
           resourcePath,
           `episode_${String(episode.episode).padStart(2, '0')}_generations`,
-          episode.generationId,
-          'segments',
-          `segment_${String(index).padStart(3, '0')}.ts`
-        ),
-      }));
-      const validation = validateResumeFiles(files);
-      episode.completedSegmentIndices = validation.valid;
-      episode.failedSegmentIndices = Array.from(
-        new Set([...episode.failedSegmentIndices, ...validation.invalid])
-      );
-      episode.completedBytes = validation.bytes;
-      episode.stage = 'downloading';
+          episode.generationId
+        );
+        const cleanedPlaylistPath = path.join(
+          generationRoot,
+          'source.cleaned.m3u8'
+        );
+        const originalContent = fs.readFileSync(cleanedPlaylistPath, 'utf-8');
+        const original = parseMediaPlaylistResources(
+          originalContent,
+          'https://resume.invalid/playlist.m3u8'
+        );
+        const reacquired = await this.reacquireEpisode(
+          snapshot,
+          episode.episode
+        );
+        const refreshedAdResult = filterM3U8Ads(reacquired.content, {
+          enableDomain: true,
+          enableKeyword: true,
+          enableDiscontinuity: true,
+        });
+        episode.refreshCount = Math.max(1, episode.refreshCount);
+        const refreshed = parseMediaPlaylistResources(
+          refreshedAdResult.content,
+          reacquired.playlistUrl
+        );
+        const remapped = remapMediaPlaylistResources(
+          original,
+          refreshed,
+          episode.completedSegmentIndices
+        );
+        this.recoveryPlans.set(`${taskId}:${episode.episode}`, remapped);
+        episode.failedSegmentIndices = remapped.pendingSegments.map(
+          (segment) => segment.index
+        );
+        episode.stage = 'downloading';
+      }
+    } catch (error) {
+      snapshot.status = 'failed';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'completed') return;
+        episode.stage = 'partial_failed';
+        episode.oldEntryRetained = true;
+        episode.recoverable = true;
+        episode.failures.push({
+          kind: 'segment',
+          index: -1,
+          category: 'other',
+          attempts: 1,
+          path: '',
+          message: redactDownloadUrl(
+            error instanceof Error ? error.message : String(error)
+          ),
+        });
+      });
+      this.flushSnapshot(snapshot, 'task.updated');
+      return { ok: false, status: snapshot.status };
     }
     snapshot.status = 'downloading';
     this.scheduler.resumeTask(taskId);
