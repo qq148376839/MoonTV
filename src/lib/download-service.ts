@@ -10,7 +10,10 @@ import { getAvailableApiSites } from './config';
 import { calculateEpisodeProgress } from './download-progress';
 import { DownloadScheduler } from './download-scheduler';
 import { DownloadStateStore } from './download-state-store';
-import type { RemappedMediaPlaylistResources } from './download-transaction';
+import type {
+  ParsedMediaPlaylistResources,
+  RemappedMediaPlaylistResources,
+} from './download-transaction';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
@@ -365,14 +368,14 @@ export class DownloadService {
   }
 
   private async runWithRetry<T>(
-    operation: () => Promise<T>,
+    operation: (attempt: number) => Promise<T>,
     refresh?: () => Promise<void>
   ): Promise<T> {
     let lastError: unknown;
     let refreshed = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        return await operation();
+        return await operation(attempt);
       } catch (error) {
         lastError = error;
         if (
@@ -453,7 +456,10 @@ export class DownloadService {
   ): Promise<number> {
     try {
       const bytes = await this.scheduler.enqueue(item, () =>
-        this.runWithRetry(operation, refresh)
+        this.runWithRetry((attempt) => {
+          item.attempt = attempt;
+          return operation();
+        }, refresh)
       );
       this.failedWork.delete(this.workKey(item));
       this.markUnitCompleted(episode, item, bytes);
@@ -1351,7 +1357,7 @@ export class DownloadService {
               Pragma: 'no-cache',
             },
           },
-          3,
+          1,
           30000
         );
         if (!resp.ok) {
@@ -1361,6 +1367,15 @@ export class DownloadService {
         const ab = await resp.arrayBuffer();
         const buf = Buffer.from(ab);
         if (buf.length === 0) throw new Error('下载 KEY 为空');
+        const expectedLength = Number.parseInt(
+          resp.headers.get('content-length') || '0',
+          10
+        );
+        if (expectedLength > 0 && buf.length !== expectedLength) {
+          throw new Error(
+            `下载 KEY 长度不匹配: ${buf.length}/${expectedLength}`
+          );
+        }
         const h = sha256Hex(buf);
 
         // 若已存在但 hash 不同：告警并覆盖（观测优先 + 自愈）
@@ -1388,10 +1403,19 @@ export class DownloadService {
       const downloadMapByUrl = async (mapAbsUrl: string, mapIndex: number) => {
         const mapFileName = `map_${String(mapIndex).padStart(3, '0')}.mp4`;
         const mapFilePath = path.join(generation.mapsDir, mapFileName);
-        const resp = await fetchWithRetry(mapAbsUrl, {}, 3, 30000);
+        const resp = await fetchWithRetry(mapAbsUrl, {}, 1, 30000);
         if (!resp.ok) throw new Error(`下载 MAP 失败: ${resp.status}`);
         const buf = Buffer.from(await resp.arrayBuffer());
         if (buf.length === 0) throw new Error('下载 MAP 为空');
+        const expectedLength = Number.parseInt(
+          resp.headers.get('content-length') || '0',
+          10
+        );
+        if (expectedLength > 0 && buf.length !== expectedLength) {
+          throw new Error(
+            `下载 MAP 长度不匹配: ${buf.length}/${expectedLength}`
+          );
+        }
         fs.writeFileSync(mapFilePath, buf);
       };
 
@@ -1895,7 +1919,7 @@ export class DownloadService {
     progressCallback?: (progress: number) => void
   ): Promise<number> {
     // 使用带重试的 fetch（TS 片段下载使用更长的超时时间）
-    const response = await fetchWithRetry(url, {}, 3, 60000);
+    const response = await fetchWithRetry(url, {}, 1, 60000);
     if (!response.ok) {
       throw new Error(`下载失败: ${response.status}`);
     }
@@ -2173,6 +2197,194 @@ export class DownloadService {
   /**
    * 恢复任务
    */
+  private async downloadRecoveredBinary(
+    url: string,
+    filePath: string,
+    headers: Record<string, string> = {}
+  ): Promise<number> {
+    const response = await fetchWithRetry(url, { headers }, 1, 30000);
+    if (!response.ok) {
+      throw new Error(`下载资源失败: ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0) throw new Error('下载资源为空');
+    const expectedLength = Number.parseInt(
+      response.headers.get('content-length') || '0',
+      10
+    );
+    if (expectedLength > 0 && buffer.length !== expectedLength) {
+      throw new Error(`下载资源长度不匹配: ${buffer.length}/${expectedLength}`);
+    }
+    fs.writeFileSync(filePath, buffer);
+    return buffer.length;
+  }
+
+  private async executeRecoveredEpisode(
+    snapshot: DownloadTaskSnapshot,
+    episode: EpisodeDownloadState,
+    resourcePath: string,
+    refreshedContent: string,
+    playlistUrl: string,
+    refreshed: ParsedMediaPlaylistResources,
+    remapped: RemappedMediaPlaylistResources
+  ): Promise<void> {
+    const episodeNumber = String(episode.episode).padStart(2, '0');
+    const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
+    const generationRoot = path.join(resourcePath, relativePrefix);
+    const segmentsDir = path.join(generationRoot, 'segments');
+    const keysDir = path.join(generationRoot, 'keys');
+    const mapsDir = path.join(generationRoot, 'maps');
+    fs.mkdirSync(segmentsDir, { recursive: true });
+    fs.mkdirSync(keysDir, { recursive: true });
+    fs.mkdirSync(mapsDir, { recursive: true });
+
+    const validExisting = (filePath: string) =>
+      fs.existsSync(filePath) && fs.statSync(filePath).size > 0;
+    episode.keyTotal = refreshed.keys.length;
+    episode.mapTotal = refreshed.maps.length;
+    episode.keyCompleted = refreshed.keys.filter((key) =>
+      validExisting(
+        path.join(keysDir, `key_${String(key.index).padStart(3, '0')}.key`)
+      )
+    ).length;
+    episode.mapCompleted = refreshed.maps.filter((map) =>
+      validExisting(
+        path.join(mapsDir, `map_${String(map.index).padStart(3, '0')}.mp4`)
+      )
+    ).length;
+
+    for (const key of refreshed.keys) {
+      const keyPath = path.join(
+        keysDir,
+        `key_${String(key.index).padStart(3, '0')}.key`
+      );
+      if (validExisting(keyPath)) continue;
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'key',
+          index: key.index,
+          attempt: 1,
+        },
+        keyPath,
+        () =>
+          this.downloadRecoveredBinary(key.url, keyPath, {
+            Referer: playlistUrl,
+          })
+      );
+    }
+    for (const map of refreshed.maps) {
+      const mapPath = path.join(
+        mapsDir,
+        `map_${String(map.index).padStart(3, '0')}.mp4`
+      );
+      if (validExisting(mapPath)) continue;
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'map',
+          index: map.index,
+          attempt: 1,
+        },
+        mapPath,
+        () => this.downloadRecoveredBinary(map.url, mapPath)
+      );
+    }
+    for (const segment of remapped.pendingSegments) {
+      const segmentPath = path.join(
+        segmentsDir,
+        `segment_${String(segment.index).padStart(3, '0')}.ts`
+      );
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'segment',
+          index: segment.index,
+          attempt: 1,
+        },
+        segmentPath,
+        () => this.downloadFile(segment.url, segmentPath)
+      );
+    }
+
+    const baseUrl = new URL(playlistUrl);
+    let segmentIndex = 0;
+    const localPlaylist = refreshedContent
+      .split('\n')
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('#EXT-X-KEY') && !/METHOD=NONE/i.test(trimmed)) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const key = refreshed.keys.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!key) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/keys/key_${String(key.index).padStart(
+              3,
+              '0'
+            )}.key"`
+          );
+        }
+        if (trimmed.startsWith('#EXT-X-MAP')) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const map = refreshed.maps.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!map) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/maps/map_${String(map.index).padStart(
+              3,
+              '0'
+            )}.mp4"`
+          );
+        }
+        if (!trimmed || trimmed.startsWith('#')) return line;
+        const local = `${relativePrefix}/segments/segment_${String(
+          segmentIndex
+        ).padStart(3, '0')}.ts`;
+        segmentIndex += 1;
+        return local;
+      })
+      .join('\n');
+    const playlistPath = path.join(generationRoot, 'playlist.m3u8');
+    fs.writeFileSync(playlistPath, localPlaylist, 'utf-8');
+    validateLocalPlaylist(playlistPath, resourcePath);
+    commitPlaylistAtomically(
+      path.join(resourcePath, `episode_${episodeNumber}.m3u8`),
+      localPlaylist
+    );
+    episode.failedSegmentIndices = [];
+    episode.stage = 'completed';
+    episode.oldEntryRetained = false;
+    episode.recoverable = false;
+  }
+
   public async resumeTask(taskId: string): Promise<CommandResult> {
     const snapshot = this.snapshots.get(taskId);
     if (!snapshot) return { ok: false, status: 'not_found' };
@@ -2189,6 +2401,7 @@ export class DownloadService {
       snapshot.source,
       snapshot.resourceId
     );
+    this.scheduler.resumeTask(taskId);
     try {
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
@@ -2246,6 +2459,15 @@ export class DownloadService {
           (segment) => segment.index
         );
         episode.stage = 'downloading';
+        await this.executeRecoveredEpisode(
+          snapshot,
+          episode,
+          resourcePath,
+          refreshedAdResult.content,
+          reacquired.playlistUrl,
+          refreshed,
+          remapped
+        );
       }
     } catch (error) {
       snapshot.status = 'failed';
@@ -2268,14 +2490,20 @@ export class DownloadService {
       this.flushSnapshot(snapshot, 'task.updated');
       return { ok: false, status: snapshot.status };
     }
-    snapshot.status = 'downloading';
-    this.scheduler.resumeTask(taskId);
+    snapshot.status = Object.values(snapshot.episodes).every(
+      (episode) => episode.stage === 'completed'
+    )
+      ? 'completed'
+      : 'downloading';
     this.flushSnapshot(snapshot, 'task.updated');
     const task = this.tasks.get(taskId);
     if (task) {
-      task.status = this.activeDownloads.has(taskId)
-        ? DownloadStatus.DOWNLOADING
-        : DownloadStatus.PENDING;
+      task.status =
+        snapshot.status === 'completed'
+          ? DownloadStatus.COMPLETED
+          : this.activeDownloads.has(taskId)
+          ? DownloadStatus.DOWNLOADING
+          : DownloadStatus.PENDING;
       this.updateTask(task);
       this.processQueue();
     }

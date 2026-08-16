@@ -26,23 +26,24 @@ const resource = {
 };
 
 describe('DownloadService force redownload', () => {
-  const responseFor = (body: string, contentLength: number) => ({
-    ok: true,
-    status: 200,
-    headers: { get: () => String(contentLength) },
-    body: {
-      getReader: () => {
-        let sent = false;
-        return {
-          read: async () => {
-            if (sent) return { done: true, value: undefined };
-            sent = true;
-            return { done: false, value: Buffer.from(body) };
-          },
-        };
+  const responseFor = (body: string, contentLength: number) =>
+    ({
+      ok: true,
+      status: 200,
+      headers: { get: () => String(contentLength) },
+      body: {
+        getReader: () => {
+          let sent = false;
+          return {
+            read: async () => {
+              if (sent) return { done: true, value: undefined };
+              sent = true;
+              return { done: false, value: Buffer.from(body) };
+            },
+          };
+        },
       },
-    },
-  });
+    } as unknown as Response);
 
   afterEach(() => {
     jest.restoreAllMocks();
@@ -243,6 +244,78 @@ describe('DownloadService force redownload', () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
+  test('scheduled segment network failures make at most three total requests', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-attempts-'));
+    const snapshot = activeSnapshot();
+    const { service } = serviceForSnapshot(snapshot);
+    const fetchSpy = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('network timeout'), { name: 'AbortError' })
+      );
+    global.fetch = fetchSpy;
+    const segmentPath = path.join(root, 'segment.ts');
+    const executable = service as unknown as {
+      executeScheduled: (
+        episode: DownloadTaskSnapshot['episodes'][string],
+        item: ReturnType<typeof workItem>,
+        filePath: string,
+        operation: () => Promise<number>
+      ) => Promise<number>;
+      downloadFile: (url: string, filePath: string) => Promise<number>;
+    };
+
+    await expect(
+      executable.executeScheduled(
+        snapshot.episodes['1'],
+        workItem(0),
+        segmentPath,
+        () =>
+          executable.downloadFile(
+            'https://media.example/segment.ts',
+            segmentPath
+          )
+      )
+    ).rejects.toThrow(/timeout/);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(snapshot.episodes['1'].failures).toEqual([
+      expect.objectContaining({ kind: 'segment', index: 0, attempts: 3 }),
+    ]);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('scheduled KEY network failures make at most three total requests', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-key-attempts-'));
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const playlist =
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:1,\nsegment.ts';
+    let keyRequests = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('list.m3u8')) return playlistResponse(playlist);
+      if (url.endsWith('key.bin')) {
+        keyRequests += 1;
+        throw Object.assign(new Error('network timeout'), {
+          name: 'AbortError',
+        });
+      }
+      return responseFor('segment', 7);
+    });
+    const service = serviceForSnapshot(activeSnapshot()).service;
+
+    await expect(invokeDownloadM3U8(service, 'task-1', root)).rejects.toThrow(
+      /timeout/
+    );
+    expect(keyRequests).toBe(3);
+    expect(service.getSnapshot('task-1')?.episodes['1'].failures).toEqual([
+      expect.objectContaining({ kind: 'key', index: 0, attempts: 3 }),
+    ]);
+    expect(fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')).toBe(
+      'old-entry'
+    );
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('recovery reacquires and remaps current URLs without redownloading valid files', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-recovery-'));
     const generation = path.join(
@@ -264,6 +337,7 @@ describe('DownloadService force redownload', () => {
       content:
         '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nfresh-10.ts?token=fresh\n#EXTINF:1,\nfresh-11.ts?token=fresh',
     });
+    global.fetch = jest.fn().mockResolvedValue(responseFor('new', 3));
     const service = new DownloadService({
       storageManager: {
         ...storageMock,
@@ -283,14 +357,14 @@ describe('DownloadService force redownload', () => {
 
     await expect(service.resumeTask('task-1')).resolves.toMatchObject({
       ok: true,
-      status: 'downloading',
+      status: 'completed',
     });
     expect(reacquireEpisode).toHaveBeenCalledTimes(1);
     expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
-      completedSegmentIndices: [0],
-      failedSegmentIndices: [1],
+      completedSegmentIndices: [0, 1],
+      failedSegmentIndices: [],
       refreshCount: 1,
-      oldEntryRetained: true,
+      oldEntryRetained: false,
     });
     const recoveryPlans = (
       service as unknown as {
@@ -300,9 +374,118 @@ describe('DownloadService force redownload', () => {
     expect(recoveryPlans.get('task-1:1')?.pendingSegments).toEqual([
       expect.objectContaining({ index: 1, sequence: 11 }),
     ]);
-    expect(fs.readFileSync(active, 'utf8')).toContain('old-entry.ts');
+    expect(fs.readFileSync(active, 'utf8')).toContain(
+      'generation-a/segments/segment_001.ts'
+    );
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  test('recovered snapshots execute missing work and advance the episode to completed', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-recovery-run-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI="old.key"\n#EXT-X-MAP:URI="old.mp4"\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const snapshot = recoverySnapshot('generation-a');
+    const fetchSpy = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('fresh.key')) return bufferResponse('key!', 4);
+      if (url.endsWith('fresh.mp4')) return bufferResponse('map!', 4);
+      return responseFor('fresh', 5);
+    });
+    global.fetch = fetchSpy;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode: jest.fn().mockResolvedValue({
+        playlistUrl: 'https://fresh.example/list.m3u8',
+        content:
+          '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI="fresh.key"\n#EXT-X-MAP:URI="fresh.mp4"\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts',
+      }),
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
+    ).toEqual(Buffer.from('ok'));
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_001.ts'))
+    ).toEqual(Buffer.from('fresh'));
+    expect(
+      fs.readFileSync(path.join(generation, 'keys', 'key_000.key'))
+    ).toEqual(Buffer.from('key!'));
+    expect(
+      fs.readFileSync(path.join(generation, 'maps', 'map_000.mp4'))
+    ).toEqual(Buffer.from('map!'));
+    expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+      stage: 'completed',
+      completedSegmentIndices: [0, 1],
+      failedSegmentIndices: [],
+      oldEntryRetained: false,
+      recoverable: false,
+    });
+    expect(
+      fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')
+    ).toContain('generation-a/segments/segment_001.ts');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test.each([
+    {
+      kind: 'KEY',
+      tag: '#EXT-X-KEY:METHOD=AES-128,URI="resource.bin"',
+    },
+    { kind: 'MAP', tag: '#EXT-X-MAP:URI="resource.bin"' },
+  ])(
+    '$kind Content-Length mismatch fails without completion and preserves the old entry',
+    async ({ kind, tag }) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-length-'));
+      const active = path.join(root, 'episode_01.m3u8');
+      fs.writeFileSync(active, 'old-entry');
+      const playlist = `#EXTM3U\n${tag}\n#EXTINF:1,\nsegment.ts`;
+      global.fetch = jest.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith('list.m3u8')) return playlistResponse(playlist);
+        if (url.endsWith('resource.bin')) return bufferResponse('bad', 4);
+        return responseFor('segment', 7);
+      });
+      const service = serviceForSnapshot(activeSnapshot()).service;
+
+      await expect(invokeDownloadM3U8(service, 'task-1', root)).rejects.toThrow(
+        /长度不匹配|length mismatch/
+      );
+      expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+        stage: 'partial_failed',
+        oldEntryRetained: true,
+        ...(kind === 'KEY' ? { keyCompleted: 0 } : { mapCompleted: 0 }),
+      });
+      expect(fs.readFileSync(active, 'utf8')).toBe('old-entry');
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  );
 
   test('recovery structure mismatch becomes partial_failed and preserves the old entry', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-mismatch-'));
@@ -669,6 +852,49 @@ function serviceForSnapshot(
     random: () => 0,
   });
   return { service, stateStore, publishProgress };
+}
+
+function playlistResponse(content: string) {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => content,
+  } as Response;
+}
+
+function bufferResponse(content: string, contentLength: number) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => String(contentLength) },
+    arrayBuffer: async () => Buffer.from(content),
+  } as unknown as Response;
+}
+
+function invokeDownloadM3U8(
+  service: DownloadService,
+  taskId: string,
+  root: string
+) {
+  return (
+    service as unknown as {
+      downloadM3U8: (
+        url: string,
+        root: string,
+        episode: number,
+        progress: undefined,
+        audit: {
+          taskId: string;
+          sourceUrl: string;
+          addressMethod: 'direct';
+        }
+      ) => Promise<unknown>;
+    }
+  ).downloadM3U8('https://media.example/list.m3u8', root, 1, undefined, {
+    taskId,
+    sourceUrl: 'https://media.example/list.m3u8',
+    addressMethod: 'direct',
+  });
 }
 import fs from 'fs';
 import os from 'os';
