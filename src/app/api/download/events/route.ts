@@ -40,6 +40,7 @@ export function createDownloadEventResponse(
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let unsubscribe: () => void = () => undefined;
   let closed = false;
+  let cleanup: () => void = () => undefined;
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -48,38 +49,57 @@ export function createDownloadEventResponse(
         closed = true;
         unsubscribe();
         if (heartbeat) clearInterval(heartbeat);
+        request.signal.removeEventListener('abort', close);
         try {
           controller.close();
         } catch {
           // The consumer may already have closed the stream.
         }
       };
+      cleanup = close;
+      const enqueue = (chunk: Uint8Array): boolean => {
+        if (closed) return false;
+        if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+          close();
+          return false;
+        }
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          close();
+          return false;
+        }
+      };
       request.signal.addEventListener('abort', close, { once: true });
 
       const replay = lastEventId === null ? [] : bus.since(Number(lastEventId));
       if (lastEventId === null || replay === null) {
-        controller.enqueue(
-          encoder.encode(
-            `event: snapshot.required\ndata: ${JSON.stringify({
-              reason: lastEventId === null ? 'initial' : 'replay_unavailable',
-              revision: bus.latestId(),
-            })}\n\n`
+        if (
+          !enqueue(
+            encoder.encode(
+              `event: snapshot.required\ndata: ${JSON.stringify({
+                reason: lastEventId === null ? 'initial' : 'replay_unavailable',
+                revision: bus.latestId(),
+              })}\n\n`
+            )
           )
-        );
+        )
+          return;
       } else {
-        replay.forEach((event) => controller.enqueue(encodeEvent(event)));
+        for (const event of replay) {
+          if (!enqueue(encodeEvent(event))) return;
+        }
       }
       unsubscribe = bus.subscribe((event) => {
-        if (!closed) controller.enqueue(encodeEvent(event));
+        enqueue(encodeEvent(event));
       });
       heartbeat = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        enqueue(encoder.encode(': heartbeat\n\n'));
       }, 15_000);
     },
     cancel() {
-      closed = true;
-      unsubscribe();
-      if (heartbeat) clearInterval(heartbeat);
+      cleanup();
     },
   });
 

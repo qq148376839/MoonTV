@@ -33,6 +33,10 @@ function publicPath(value: string): string {
   return value.split(/[\\/]/).filter(Boolean).pop() ?? '';
 }
 
+export function redactPublicText(value: string): string {
+  return redactUrlsInText(value);
+}
+
 export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
   const episodes = Object.values(snapshot.episodes);
   const current =
@@ -114,7 +118,7 @@ export function detailDownloadTask(
       failures: episode.failures.map((failure) => ({
         ...failure,
         path: publicPath(failure.path),
-        message: redactUrlsInText(failure.message),
+        message: redactPublicText(failure.message),
       })),
       completed_bytes: episode.completedBytes,
       estimated_bytes: episode.estimatedBytes,

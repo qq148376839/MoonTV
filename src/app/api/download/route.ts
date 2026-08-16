@@ -12,7 +12,7 @@ import { getStorageManager } from '@/lib/local-storage';
 import { PathUtils } from '@/lib/path-utils';
 import { SearchResult } from '@/lib/types';
 
-import { summarizeDownloadTask } from './public-view';
+import { redactPublicText, summarizeDownloadTask } from './public-view';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
 
@@ -405,7 +405,7 @@ export async function GET(request: NextRequest) {
           task_id: task.id,
           status: task.status,
           progress: task.progress,
-          error: task.error,
+          error: task.error ? redactPublicText(task.error) : undefined,
           created_at: task.createdAt,
           updated_at: task.updatedAt,
         },
@@ -432,7 +432,7 @@ export async function GET(request: NextRequest) {
             : undefined,
           status: task.status,
           progress: task.progress,
-          error: task.error,
+          error: task.error ? redactPublicText(task.error) : undefined,
           created_at: task.createdAt,
           updated_at: task.updatedAt,
         };

@@ -141,6 +141,7 @@ describe('download routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     service.getSnapshot.mockReturnValue(snapshot());
+    service.getTask.mockReturnValue(null);
     service.getAllTasks.mockReturnValue([]);
     service.getRecoverableTaskIds.mockReturnValue(['task-1']);
   });
@@ -263,6 +264,8 @@ describe('download routes', () => {
         episodeNumbers: [1],
         status: 'downloading',
         progress: 10,
+        error:
+          'failed https://cdn.invalid/segment.ts?token=list-secret#private',
         createdAt: 1,
         updatedAt: 2,
       },
@@ -273,7 +276,28 @@ describe('download routes', () => {
     const serialized = JSON.stringify(await response.json());
     expect(serialized).toContain('https://images.invalid/poster.jpg');
     expect(serialized).not.toContain('legacy-secret');
+    expect(serialized).not.toContain('list-secret');
     expect(serialized).not.toContain('#private');
+  });
+
+  test('redacts legacy error URL on the single-task summary path', async () => {
+    service.getSnapshot.mockReturnValue(null);
+    service.getTask.mockReturnValue({
+      id: 'legacy-1',
+      status: 'failed',
+      progress: 10,
+      error:
+        'failed https://cdn.invalid/segment.ts?token=single-secret#fragment',
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const response = await GET_DOWNLOADS(
+      request('http://localhost/api/download?task_id=legacy-1')
+    );
+    const serialized = JSON.stringify(await response.json());
+    expect(serialized).toContain('https://cdn.invalid/segment.ts');
+    expect(serialized).not.toContain('single-secret');
+    expect(serialized).not.toContain('#fragment');
   });
 
   test('SSE requests an initial snapshot, replays in order, and redacts data', async () => {
@@ -324,5 +348,55 @@ describe('download routes', () => {
     expect(text).not.toContain('token=secret');
     expect(replay.headers.get('x-accel-buffering')).toBe('no');
     replayStream._underlyingSource.cancel();
+  });
+
+  test('SSE closes and cleans up a saturated slow consumer', () => {
+    jest.useFakeTimers();
+    try {
+      const bus = new DownloadEventBus(10);
+      const response = createDownloadEventResponse(
+        request('http://localhost/api/download/events'),
+        bus
+      );
+      const stream = response.body as unknown as {
+        _underlyingSource: {
+          start(controller: {
+            desiredSize: number;
+            enqueue(value: Uint8Array): void;
+            close(): void;
+          }): void;
+          cancel(): void;
+        };
+      };
+      const chunks: Uint8Array[] = [];
+      const close = jest.fn();
+      let desiredSize = 1;
+      stream._underlyingSource.start({
+        get desiredSize() {
+          return desiredSize;
+        },
+        enqueue(value) {
+          chunks.push(value);
+          desiredSize = 0;
+        },
+        close,
+      });
+      expect(chunks).toHaveLength(1);
+
+      bus.publish('task.updated', { taskId: 'task-1' });
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(chunks).toHaveLength(1);
+
+      desiredSize = 1;
+      bus.publish('task.updated', { taskId: 'task-2' });
+      jest.advanceTimersByTime(30_000);
+      expect(chunks).toHaveLength(1);
+      expect(close).toHaveBeenCalledTimes(1);
+
+      stream._underlyingSource.cancel();
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
