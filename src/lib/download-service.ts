@@ -370,17 +370,40 @@ export class DownloadService {
     this.reacquireEpisode = deps.reacquireEpisode ?? defaultReacquireEpisode;
     this.maxConcurrent =
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
-    this.cleanupHistoryOncePerDay();
     for (const snapshot of this.stateStore.loadRecoverableTasks()) {
       this.snapshots.set(snapshot.taskId, snapshot);
     }
+    this.cleanupHistoryOncePerDay();
   }
 
   private cleanupHistoryOncePerDay(now = Date.now()): void {
     const day = Math.floor(now / (24 * 60 * 60 * 1000));
     if (this.lastCleanupDay === day) return;
-    this.stateStore.cleanupHistory?.(now);
+    const result = this.stateStore.cleanupHistory?.(now);
+    result?.removed.forEach((taskId) => this.evictCleanedTask(taskId));
     this.lastCleanupDay = day;
+  }
+
+  private evictCleanedTask(taskId: string): void {
+    const pending = this.pendingFlushes.get(taskId);
+    if (pending?.timer) clearTimeout(pending.timer);
+    this.pendingFlushes.delete(taskId);
+
+    this.bumpTaskLifecycle(taskId);
+    this.scheduler.pauseTask(taskId);
+    this.scheduler.cancelQueued(taskId);
+    this.scheduler.setPriority(taskId, 'normal');
+
+    this.snapshots.delete(taskId);
+    this.tasks.delete(taskId);
+    this.activeDownloads.delete(taskId);
+    for (const [key, failed] of this.failedWork) {
+      if (failed.item.taskId === taskId) this.failedWork.delete(key);
+    }
+    for (const key of this.recoveryPlans.keys()) {
+      if (key.startsWith(`${taskId}:`)) this.recoveryPlans.delete(key);
+    }
+    this.taskLifecycleVersions.delete(taskId);
   }
 
   public getSnapshot(taskId: string): DownloadTaskSnapshot | null {

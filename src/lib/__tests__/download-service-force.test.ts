@@ -50,6 +50,7 @@ describe('DownloadService force redownload', () => {
     } as unknown as Response);
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
     delete (global as { fetch?: unknown }).fetch;
   });
@@ -129,6 +130,100 @@ describe('DownloadService force redownload', () => {
     jest.spyOn(Date, 'now').mockReturnValue(now + 24 * 60 * 60 * 1000);
     service.getAllTasks();
     expect(cleanupHistory).toHaveBeenCalledTimes(2);
+  });
+
+  test('daily cleanup evicts removed snapshots and prevents pending work from recreating state', () => {
+    jest.useFakeTimers();
+    const now = 1_800_000_000_000;
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const removed = {
+      schemaVersion: 1 as const,
+      taskId: 'expired',
+      source: 'source-a',
+      resourceId: 'movie-1',
+      title: 'Expired',
+      year: '2026',
+      episodeNumbers: [],
+      status: 'completed' as const,
+      priority: 'normal' as const,
+      currentEpisode: null,
+      progress: 100,
+      progressEstimated: false,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      completedBytes: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      episodes: {},
+    };
+    const retained = { ...removed, taskId: 'retained', title: 'Retained' };
+    const saveTask = jest.fn();
+    const cleanupHistory = jest
+      .fn()
+      .mockReturnValueOnce({ removed: [] })
+      .mockReturnValueOnce({ removed: ['expired'] });
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [],
+        saveTask,
+        deleteTaskState: jest.fn(),
+        cleanupHistory,
+      },
+      scheduler,
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    const runtime = service as unknown as {
+      activeDownloads: Set<string>;
+      failedWork: Map<string, { item: { taskId: string } }>;
+      queueSnapshotFlush(taskId: string): void;
+      recoveryPlans: Map<string, unknown>;
+      snapshots: Map<string, DownloadTaskSnapshot>;
+      tasks: Map<string, unknown>;
+    };
+    runtime.snapshots.set('expired', removed);
+    runtime.snapshots.set('retained', retained);
+
+    expect(service.getRecoverableTaskIds()).toEqual(['expired', 'retained']);
+    expect(service.prioritizeTask('expired').ok).toBe(true);
+    saveTask.mockClear();
+    runtime.tasks.set('expired', {
+      id: 'expired',
+      status: DownloadStatus.COMPLETED,
+    });
+    runtime.activeDownloads.add('expired');
+    runtime.failedWork.set('expired:work', {
+      item: { taskId: 'expired' },
+    });
+    runtime.recoveryPlans.set('expired:1', {});
+    runtime.queueSnapshotFlush('expired');
+
+    jest.spyOn(Date, 'now').mockReturnValue(now + 24 * 60 * 60 * 1000);
+    service.getAllTasks();
+
+    expect(service.getSnapshot('expired')).toBeNull();
+    expect(service.getRecoverableTaskIds()).toEqual(['retained']);
+    expect(service.getSnapshot('retained')).not.toBeNull();
+    expect(service.getAllTasks()).toEqual([]);
+    expect(runtime.activeDownloads).not.toContain('expired');
+    expect(runtime.failedWork.has('expired:work')).toBe(false);
+    expect(runtime.recoveryPlans.has('expired:1')).toBe(false);
+    expect(service.prioritizeTask('expired')).toEqual({
+      ok: false,
+      status: 'not_found',
+    });
+    expect(
+      (scheduler as unknown as { highPriorityTasks: Set<string> })
+        .highPriorityTasks
+    ).not.toContain('expired');
+
+    jest.advanceTimersByTime(250);
+    expect(saveTask).not.toHaveBeenCalled();
+    jest.useRealTimers();
   });
 
   test('keeps normal skip behavior but queues a forced task', () => {
