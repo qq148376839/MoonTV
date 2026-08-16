@@ -11,6 +11,7 @@ jest.mock('p-limit', () => ({
   default: () => (operation: () => unknown) => operation(),
 }));
 
+import { DownloadScheduler } from '../download-scheduler';
 import { DownloadService, DownloadStatus } from '../download-service';
 
 const resource = {
@@ -91,6 +92,26 @@ describe('DownloadService force redownload', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
   });
 
+  test('does not complete an empty response when length is unknown', async () => {
+    jest.spyOn(fs, 'createWriteStream').mockReturnValue(
+      new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      }) as fs.WriteStream
+    );
+    global.fetch = jest.fn().mockResolvedValue(responseFor('', 0));
+    const service = new DownloadService();
+
+    await expect(
+      (
+        service as unknown as {
+          downloadFile: (url: string, file: string) => Promise<number>;
+        }
+      ).downloadFile('https://media.example/empty.ts', '/tmp/unused-empty')
+    ).rejects.toThrow(/empty|为空/);
+  });
+
   test('keeps the old direct file when the replacement is incomplete', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-direct-'));
     const active = path.join(root, 'episode_01.mp4');
@@ -112,6 +133,81 @@ describe('DownloadService force redownload', () => {
     expect(fs.readFileSync(active, 'utf-8')).toBe('old-version');
     expect(fs.readdirSync(root)).toEqual(['episode_01.mp4']);
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('restores persisted work as recovery_wait without fetching', () => {
+    const fetchSpy = jest.fn();
+    global.fetch = fetchSpy;
+    const snapshot = {
+      schemaVersion: 1 as const,
+      taskId: 'task-1',
+      source: 'source-a',
+      resourceId: 'movie-1',
+      title: 'movie',
+      year: '2026',
+      episodeNumbers: [1],
+      status: 'recovery_wait' as const,
+      priority: 'normal' as const,
+      currentEpisode: 1,
+      progress: 10,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      completedBytes: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      episodes: {},
+    };
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    expect(service.getSnapshot('task-1')?.status).toBe('recovery_wait');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('retries an item at most three times with exponential jittered delays', async () => {
+    const delays: number[] = [];
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      random: () => 0.4,
+    });
+    const operation = jest
+      .fn<Promise<number>, []>()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('timeout'), { name: 'AbortError' })
+      )
+      .mockRejectedValueOnce(new Error('socket reset'))
+      .mockResolvedValue(7);
+
+    await expect(
+      (
+        service as unknown as {
+          runWithRetry: (operation: () => Promise<number>) => Promise<number>;
+        }
+      ).runWithRetry(operation)
+    ).resolves.toBe(7);
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([600, 1100]);
   });
 });
 import fs from 'fs';

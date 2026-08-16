@@ -10,6 +10,7 @@ import {
   redactUrlsInText,
   releaseEpisodeLock,
   validateLocalPlaylist,
+  validateResumeFiles,
 } from '../download-transaction';
 
 describe('download transaction', () => {
@@ -96,5 +97,23 @@ describe('download transaction', () => {
     expect(() =>
       acquireEpisodeLock(root, 1, { taskId: 'third' })
     ).not.toThrow();
+  });
+
+  test('validates resumable files by existence, nonempty size, and expected length', () => {
+    const valid = path.join(root, 'valid.ts');
+    const empty = path.join(root, 'empty.ts');
+    const wrong = path.join(root, 'wrong.ts');
+    fs.writeFileSync(valid, 'valid');
+    fs.writeFileSync(empty, '');
+    fs.writeFileSync(wrong, 'short');
+
+    expect(
+      validateResumeFiles([
+        { index: 0, path: valid, expectedLength: 5 },
+        { index: 1, path: empty, expectedLength: null },
+        { index: 2, path: wrong, expectedLength: 8 },
+        { index: 3, path: path.join(root, 'missing.ts') },
+      ])
+    ).toEqual({ valid: [0], invalid: [1, 2, 3], bytes: 5 });
   });
 });

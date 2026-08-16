@@ -3,11 +3,12 @@
 
 import { createHash } from 'crypto';
 import fs from 'fs';
-// @ts-expect-error - p-limit is ESM but works in Next.js Node.js runtime
-import pLimit from 'p-limit';
 import path from 'path';
 
 import { filterM3U8Ads } from './ad-filter';
+import { calculateEpisodeProgress } from './download-progress';
+import { DownloadScheduler } from './download-scheduler';
+import { DownloadStateStore } from './download-state-store';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
@@ -15,7 +16,14 @@ import {
   redactDownloadUrl,
   releaseEpisodeLock,
   validateLocalPlaylist,
+  validateResumeFiles,
 } from './download-transaction';
+import type {
+  DownloadFailure,
+  DownloadTaskSnapshot,
+  DownloadWorkItem,
+  EpisodeDownloadState,
+} from './download-types';
 import {
   EpisodeDownloadAuditSummary,
   getStorageManager,
@@ -186,30 +194,211 @@ export type ProgressCallback = (
   total: number
 ) => void;
 
+interface DownloadStateStoreLike {
+  loadRecoverableTasks(): DownloadTaskSnapshot[];
+  saveTask(snapshot: DownloadTaskSnapshot): void;
+  deleteTaskState(taskId: string): void;
+}
+
+export interface CommandResult {
+  ok: boolean;
+  status: DownloadTaskSnapshot['status'] | 'not_found' | 'conflict';
+}
+
+export interface DownloadServiceDependencies {
+  storageManager: StorageManager;
+  stateStore: DownloadStateStoreLike;
+  scheduler: DownloadScheduler;
+  publishProgress: (
+    type: 'task.updated' | 'episode.updated' | 'segment.batch',
+    data: unknown
+  ) => void;
+  timer: (milliseconds: number) => Promise<void>;
+  random: () => number;
+}
+
+function defaultDependencies(): DownloadServiceDependencies {
+  const storageManager = getStorageManager();
+  const rawConcurrency = Number.parseInt(
+    process.env.LOCAL_STORAGE_DOWNLOAD_CONCURRENCY || '8',
+    10
+  );
+  const concurrency = Number.isFinite(rawConcurrency)
+    ? Math.max(2, Math.min(16, rawConcurrency))
+    : 8;
+  return {
+    storageManager,
+    stateStore: new DownloadStateStore(
+      typeof storageManager.getStoragePath === 'function'
+        ? storageManager.getStoragePath()
+        : process.env.LOCAL_STORAGE_PATH ||
+          path.join(process.cwd(), 'data', 'videos')
+    ),
+    scheduler: sharedScheduler(concurrency),
+    publishProgress: () => undefined,
+    timer: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    random: Math.random,
+  };
+}
+
+let globalScheduler: DownloadScheduler | null = null;
+function sharedScheduler(concurrency: number): DownloadScheduler {
+  globalScheduler ??= new DownloadScheduler({ concurrency });
+  return globalScheduler;
+}
+
 // 下载服务类
 export class DownloadService {
   private storageManager: StorageManager;
   private tasks: Map<string, DownloadTask> = new Map();
   private maxConcurrent: number;
   private activeDownloads: Set<string> = new Set();
-  private tsConcurrent: number;
-  private tsLimit: ReturnType<typeof pLimit>;
+  private readonly stateStore: DownloadStateStoreLike;
+  private readonly scheduler: DownloadScheduler;
+  private readonly publishProgress: DownloadServiceDependencies['publishProgress'];
+  private readonly timer: DownloadServiceDependencies['timer'];
+  private readonly random: DownloadServiceDependencies['random'];
+  private readonly snapshots = new Map<string, DownloadTaskSnapshot>();
+  private readonly failedWork = new Map<
+    string,
+    { item: DownloadWorkItem; operation: () => Promise<number>; path: string }
+  >();
+  private readonly pendingFlushes = new Map<
+    string,
+    { changes: number; timer: NodeJS.Timeout | null }
+  >();
 
-  constructor() {
-    this.storageManager = getStorageManager();
+  constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
+    this.storageManager = deps.storageManager;
+    this.stateStore = deps.stateStore;
+    this.scheduler = deps.scheduler;
+    this.publishProgress = deps.publishProgress;
+    this.timer = deps.timer;
+    this.random = deps.random;
     this.maxConcurrent =
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
+    for (const snapshot of this.stateStore.loadRecoverableTasks()) {
+      this.snapshots.set(snapshot.taskId, snapshot);
+    }
+  }
 
-    // TS 片段并发数配置
-    this.tsConcurrent =
-      parseInt(process.env.LOCAL_STORAGE_TS_CONCURRENT || '5', 10) || 5;
+  public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
+    return this.snapshots.get(taskId) ?? null;
+  }
 
-    // 创建 p-limit 实例用于控制 TS 片段并发下载
-    this.tsLimit = pLimit(this.tsConcurrent);
+  private async runWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (attempt === 3 || !this.isRetryable(error)) {
+          if (error instanceof Error) {
+            Object.assign(error, { downloadAttempts: attempt });
+          }
+          throw error;
+        }
+        await this.timer(500 * 2 ** (attempt - 1) + this.random() * 250);
+      }
+    }
+    throw lastError;
+  }
 
-    console.log(
-      `[DownloadService] 初始化完成 - 任务并发: ${this.maxConcurrent}, TS片段并发: ${this.tsConcurrent}`
-    );
+  private isRetryable(error: unknown): boolean {
+    const category = this.classifyFailure(error);
+    return [
+      'timeout',
+      'http_auth',
+      'http_server',
+      'io',
+      'empty',
+      'length',
+    ].includes(category);
+  }
+
+  private classifyFailure(error: unknown): DownloadFailure['category'] {
+    const candidate = error as {
+      name?: string;
+      status?: number;
+      code?: string;
+      message?: string;
+    };
+    if (
+      candidate.name === 'AbortError' ||
+      /timed?\s*out/i.test(candidate.message || '')
+    )
+      return 'timeout';
+    if (
+      candidate.status === 401 ||
+      candidate.status === 403 ||
+      /\b(401|403)\b/.test(candidate.message || '')
+    )
+      return 'http_auth';
+    if (
+      (candidate.status ?? 0) >= 500 ||
+      /\b5\d\d\b/.test(candidate.message || '')
+    )
+      return 'http_server';
+    if (/empty|\u4e3a\u7a7a/.test(candidate.message || '')) return 'empty';
+    if (/length|\u957f\u5ea6/.test(candidate.message || '')) return 'length';
+    if (
+      candidate.code ||
+      /socket|stream|write|read|E[A-Z]+/.test(candidate.message || '')
+    )
+      return 'io';
+    return 'other';
+  }
+
+  private workKey(item: DownloadWorkItem): string {
+    return `${item.taskId}:${item.episode}:${item.generationId}:${item.kind}:${item.index}`;
+  }
+
+  private async executeScheduled(
+    episode: EpisodeDownloadState,
+    item: DownloadWorkItem,
+    filePath: string,
+    operation: () => Promise<number>
+  ): Promise<number> {
+    try {
+      const bytes = await this.scheduler.enqueue(item, () =>
+        this.runWithRetry(operation)
+      );
+      this.failedWork.delete(this.workKey(item));
+      this.markUnitCompleted(episode, item, bytes);
+      this.queueSnapshotFlush(item.taskId);
+      return bytes;
+    } catch (error) {
+      const category = this.classifyFailure(error);
+      const failure: DownloadFailure = {
+        kind: item.kind,
+        index: item.index,
+        category,
+        attempts:
+          (error as { downloadAttempts?: number }).downloadAttempts ?? 1,
+        path: path.relative(process.cwd(), filePath),
+        message: redactDownloadUrl(
+          error instanceof Error ? error.message : String(error)
+        ),
+      };
+      episode.failures = episode.failures.filter(
+        (current) => current.kind !== item.kind || current.index !== item.index
+      );
+      episode.failures.push(failure);
+      if (
+        item.kind === 'segment' &&
+        !episode.failedSegmentIndices.includes(item.index)
+      ) {
+        episode.failedSegmentIndices.push(item.index);
+      }
+      this.failedWork.set(this.workKey(item), {
+        item,
+        operation,
+        path: filePath,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -381,6 +570,30 @@ export class DownloadService {
     };
 
     this.tasks.set(taskId, task);
+    const now = Date.now();
+    const snapshot: DownloadTaskSnapshot = {
+      schemaVersion: 1,
+      taskId,
+      source: task.source,
+      resourceId: task.resourceId,
+      title: task.resource.title,
+      year: task.resource.year,
+      poster: task.resource.poster,
+      episodeNumbers: numbersToDownload,
+      status: 'pending',
+      priority: 'normal',
+      currentEpisode: numbersToDownload[0] ?? null,
+      progress: 0,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      completedBytes: 0,
+      createdAt: now,
+      updatedAt: now,
+      episodes: {},
+    };
+    this.snapshots.set(taskId, snapshot);
+    this.flushSnapshot(snapshot, 'task.updated');
     this.processQueue();
 
     return task;
@@ -543,6 +756,7 @@ export class DownloadService {
               localPath,
               episodeIndex,
               {
+                taskId: task.id,
                 preferParse:
                   task.resource?.source_type === 'official' ||
                   task.resource?.source === 'official',
@@ -744,6 +958,7 @@ export class DownloadService {
     localPath: string,
     episodeIndex: number,
     opts?: {
+      taskId?: string;
       preferParse?: boolean;
       forceRedownload?: boolean;
       addressMethod?: DownloadTask['addressMethod'];
@@ -764,6 +979,7 @@ export class DownloadService {
 
     if (isM3U8) {
       return this.downloadM3U8(url, localPath, episodeIndex, progressCallback, {
+        taskId: opts?.taskId ?? `legacy-${episodeIndex}`,
         sourceUrl: url,
         addressMethod:
           opts?.addressMethod === 'direct' || !opts?.addressMethod
@@ -794,6 +1010,7 @@ export class DownloadService {
           episodeIndex,
           progressCallback,
           {
+            taskId: opts?.taskId ?? `legacy-${episodeIndex}`,
             sourceUrl: url,
             addressMethod:
               opts?.addressMethod === 'direct' || !opts?.addressMethod
@@ -828,9 +1045,14 @@ export class DownloadService {
     episodeIndex: number,
     progressCallback?: (progress: number) => void,
     auditContext: {
+      taskId: string;
       sourceUrl: string;
       addressMethod: EpisodeDownloadAuditSummary['address_method'];
-    } = { sourceUrl: m3u8Url, addressMethod: 'direct' }
+    } = {
+      taskId: `legacy-${episodeIndex}`,
+      sourceUrl: m3u8Url,
+      addressMethod: 'direct',
+    }
   ): Promise<{
     localFilePath: string;
     fileSize: number;
@@ -923,6 +1145,11 @@ export class DownloadService {
       .slice(2, 10)}`;
     const generation = createEpisodeGeneration(
       localPath,
+      episodeIndex,
+      generationId
+    );
+    const episodeState = this.ensureEpisodeState(
+      auditContext.taskId,
       episodeIndex,
       generationId
     );
@@ -1052,8 +1279,33 @@ export class DownloadService {
             if (keyIndex == null) {
               keyIndex = nextKeyIndex++;
               keyUrlToIndex.set(keyAbsUrl, keyIndex);
-              // 下载 key（只在首次见到该 key URL 时）
-              await downloadKeyByUrl(keyAbsUrl, keyIndex);
+              episodeState.keyTotal = nextKeyIndex;
+              const scheduledKeyIndex = keyIndex;
+              const item: DownloadWorkItem = {
+                taskId: auditContext.taskId,
+                episode: episodeIndex,
+                generationId,
+                kind: 'key',
+                index: keyIndex,
+                attempt: 1,
+              };
+              await this.executeScheduled(
+                episodeState,
+                item,
+                path.join(
+                  generation.keysDir,
+                  `key_${String(keyIndex).padStart(3, '0')}.key`
+                ),
+                async () => {
+                  const result = await downloadKeyByUrl(
+                    keyAbsUrl,
+                    scheduledKeyIndex
+                  );
+                  return fs.statSync(
+                    path.join(generation.keysDir, result.keyFileName)
+                  ).size;
+                }
+              );
             }
           }
           continue;
@@ -1067,7 +1319,29 @@ export class DownloadService {
             if (mapIndex == null) {
               mapIndex = nextMapIndex++;
               mapUrlToIndex.set(mapAbsUrl, mapIndex);
-              await downloadMapByUrl(mapAbsUrl, mapIndex);
+              episodeState.mapTotal = nextMapIndex;
+              const scheduledMapIndex = mapIndex;
+              const item: DownloadWorkItem = {
+                taskId: auditContext.taskId,
+                episode: episodeIndex,
+                generationId,
+                kind: 'map',
+                index: mapIndex,
+                attempt: 1,
+              };
+              const mapPath = path.join(
+                generation.mapsDir,
+                `map_${String(mapIndex).padStart(3, '0')}.mp4`
+              );
+              await this.executeScheduled(
+                episodeState,
+                item,
+                mapPath,
+                async () => {
+                  await downloadMapByUrl(mapAbsUrl, scheduledMapIndex);
+                  return fs.statSync(mapPath).size;
+                }
+              );
             }
           }
           continue;
@@ -1083,9 +1357,11 @@ export class DownloadService {
         }
       }
 
-      console.log(
-        `[DownloadService] M3U8 包含 ${tsUrls.length} 个 TS 片段，将使用并发数: ${this.tsConcurrent}`
-      );
+      episodeState.totalSegments = tsUrls.length;
+      episodeState.keyTotal = keyUrlToIndex.size;
+      episodeState.mapTotal = mapUrlToIndex.size;
+      episodeState.stage = 'downloading';
+      this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
 
       // 检查已下载的片段
       let existingCount = 0;
@@ -1114,8 +1390,16 @@ export class DownloadService {
       let skipped = 0;
       const startTime = Date.now();
 
-      const downloadPromises = tsUrls.map((tsUrl, i) =>
-        this.tsLimit(async () => {
+      const downloadPromises = tsUrls.map((tsUrl, i) => {
+        const workItem: DownloadWorkItem = {
+          taskId: auditContext.taskId,
+          episode: episodeIndex,
+          generationId,
+          kind: 'segment',
+          index: i,
+          attempt: 1,
+        };
+        return (async () => {
           const segmentFileName = `segment_${i.toString().padStart(3, '0')}.ts`;
           const segmentFilePath = path.join(episodeDir, segmentFileName);
 
@@ -1156,7 +1440,12 @@ export class DownloadService {
 
           // 文件不存在或大小为0，需要下载
           try {
-            const segmentSize = await this.downloadFile(tsUrl, segmentFilePath);
+            const segmentSize = await this.executeScheduled(
+              episodeState,
+              workItem,
+              segmentFilePath,
+              () => this.downloadFile(tsUrl, segmentFilePath)
+            );
             if (segmentSize <= 0) {
               throw new Error(`下载片段为空: index=${i}`);
             }
@@ -1191,8 +1480,8 @@ export class DownloadService {
             );
             throw error;
           }
-        })
-      );
+        })();
+      });
 
       // 任一片段失败都不得提交 generation。
       await Promise.all(downloadPromises);
@@ -1291,6 +1580,8 @@ export class DownloadService {
       if (validation.references <= 0 || tsUrls.length <= 0) {
         throw new Error('播放列表不包含可提交的媒体片段');
       }
+      episodeState.stage = 'committing';
+      this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
       const audit: EpisodeDownloadAuditSummary = {
         generation_id: generationId,
         downloaded_at: Date.now(),
@@ -1332,6 +1623,10 @@ export class DownloadService {
       const hadActive = fs.existsSync(m3u8FilePath);
       if (hadActive) fs.copyFileSync(m3u8FilePath, backupPath);
       commitPlaylistAtomically(m3u8FilePath, updatedM3U8Content);
+      episodeState.stage = 'completed';
+      episodeState.oldEntryRetained = false;
+      episodeState.recoverable = false;
+      this.flushSnapshotForTask(auditContext.taskId, 'task.updated');
 
       return {
         localFilePath: m3u8FilePath,
@@ -1345,6 +1640,12 @@ export class DownloadService {
         finalize: () => fs.rmSync(backupPath, { force: true }),
       };
     } catch (error) {
+      episodeState.stage = 'partial_failed';
+      episodeState.oldEntryRetained = fs.existsSync(
+        path.join(localPath, `episode_${epNo}.m3u8`)
+      );
+      episodeState.recoverable = true;
+      this.flushSnapshotForTask(auditContext.taskId, 'task.updated');
       const failuresDir = path.join(
         localPath,
         `episode_${epNo}_generations`,
@@ -1368,7 +1669,6 @@ export class DownloadService {
         ),
         'utf-8'
       );
-      fs.rmSync(generation.rootDir, { recursive: true, force: true });
       throw error;
     }
   }
@@ -1476,6 +1776,9 @@ export class DownloadService {
       }
       fileStream.end();
       await streamCompletion;
+      if (downloaded <= 0) {
+        throw new Error('下载文件为空');
+      }
       if (contentLength > 0 && downloaded !== contentLength) {
         throw new Error(`下载长度不匹配: ${downloaded}/${contentLength}`);
       }
@@ -1485,6 +1788,167 @@ export class DownloadService {
       fs.rmSync(filePath, { force: true });
       throw error;
     }
+  }
+
+  private ensureEpisodeState(
+    taskId: string,
+    episode: number,
+    generationId: string
+  ): EpisodeDownloadState {
+    let snapshot = this.snapshots.get(taskId);
+    if (!snapshot) {
+      const now = Date.now();
+      snapshot = {
+        schemaVersion: 1,
+        taskId,
+        source: 'legacy',
+        resourceId: taskId,
+        title: taskId,
+        year: '',
+        episodeNumbers: [episode],
+        status: 'downloading',
+        priority: 'normal',
+        currentEpisode: episode,
+        progress: 0,
+        progressEstimated: true,
+        speedBytesPerSecond: 0,
+        etaSeconds: null,
+        completedBytes: 0,
+        createdAt: now,
+        updatedAt: now,
+        episodes: {},
+      };
+      this.snapshots.set(taskId, snapshot);
+    }
+    snapshot.status = 'downloading';
+    snapshot.currentEpisode = episode;
+    const key = String(episode);
+    snapshot.episodes[key] ??= {
+      episode,
+      generationId,
+      stage: 'preparing',
+      totalSegments: 0,
+      completedSegmentIndices: [],
+      failedSegmentIndices: [],
+      activeItems: [],
+      keyTotal: 0,
+      keyCompleted: 0,
+      mapTotal: 0,
+      mapCompleted: 0,
+      completedBytes: 0,
+      estimatedBytes: null,
+      progress: 5,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      failures: [],
+      oldEntryRetained: true,
+      recoverable: true,
+      refreshCount: 0,
+      updatedAt: Date.now(),
+    };
+    return snapshot.episodes[key];
+  }
+
+  private markUnitCompleted(
+    episode: EpisodeDownloadState,
+    item: DownloadWorkItem,
+    bytes: number
+  ): void {
+    if (bytes <= 0) throw new Error('downloaded file is empty');
+    if (item.kind === 'segment') {
+      if (!episode.completedSegmentIndices.includes(item.index)) {
+        episode.completedSegmentIndices.push(item.index);
+        episode.completedSegmentIndices.sort((a, b) => a - b);
+        episode.completedBytes += bytes;
+      }
+      episode.failedSegmentIndices = episode.failedSegmentIndices.filter(
+        (index) => index !== item.index
+      );
+    } else if (item.kind === 'key') {
+      episode.keyCompleted = Math.min(
+        episode.keyTotal,
+        episode.keyCompleted + 1
+      );
+    } else {
+      episode.mapCompleted = Math.min(
+        episode.mapTotal,
+        episode.mapCompleted + 1
+      );
+    }
+    episode.failures = episode.failures.filter(
+      (failure) => failure.kind !== item.kind || failure.index !== item.index
+    );
+    const progress = calculateEpisodeProgress(episode);
+    episode.progress = progress.progress;
+    episode.progressEstimated = progress.estimated;
+    episode.updatedAt = Date.now();
+  }
+
+  private queueSnapshotFlush(taskId: string): void {
+    const pending = this.pendingFlushes.get(taskId) ?? {
+      changes: 0,
+      timer: null,
+    };
+    pending.changes += 1;
+    this.pendingFlushes.set(taskId, pending);
+    if (pending.changes >= 20) {
+      this.flushSnapshotForTask(taskId, 'segment.batch');
+      return;
+    }
+    pending.timer ??= setTimeout(
+      () => this.flushSnapshotForTask(taskId, 'segment.batch'),
+      250
+    );
+  }
+
+  private flushSnapshotForTask(
+    taskId: string,
+    eventType: 'task.updated' | 'episode.updated' | 'segment.batch'
+  ): void {
+    const snapshot = this.snapshots.get(taskId);
+    if (snapshot) this.flushSnapshot(snapshot, eventType);
+  }
+
+  private flushSnapshot(
+    snapshot: DownloadTaskSnapshot,
+    eventType: 'task.updated' | 'episode.updated' | 'segment.batch'
+  ): void {
+    const pending = this.pendingFlushes.get(snapshot.taskId);
+    if (pending?.timer) clearTimeout(pending.timer);
+    this.pendingFlushes.delete(snapshot.taskId);
+    const episodes = Object.values(snapshot.episodes);
+    snapshot.completedBytes = episodes.reduce(
+      (total, episode) => total + episode.completedBytes,
+      0
+    );
+    snapshot.progress = episodes.length
+      ? episodes.reduce((total, episode) => total + episode.progress, 0) /
+        episodes.length
+      : snapshot.progress;
+    snapshot.progressEstimated = episodes.some(
+      (episode) => episode.progressEstimated
+    );
+    snapshot.updatedAt = Date.now();
+    if (
+      episodes.length &&
+      episodes.every((episode) => episode.stage === 'completed')
+    ) {
+      snapshot.status = 'completed';
+    } else if (episodes.some((episode) => episode.stage === 'partial_failed')) {
+      snapshot.status = episodes.some(
+        (episode) => episode.stage === 'completed'
+      )
+        ? 'partial_completed'
+        : 'failed';
+    }
+    this.stateStore.saveTask(snapshot);
+    this.publishProgress(eventType, {
+      taskId: snapshot.taskId,
+      status: snapshot.status,
+      progress: snapshot.progress,
+      completedBytes: snapshot.completedBytes,
+    });
   }
 
   /**
@@ -1512,64 +1976,174 @@ export class DownloadService {
   /**
    * 暂停任务（仅保证在“集边界”生效）
    */
-  public pauseTask(taskId: string): boolean {
-    const task = this.tasks.get(taskId);
-    if (!task) return false;
-    if (
-      task.status === DownloadStatus.PENDING ||
-      task.status === DownloadStatus.DOWNLOADING
-    ) {
-      task.status = DownloadStatus.PAUSED;
-      this.updateTask(task);
-      return true;
+  public pauseTask(taskId: string): CommandResult {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (!['pending', 'downloading'].includes(snapshot.status)) {
+      return { ok: false, status: 'conflict' };
     }
-    return false;
+    this.scheduler.pauseTask(taskId);
+    Object.values(snapshot.episodes).forEach((episode) => {
+      if (!['completed', 'partial_failed'].includes(episode.stage)) {
+        episode.stage = 'pausing';
+      }
+    });
+    this.flushSnapshot(snapshot, 'task.updated');
+    const settle = () => {
+      const stats = this.scheduler.getTaskStats(taskId);
+      if ((stats?.active ?? 0) > 0) {
+        setTimeout(settle, 10);
+        return;
+      }
+      snapshot.status = 'paused';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'pausing') episode.stage = 'paused';
+      });
+      const task = this.tasks.get(taskId);
+      if (task) {
+        task.status = DownloadStatus.PAUSED;
+        this.updateTask(task);
+      }
+      this.flushSnapshot(snapshot, 'task.updated');
+    };
+    settle();
+    return { ok: true, status: snapshot.status };
   }
 
   /**
    * 恢复任务
    */
-  public resumeTask(taskId: string): boolean {
-    const task = this.tasks.get(taskId);
-    if (!task) return false;
-    if (task.status !== DownloadStatus.PAUSED) return false;
-
-    // 如果任务下载线程仍在 activeDownloads 中（暂停等待中），直接切回 downloading 继续
-    if (this.activeDownloads.has(taskId)) {
-      task.status = DownloadStatus.DOWNLOADING;
-      this.updateTask(task);
-      return true;
+  public async resumeTask(taskId: string): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (
+      !['paused', 'recovery_wait', 'cancelled_resumable'].includes(
+        snapshot.status
+      )
+    ) {
+      return { ok: false, status: 'conflict' };
     }
-
-    // 否则重新进入队列
-    task.status = DownloadStatus.PENDING;
-    this.updateTask(task);
-    this.processQueue();
-    return true;
+    const resourcePath = this.storageManager.getResourcePath(
+      snapshot.title,
+      snapshot.year,
+      snapshot.source,
+      snapshot.resourceId
+    );
+    for (const episode of Object.values(snapshot.episodes)) {
+      const files = episode.completedSegmentIndices.map((index) => ({
+        index,
+        path: path.join(
+          resourcePath,
+          `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+          episode.generationId,
+          'segments',
+          `segment_${String(index).padStart(3, '0')}.ts`
+        ),
+      }));
+      const validation = validateResumeFiles(files);
+      episode.completedSegmentIndices = validation.valid;
+      episode.failedSegmentIndices = Array.from(
+        new Set([...episode.failedSegmentIndices, ...validation.invalid])
+      );
+      episode.completedBytes = validation.bytes;
+      episode.stage = 'downloading';
+    }
+    snapshot.status = 'downloading';
+    this.scheduler.resumeTask(taskId);
+    this.flushSnapshot(snapshot, 'task.updated');
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.status = this.activeDownloads.has(taskId)
+        ? DownloadStatus.DOWNLOADING
+        : DownloadStatus.PENDING;
+      this.updateTask(task);
+      this.processQueue();
+    }
+    return { ok: true, status: snapshot.status };
   }
 
   /**
    * 取消任务
    */
-  public cancelTask(taskId: string): boolean {
+  public async cancelTask(
+    taskId: string,
+    clean = false
+  ): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (snapshot.status === 'completed')
+      return { ok: false, status: 'conflict' };
+    this.scheduler.pauseTask(taskId);
+    this.scheduler.cancelQueued(taskId);
     const task = this.tasks.get(taskId);
-    if (!task) {
-      return false;
-    }
-
-    if (
-      task.status === DownloadStatus.PENDING ||
-      task.status === DownloadStatus.DOWNLOADING ||
-      task.status === DownloadStatus.PAUSED
-    ) {
+    if (task) {
       task.status = DownloadStatus.CANCELLED;
       this.updateTask(task);
-      this.activeDownloads.delete(taskId);
-      this.processQueue(); // 处理下一个任务
-      return true;
     }
+    if (clean) {
+      const resourcePath = this.storageManager.getResourcePath(
+        snapshot.title,
+        snapshot.year,
+        snapshot.source,
+        snapshot.resourceId
+      );
+      for (const episode of Object.values(snapshot.episodes)) {
+        if (episode.stage === 'completed') continue;
+        const generationRoot = path.join(
+          resourcePath,
+          `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+          episode.generationId
+        );
+        fs.rmSync(generationRoot, { recursive: true, force: true });
+      }
+      this.stateStore.deleteTaskState(taskId);
+      this.snapshots.delete(taskId);
+      return { ok: true, status: 'cancelled_resumable' };
+    }
+    snapshot.status = 'cancelled_resumable';
+    Object.values(snapshot.episodes).forEach((episode) => {
+      if (episode.stage !== 'completed') episode.stage = 'cancelled_resumable';
+    });
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: true, status: snapshot.status };
+  }
 
-    return false;
+  public async retryFailed(taskId: string): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    const failed = Array.from(this.failedWork.values()).filter(
+      ({ item }) => item.taskId === taskId
+    );
+    if (failed.length === 0) return { ok: false, status: 'conflict' };
+    snapshot.status = 'downloading';
+    await Promise.allSettled(
+      failed.map(({ item, operation, path: failedPath }) => {
+        const episode = snapshot.episodes[String(item.episode)];
+        if (!episode) return Promise.resolve();
+        episode.stage = 'downloading';
+        return this.executeScheduled(episode, item, failedPath, operation);
+      })
+    );
+    const stillFailed = Array.from(this.failedWork.values()).some(
+      ({ item }) => item.taskId === taskId
+    );
+    if (stillFailed) {
+      snapshot.status = 'failed';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.failures.length) episode.stage = 'partial_failed';
+      });
+    }
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: !stillFailed, status: snapshot.status };
+  }
+
+  public prioritizeTask(taskId: string): CommandResult {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    snapshot.priority = 'high';
+    this.scheduler.setPriority(taskId, 'high');
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: true, status: snapshot.status };
   }
 }
 

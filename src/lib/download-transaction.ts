@@ -19,6 +19,37 @@ export interface PlaylistValidationResult {
   files: string[];
 }
 
+export interface ResumeFile {
+  index: number;
+  path: string;
+  expectedLength?: number | null;
+}
+
+export function validateResumeFiles(files: ResumeFile[]): {
+  valid: number[];
+  invalid: number[];
+  bytes: number;
+} {
+  const result = { valid: [] as number[], invalid: [] as number[], bytes: 0 };
+  for (const file of files) {
+    try {
+      const size = fs.statSync(file.path).size;
+      if (
+        size <= 0 ||
+        (file.expectedLength != null && size !== file.expectedLength)
+      ) {
+        result.invalid.push(file.index);
+        continue;
+      }
+      result.valid.push(file.index);
+      result.bytes += size;
+    } catch {
+      result.invalid.push(file.index);
+    }
+  }
+  return result;
+}
+
 export function redactDownloadUrl(value: string): string {
   try {
     const url = new URL(value);
