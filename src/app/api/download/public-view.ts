@@ -4,6 +4,17 @@ import {
 } from '@/lib/download-transaction';
 import { DownloadTaskSnapshot } from '@/lib/download-types';
 
+export interface PublicAdFilterSummary {
+  original_segments: number;
+  removed_segments: number;
+  final_segments: number;
+  removed_duration_seconds: number;
+  filter_version: string;
+  reason?: string;
+  matched_reasons?: string[];
+  validation_passed: boolean;
+}
+
 function ranges(indices: number[]): Array<[number, number]> {
   const sorted = Array.from(new Set(indices))
     .filter((index) => Number.isInteger(index) && index >= 0)
@@ -75,7 +86,10 @@ export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
   };
 }
 
-export function detailDownloadTask(snapshot: DownloadTaskSnapshot) {
+export function detailDownloadTask(
+  snapshot: DownloadTaskSnapshot,
+  adFilterByEpisode: Record<string, PublicAdFilterSummary> = {}
+) {
   return {
     ...summarizeDownloadTask(snapshot),
     episodes: Object.values(snapshot.episodes).map((episode) => ({
@@ -111,6 +125,7 @@ export function detailDownloadTask(snapshot: DownloadTaskSnapshot) {
       old_entry_retained: episode.oldEntryRetained,
       recoverable: episode.recoverable,
       refresh_count: episode.refreshCount,
+      ad_filter: adFilterByEpisode[String(episode.episode)] ?? null,
       updated_at: episode.updatedAt,
     })),
   };

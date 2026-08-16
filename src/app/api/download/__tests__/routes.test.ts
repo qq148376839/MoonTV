@@ -6,7 +6,7 @@ import { DownloadTaskSnapshot } from '@/lib/download-types';
 const service = {
   getSnapshot: jest.fn(),
   getTask: jest.fn(),
-  getAllTasks: jest.fn(() => []),
+  getAllTasks: jest.fn<Array<Record<string, unknown>>, []>(() => []),
   getRecoverableTaskIds: jest.fn<string[], []>(() => []),
   pauseTask: jest.fn(),
   resumeTask: jest.fn(),
@@ -16,8 +16,33 @@ const service = {
   isEnabled: jest.fn(() => true),
 };
 
+const storage = {
+  getResourcePath: jest.fn(() => '/storage/resource'),
+  readMetadata: jest.fn(() => ({
+    episode_audits: {
+      '1': {
+        generation_id: 'generation',
+        original_segments: 23,
+        removed_segments: 2,
+        final_segments: 21,
+        removed_duration_sec: 30.5,
+        filter_version: 'm3u8-ad-filter-v2',
+        filter_reason: 'removed matching ad group',
+        filter_reasons: ['keyword', 'discontinuity'],
+        validation_passed: true,
+        source_url: 'https://source.invalid/watch?token=private',
+        media_playlist_url: 'https://cdn.invalid/index.m3u8?token=private',
+      },
+    },
+  })),
+};
+
 jest.mock('@/lib/download-service', () => ({
   getDownloadService: () => service,
+}));
+
+jest.mock('@/lib/local-storage', () => ({
+  getStorageManager: () => storage,
 }));
 
 import { POST as POST_COMMAND } from '../[taskId]/command/route';
@@ -134,6 +159,19 @@ describe('download routes', () => {
     expect(JSON.stringify(body)).not.toContain('token=secret');
     expect(JSON.stringify(body)).not.toContain('#fragment');
     expect(JSON.stringify(body)).not.toContain('poster-secret');
+    expect(body.episodes[0].ad_filter).toEqual({
+      original_segments: 23,
+      removed_segments: 2,
+      final_segments: 21,
+      removed_duration_seconds: 30.5,
+      filter_version: 'm3u8-ad-filter-v2',
+      reason: 'removed matching ad group',
+      matched_reasons: ['keyword', 'discontinuity'],
+      validation_passed: true,
+    });
+    expect(JSON.stringify(body.episodes[0].ad_filter)).not.toContain(
+      'source.invalid'
+    );
   });
 
   test('returns 404 for missing detail', async () => {
@@ -155,6 +193,20 @@ describe('download routes', () => {
     );
     expect(response.status).toBe(409);
   });
+
+  test.each([null, 'pause', [], 1])(
+    'rejects valid JSON non-object command body %#',
+    async (body) => {
+      const response = await POST_COMMAND(
+        request('http://localhost/api/download/task-1/command', { body }),
+        { params: { taskId: 'task-1' } }
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: '请求体必须是 JSON 对象',
+      });
+    }
+  );
 
   test.each([
     ['resume', 'resumeTask'],
@@ -192,6 +244,36 @@ describe('download routes', () => {
       current_stage: 'downloading',
     });
     expect(body.tasks[0]).not.toHaveProperty('episodes');
+  });
+
+  test('redacts poster URL on the legacy in-memory summary path', async () => {
+    service.getSnapshot.mockReturnValue(null);
+    service.getRecoverableTaskIds.mockReturnValue([]);
+    service.getAllTasks.mockReturnValue([
+      {
+        id: 'legacy-1',
+        source: 'legacy',
+        resourceId: 'movie',
+        resource: {
+          title: 'Legacy',
+          year: '1988',
+          poster:
+            'https://images.invalid/poster.jpg?token=legacy-secret#private',
+        },
+        episodeNumbers: [1],
+        status: 'downloading',
+        progress: 10,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+    const response = await GET_DOWNLOADS(
+      request('http://localhost/api/download')
+    );
+    const serialized = JSON.stringify(await response.json());
+    expect(serialized).toContain('https://images.invalid/poster.jpg');
+    expect(serialized).not.toContain('legacy-secret');
+    expect(serialized).not.toContain('#private');
   });
 
   test('SSE requests an initial snapshot, replays in order, and redacts data', async () => {

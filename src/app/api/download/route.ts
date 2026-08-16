@@ -6,6 +6,7 @@ import path from 'path';
 
 import { getAvailableApiSites } from '@/lib/config';
 import { DownloadStatus, getDownloadService } from '@/lib/download-service';
+import { redactDownloadUrl } from '@/lib/download-transaction';
 import { getDetailFromApi } from '@/lib/downstream';
 import { getStorageManager } from '@/lib/local-storage';
 import { PathUtils } from '@/lib/path-utils';
@@ -423,7 +424,9 @@ export async function GET(request: NextRequest) {
           id: task.resourceId,
           title: task.resource?.title,
           year: task.resource?.year,
-          poster: task.resource?.poster,
+          poster: task.resource?.poster
+            ? redactDownloadUrl(task.resource.poster)
+            : undefined,
           episode_numbers: Array.isArray(task.episodeNumbers)
             ? task.episodeNumbers
             : undefined,

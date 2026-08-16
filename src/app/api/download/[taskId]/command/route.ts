@@ -19,23 +19,27 @@ const COMMANDS = new Set<DownloadCommand>([
 ]);
 
 export async function POST(request: NextRequest, context: RouteContext) {
-  let body: { action?: unknown };
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: '请求体必须是 JSON' }, { status: 400 });
   }
-  if (
-    typeof body.action !== 'string' ||
-    !COMMANDS.has(body.action as DownloadCommand)
-  ) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return NextResponse.json(
+      { error: '请求体必须是 JSON 对象' },
+      { status: 400 }
+    );
+  }
+  const action = (body as { action?: unknown }).action;
+  if (typeof action !== 'string' || !COMMANDS.has(action as DownloadCommand)) {
     return NextResponse.json({ error: '无效下载命令' }, { status: 400 });
   }
 
   const { taskId } = await context.params;
   const service = getDownloadService();
   let result: CommandResult;
-  switch (body.action as DownloadCommand) {
+  switch (action as DownloadCommand) {
     case 'pause':
       result = service.pauseTask(taskId);
       break;
