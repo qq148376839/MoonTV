@@ -3,6 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { validateLocalPlaylist } from './download-transaction';
 import { PathUtils } from './path-utils';
 import { SearchResult } from './types';
 
@@ -23,6 +24,7 @@ export interface LocalResourceMetadata {
   download_time: number;
   file_size: number;
   episode_count: number;
+  episode_audits?: Record<string, EpisodeDownloadAuditSummary>;
   episodes_info?: Array<{
     index: number;
     file_path: string;
@@ -30,6 +32,27 @@ export interface LocalResourceMetadata {
     duration?: number;
     resolution?: string;
   }>;
+}
+
+export interface EpisodeDownloadAuditSummary {
+  generation_id: string;
+  downloaded_at: number;
+  source_url: string;
+  media_playlist_url: string;
+  address_method:
+    | 'direct'
+    | 'parsed'
+    | 'refreshed'
+    | 'client_fallback'
+    | 'historical_fallback';
+  original_segments: number;
+  removed_segments: number;
+  final_segments: number;
+  removed_duration_sec: number;
+  filter_version: string;
+  filter_reason?: string;
+  filter_reasons?: string[];
+  validation_passed: boolean;
 }
 
 // 资源索引接口
@@ -286,96 +309,24 @@ export class StorageManager {
         return false;
       }
 
-      // 读取 M3U8 文件，检查其中列出的所有 TS 片段是否都存在
-      const episodeDir = path.join(
-        resourcePath,
-        `episode_${episodeIndex.toString().padStart(2, '0')}`
-      );
-
-      if (!fs.existsSync(episodeDir)) {
-        return false;
-      }
-
-      // 读取 M3U8 文件内容
-      const m3u8Content = fs.readFileSync(episodeFilePath, 'utf-8');
-      const lines = m3u8Content.split('\n');
-
-      // 统计 M3U8 中列出的 TS 片段数量
-      let expectedSegmentCount = 0;
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        // 检查是否是 TS 片段路径（不是注释行）
-        if (
-          trimmedLine &&
-          !trimmedLine.startsWith('#') &&
-          trimmedLine.endsWith('.ts')
-        ) {
-          expectedSegmentCount++;
-        }
-      }
-
-      // 如果 M3U8 中没有 TS 片段引用，检查目录中是否有 TS 文件
-      if (expectedSegmentCount === 0) {
-        const files = fs.readdirSync(episodeDir);
-        const tsFiles = files.filter((file) => file.endsWith('.ts'));
-        // 至少有一个 TS 片段文件
-        return tsFiles.length > 0;
-      }
-
-      // 检查目录中实际存在的 TS 片段数量
-      const files = fs.readdirSync(episodeDir);
-      const tsFiles = files.filter((file) => file.endsWith('.ts'));
-
-      // 如果实际片段数量少于预期，认为未完全下载
-      if (tsFiles.length < expectedSegmentCount) {
-        return false;
-      }
-
-      // 如果实际片段数量等于或大于预期数量，认为已下载完成
-      // 允许实际数量略多于预期（可能有一些临时文件）
-      if (tsFiles.length >= expectedSegmentCount) {
-        // 进一步检查：确保从 segment_000.ts 到 segment_XXX.ts 的连续片段都存在
-        // 这可以避免中间有缺失片段的情况
-        const segmentPattern = /segment_(\d+)\.ts/;
-        const foundSegments = new Set<number>();
-
-        for (const file of tsFiles) {
-          const match = file.match(segmentPattern);
-          if (match) {
-            foundSegments.add(parseInt(match[1], 10));
-          }
-        }
-
-        // 检查前 expectedSegmentCount 个片段是否都存在
-        // 允许有额外的片段（索引 >= expectedSegmentCount）
-        let missingCount = 0;
-        for (let i = 0; i < expectedSegmentCount; i++) {
-          if (!foundSegments.has(i)) {
-            missingCount++;
-          }
-        }
-
-        // 如果缺失片段少于5%，认为已下载完成（允许少量缺失）
-        const missingRatio = missingCount / expectedSegmentCount;
-        if (missingRatio <= 0.05) {
-          console.log(
-            `[StorageManager] isEpisodeDownloaded: ✓ 剧集已下载 - ${source}_${id}, episodeIndex: ${episodeIndex}, 预期: ${expectedSegmentCount}, 实际: ${tsFiles.length}, 缺失: ${missingCount}`
-          );
-          return true;
-        } else {
-          console.log(
-            `[StorageManager] isEpisodeDownloaded: ✗ 片段缺失过多 - ${source}_${id}, episodeIndex: ${episodeIndex}, 缺失: ${missingCount}/${expectedSegmentCount} (${(
-              missingRatio * 100
-            ).toFixed(1)}%)`
-          );
-        }
-      } else {
+      try {
+        const validation = validateLocalPlaylist(episodeFilePath, resourcePath);
+        const downloaded = validation.references > 0;
         console.log(
-          `[StorageManager] isEpisodeDownloaded: ✗ 片段数量不足 - ${source}_${id}, episodeIndex: ${episodeIndex}, 预期: ${expectedSegmentCount}, 实际: ${tsFiles.length}`
+          `[StorageManager] isEpisodeDownloaded: ${
+            downloaded ? '✓' : '✗'
+          } ${source}_${id}, episodeIndex: ${episodeIndex}, 引用: ${
+            validation.references
+          }`
         );
+        return downloaded;
+      } catch (error) {
+        console.log(
+          `[StorageManager] isEpisodeDownloaded: ✗ 完整性校验失败 - ${source}_${id}, episodeIndex: ${episodeIndex}`,
+          error
+        );
+        return false;
       }
-
-      return false;
     } catch (err) {
       console.error('[StorageManager] 检查剧集失败:', err);
       return false;
@@ -488,7 +439,8 @@ export class StorageManager {
     resource: SearchResult,
     localPath: string,
     episodes: string[],
-    fileSize: number
+    fileSize: number,
+    episodeAudits?: Record<string, EpisodeDownloadAuditSummary>
   ): Promise<LocalResourceMetadata> {
     // 将绝对路径转换为相对路径（相对于项目根目录）
     const normalizePath = (filePath: string): string => {
@@ -515,6 +467,7 @@ export class StorageManager {
       (p) => typeof p === 'string' && p.trim().length > 0
     ).length;
 
+    const existingMetadata = this.readMetadata(localPath);
     const metadata: LocalResourceMetadata = {
       id: `local_${resource.source}_${resource.id}`,
       title: resource.title,
@@ -532,6 +485,10 @@ export class StorageManager {
       file_size: fileSize,
       // 语义：已下载集数（与 /api/local-library/detail 的口径一致）
       episode_count: downloadedCount,
+      episode_audits: {
+        ...(existingMetadata?.episode_audits || {}),
+        ...(episodeAudits || {}),
+      },
       // 仅记录已下载的集（避免占位污染）
       episodes_info: normalizedEpisodes
         .map((ep, index) => ({ ep, index }))
@@ -545,7 +502,13 @@ export class StorageManager {
 
     // 写入元数据文件
     const metadataPath = path.join(localPath, 'metadata.json');
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    const metadataTempPath = `${metadataPath}.tmp`;
+    fs.writeFileSync(
+      metadataTempPath,
+      JSON.stringify(metadata, null, 2),
+      'utf-8'
+    );
+    fs.renameSync(metadataTempPath, metadataPath);
 
     return metadata;
   }

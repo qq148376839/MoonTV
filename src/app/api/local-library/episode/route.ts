@@ -111,6 +111,7 @@ export async function DELETE(request: NextRequest) {
     }
     // 2) 约定命名：episode_XX 目录 + episode_XX.* 文件
     targets.push(path.join(localPath, prefix));
+    targets.push(path.join(localPath, `${prefix}_generations`));
     for (const f of fs.readdirSync(localPath)) {
       const p = path.join(localPath, f);
       if (f.startsWith(prefix) && fs.statSync(p).isFile()) {
@@ -161,6 +162,9 @@ export async function DELETE(request: NextRequest) {
           ).length
         : 0;
       metadata.episode_count = downloadedCount;
+      if (metadata.episode_audits) {
+        delete metadata.episode_audits[String(episode)];
+      }
 
       const metadataPath = path.join(localPath, 'metadata.json');
       fs.writeFileSync(

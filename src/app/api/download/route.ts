@@ -1,10 +1,14 @@
 /* eslint-disable no-console */
 
+import fs from 'fs';
 import { NextRequest, NextResponse } from 'next/server';
+import path from 'path';
 
 import { getAvailableApiSites } from '@/lib/config';
 import { DownloadStatus, getDownloadService } from '@/lib/download-service';
 import { getDetailFromApi } from '@/lib/downstream';
+import { getStorageManager } from '@/lib/local-storage';
+import { PathUtils } from '@/lib/path-utils';
 import { SearchResult } from '@/lib/types';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
@@ -36,6 +40,7 @@ export async function POST(request: NextRequest) {
       episode_numbers,
       auto_download_next,
       current_episode,
+      force_redownload,
       // 可选：由前端直接传入完整详情（用于不依赖 config.json / 非标准源导致的详情拉取失败）
       resource: resourceFromClient,
     } = body;
@@ -50,6 +55,7 @@ export async function POST(request: NextRequest) {
         Array.isArray(episode_numbers) && episode_numbers.length > 0,
       auto_download_next,
       current_episode,
+      force_redownload: force_redownload === true,
     });
 
     if (!source || !id) {
@@ -61,51 +67,127 @@ export async function POST(request: NextRequest) {
     }
 
     let resource: SearchResult;
-    // 1) 优先使用前端传入的详情（避免依赖 config.json）
-    if (
+    let addressMethod:
+      | 'direct'
+      | 'refreshed'
+      | 'client_fallback'
+      | 'historical_fallback' = 'direct';
+    const clientResourceIsValid =
       resourceFromClient &&
       typeof resourceFromClient === 'object' &&
       (resourceFromClient as SearchResult).source === source &&
       (resourceFromClient as SearchResult).id === id &&
       Array.isArray((resourceFromClient as SearchResult).episodes) &&
-      (resourceFromClient as SearchResult).episodes.length > 0
-    ) {
+      (resourceFromClient as SearchResult).episodes.length > 0;
+    const normalizeClientResource = (): SearchResult => {
       const raw = resourceFromClient as SearchResult;
-      const safeEpisodes = raw.episodes.filter(
-        (u) =>
-          typeof u === 'string' &&
-          (u.startsWith('http://') || u.startsWith('https://'))
-      );
-      resource = {
+      return {
         ...raw,
-        episodes: safeEpisodes,
+        episodes: raw.episodes.filter(
+          (url) =>
+            typeof url === 'string' &&
+            (url.startsWith('http://') || url.startsWith('https://'))
+        ),
       };
+    };
+    const loadHistoricalResource = (): SearchResult | null => {
+      try {
+        const storage = getStorageManager();
+        const entry = storage.readIndex()[`${source}_${id}`];
+        if (!entry) return null;
+        const localPath = PathUtils.resolveResourcePath(
+          entry.local_path,
+          storage.getStoragePath()
+        );
+        const metadata = storage.readMetadata(localPath);
+        if (!metadata?.episode_audits) return null;
+        const historicalEpisodes = Array(metadata.episode_count).fill('');
+        for (const [episode, audit] of Object.entries(
+          metadata.episode_audits
+        )) {
+          const reportPath = path.join(
+            localPath,
+            `episode_${String(Number(episode)).padStart(2, '0')}_generations`,
+            audit.generation_id,
+            'report.json'
+          );
+          if (!fs.existsSync(reportPath)) continue;
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8')) as {
+            source_url?: unknown;
+          };
+          if (typeof report.source_url === 'string') {
+            historicalEpisodes[Number(episode) - 1] = report.source_url;
+          }
+        }
+        if (!historicalEpisodes.some(Boolean)) return null;
+        return {
+          id,
+          source,
+          title: metadata.title,
+          poster: metadata.poster,
+          episodes: historicalEpisodes,
+          source_name: metadata.source_name,
+          year: metadata.year,
+          desc: metadata.desc,
+          type_name: metadata.type_name,
+        };
+      } catch (error) {
+        console.warn('[Download API] 读取历史下载地址失败:', error);
+        return null;
+      }
+    };
+    // 1) 优先使用前端传入的详情（避免依赖 config.json）
+    if (clientResourceIsValid && force_redownload !== true) {
+      resource = normalizeClientResource();
     } else {
-      // 2) 回退：从配置中找源并拉取详情（兼容旧部署）
+      // 强制重下优先重新查询源详情；查询失败才回退本次客户端详情。
       const apiSites = await getAvailableApiSites();
       const apiSite = apiSites.find((s) => s.key === source);
 
       if (!apiSite) {
-        return NextResponse.json(
-          {
-            error:
-              '未找到对应的源配置，且未提供 resource 详情（请从播放页/搜索结果传入 detail 后重试）',
-          },
-          { status: 400 }
-        );
-      }
-
-      try {
-        resource = await getDetailFromApi(apiSite, id, request.url);
-      } catch (error) {
-        console.error('[Download API] 获取资源详情失败:', error);
-        return NextResponse.json(
-          {
-            error: '获取资源详情失败',
-            details: error instanceof Error ? error.message : String(error),
-          },
-          { status: 500 }
-        );
+        if (clientResourceIsValid) {
+          resource = normalizeClientResource();
+          addressMethod = 'client_fallback';
+        } else {
+          const historicalResource = loadHistoricalResource();
+          if (historicalResource) {
+            resource = historicalResource;
+            addressMethod = 'historical_fallback';
+          } else {
+            return NextResponse.json(
+              {
+                error: '未找到对应的源配置，且没有可用的客户端或历史下载地址',
+              },
+              { status: 400 }
+            );
+          }
+        }
+      } else {
+        try {
+          resource = await getDetailFromApi(apiSite, id, request.url);
+          addressMethod = 'refreshed';
+        } catch (error) {
+          console.error('[Download API] 获取最新地址失败:', error);
+          if (clientResourceIsValid) {
+            resource = normalizeClientResource();
+            addressMethod = 'client_fallback';
+          } else {
+            const historicalResource = loadHistoricalResource();
+            if (historicalResource) {
+              resource = historicalResource;
+              addressMethod = 'historical_fallback';
+            } else {
+              return NextResponse.json(
+                {
+                  error: '获取资源详情失败，且没有可用的历史下载地址',
+                  details:
+                    error instanceof Error ? error.message : String(error),
+                },
+                { status: 500 }
+              );
+            }
+          }
+        }
       }
     }
 
@@ -190,6 +272,20 @@ export async function POST(request: NextRequest) {
       episodeNumbers = [1];
     }
 
+    if (
+      episodesToDownload.length !== episodeNumbers.length ||
+      episodesToDownload.some(
+        (url) =>
+          typeof url !== 'string' ||
+          (!url.startsWith('http://') && !url.startsWith('https://'))
+      )
+    ) {
+      return NextResponse.json(
+        { error: '所选剧集缺少可用的历史下载地址，无法安全重下' },
+        { status: 409 }
+      );
+    }
+
     if (episodesToDownload.length === 0) {
       return NextResponse.json({ error: '没有可下载的剧集' }, { status: 400 });
     }
@@ -202,7 +298,11 @@ export async function POST(request: NextRequest) {
     const task = downloadService.createTask(
       resource,
       episodesToDownload,
-      episodeNumbers
+      episodeNumbers,
+      {
+        forceRedownload: force_redownload === true,
+        addressMethod,
+      }
     );
 
     // 检查任务状态
@@ -210,14 +310,18 @@ export async function POST(request: NextRequest) {
     let isExistingTask = false;
     let isAlreadyDownloaded = false;
 
-    if (task.status === DownloadStatus.COMPLETED && task.progress === 100) {
+    if (
+      !force_redownload &&
+      task.status === DownloadStatus.COMPLETED &&
+      task.progress === 100
+    ) {
       // 资源已完全下载
       isAlreadyDownloaded = true;
       message = '资源已完全下载，无需重复下载';
       console.log(
         `[Download API] ✓ 资源已完全下载: ${source}_${id}, 剧集数: ${episodesToDownload.length}`
       );
-    } else if (task.id.startsWith('completed_')) {
+    } else if (!force_redownload && task.id.startsWith('completed_')) {
       // 这是新创建的已完成任务（资源已下载）
       isAlreadyDownloaded = true;
       message = '资源已完全下载，无需重复下载';

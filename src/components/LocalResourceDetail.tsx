@@ -26,6 +26,26 @@ type DetailResponse = {
     episode: number;
     downloaded: boolean;
     file_path: string;
+    audit: {
+      generation_id: string;
+      downloaded_at: number;
+      source_url: string;
+      media_playlist_url: string;
+      address_method: 'direct' | 'parsed' | 'historical_fallback';
+      original_segments: number;
+      removed_segments: number;
+      final_segments: number;
+      removed_duration_sec: number;
+      filter_version: string;
+      filter_reason?: string;
+      filter_reasons?: string[];
+      validation_passed: boolean;
+    } | null;
+    latest_failure: {
+      failed_at?: number;
+      error?: string;
+      source_url?: string;
+    } | null;
   }>;
 };
 
@@ -189,6 +209,46 @@ export default function LocalResourceDetail({
                 <span className='text-xs text-gray-500 dark:text-gray-400'>
                   未下载
                 </span>
+              )}
+              {ep.downloaded && (
+                <div className='col-span-full mt-1 w-full text-[11px] text-gray-600 dark:text-gray-400'>
+                  {ep.audit ? (
+                    <>
+                      <div>
+                        最近下载：
+                        {new Date(ep.audit.downloaded_at).toLocaleString()}
+                      </div>
+                      <div className='truncate' title={ep.audit.source_url}>
+                        来源：{ep.audit.source_url}（{ep.audit.address_method}）
+                      </div>
+                      <div>
+                        片段：{ep.audit.original_segments} →{' '}
+                        {ep.audit.final_segments}，删除{' '}
+                        {ep.audit.removed_segments} 段 /{' '}
+                        {ep.audit.removed_duration_sec.toFixed(1)} 秒
+                      </div>
+                      <div>过滤器：{ep.audit.filter_version}</div>
+                      {ep.audit.filter_reasons?.length ? (
+                        <div>
+                          命中规则：{ep.audit.filter_reasons.join(', ')}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div>无历史记录，需重新下载生成</div>
+                  )}
+                  {ep.latest_failure && (
+                    <div className='mt-1 text-red-600 dark:text-red-400'>
+                      最近失败：
+                      {ep.latest_failure.failed_at
+                        ? new Date(ep.latest_failure.failed_at).toLocaleString()
+                        : '未知时间'}
+                      {ep.latest_failure.error
+                        ? ` · ${ep.latest_failure.error}`
+                        : ''}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           ))}

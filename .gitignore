@@ -73,3 +73,7 @@ android-tv/build/
 android-tv/app/build/
 android-tv/local.properties
 android-tv/.idea/
+
+# local Codex worktrees and visual brainstorming artifacts
+/.worktrees/
+/.superpowers/

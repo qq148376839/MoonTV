@@ -63,6 +63,7 @@ export default function DownloadConfirmDialog({
   const [rangeEnd, setRangeEnd] = useState(String(currentEpisodeNumber));
   const [spec, setSpec] = useState(String(currentEpisodeNumber));
   const [submitting, setSubmitting] = useState(false);
+  const [forceRedownload, setForceRedownload] = useState(false);
   const [resultText, setResultText] = useState<string | null>(null);
   const [resultType, setResultType] = useState<'ok' | 'warn' | 'error'>('ok');
 
@@ -83,11 +84,13 @@ export default function DownloadConfirmDialog({
         episode_range?: { start: number; end: number };
         auto_download_next?: boolean;
         current_episode?: number;
+        force_redownload?: boolean;
       } = {
         source: detail.source,
         id: detail.id,
         resource: detail,
       };
+      if (forceRedownload) body.force_redownload = true;
 
       if (mode === 'current') {
         body.episode_numbers = [currentEpisodeNumber];
@@ -255,6 +258,21 @@ export default function DownloadConfirmDialog({
               </span>
             </div>
           )}
+
+          <label className='flex items-start gap-3 rounded border border-amber-300/60 bg-amber-500/10 px-3 py-3 text-sm text-amber-900 dark:text-amber-200'>
+            <input
+              type='checkbox'
+              checked={forceRedownload}
+              onChange={(event) => setForceRedownload(event.target.checked)}
+              className='mt-0.5'
+            />
+            <span>
+              <span className='block font-medium'>重新抓取源并安全替换</span>
+              <span className='mt-1 block text-xs opacity-80'>
+                旧版本会保留到新版本完整验证通过；重下期间需要额外临时空间。
+              </span>
+            </span>
+          </label>
 
           {resultText && (
             <div

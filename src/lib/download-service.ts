@@ -8,7 +8,19 @@ import pLimit from 'p-limit';
 import path from 'path';
 
 import { filterM3U8Ads } from './ad-filter';
-import { getStorageManager, StorageManager } from './local-storage';
+import {
+  acquireEpisodeLock,
+  commitPlaylistAtomically,
+  createEpisodeGeneration,
+  redactDownloadUrl,
+  releaseEpisodeLock,
+  validateLocalPlaylist,
+} from './download-transaction';
+import {
+  EpisodeDownloadAuditSummary,
+  getStorageManager,
+  StorageManager,
+} from './local-storage';
 import { SearchResult } from './types';
 
 /**
@@ -60,7 +72,9 @@ async function fetchWithRetry(
       // 等待后重试（指数退避）
       const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
       console.log(
-        `[DownloadService] 请求失败，${waitTime}ms 后重试 (${attempt}/${maxRetries}): ${url}`
+        `[DownloadService] 请求失败，${waitTime}ms 后重试 (${attempt}/${maxRetries}): ${redactDownloadUrl(
+          url
+        )}`
       );
       await new Promise((resolve) => setTimeout(resolve, waitTime));
     }
@@ -151,6 +165,12 @@ export interface DownloadTask {
    * This is critical for range/partial downloads so we never "10-12 => 01-03".
    */
   episodeNumbers: number[];
+  forceRedownload: boolean;
+  addressMethod:
+    | 'direct'
+    | 'refreshed'
+    | 'client_fallback'
+    | 'historical_fallback';
   status: DownloadStatus;
   progress: number;
   error?: string;
@@ -208,7 +228,7 @@ export class DownloadService {
     episodeNumbers: number[]
   ): DownloadTask | null {
     // 用 episodeNumbers 判定“同一任务”（URL 可能变，但集号语义不应变）
-    const episodesKey = [...episodeNumbers].sort((a, b) => a - b).join(',');
+    const requestedEpisodes = new Set(episodeNumbers);
 
     // 遍历所有任务
     const tasksArray = Array.from(this.tasks.values());
@@ -227,10 +247,9 @@ export class DownloadService {
       }
 
       // 检查剧集是否相同（排序后比较）
-      const taskEpisodesKey = [...task.episodeNumbers]
-        .sort((a, b) => a - b)
-        .join(',');
-      if (taskEpisodesKey === episodesKey) {
+      if (
+        task.episodeNumbers.some((episode) => requestedEpisodes.has(episode))
+      ) {
         return task;
       }
     }
@@ -284,7 +303,11 @@ export class DownloadService {
   public createTask(
     resource: SearchResult,
     episodes: string[],
-    episodeNumbers?: number[]
+    episodeNumbers?: number[],
+    opts: {
+      forceRedownload?: boolean;
+      addressMethod?: DownloadTask['addressMethod'];
+    } = {}
   ): DownloadTask {
     const episodesToDownload = Array.isArray(episodes)
       ? episodes.filter(Boolean)
@@ -295,6 +318,16 @@ export class DownloadService {
         ? episodeNumbers
         : episodesToDownload.map((_, i) => i + 1);
 
+    const forceRedownload = opts.forceRedownload === true;
+
+    // 进行中的同集任务始终优先复用，强制重下不得并发写同一集。
+    const existingTask = this.findExistingTask(
+      resource.source,
+      resource.id,
+      numbersToDownload
+    );
+    if (existingTask) return existingTask;
+
     // 检查是否所有剧集都已完全下载
     const allDownloaded = this.areAllEpisodesDownloaded(
       resource.source,
@@ -302,7 +335,7 @@ export class DownloadService {
       numbersToDownload
     );
 
-    if (allDownloaded) {
+    if (allDownloaded && !forceRedownload) {
       console.log(
         `[DownloadService] 所有剧集已完全下载: ${resource.source}_${resource.id}, 剧集数: ${episodesToDownload.length}`
       );
@@ -317,6 +350,8 @@ export class DownloadService {
         resource,
         episodes: episodesToDownload,
         episodeNumbers: numbersToDownload,
+        forceRedownload: false,
+        addressMethod: 'direct',
         status: DownloadStatus.COMPLETED,
         progress: 100,
         createdAt: Date.now(),
@@ -324,20 +359,6 @@ export class DownloadService {
       };
       // 不添加到任务列表，直接返回
       return completedTask;
-    }
-
-    // 检查是否有相同资源+剧集的正在进行的任务
-    const existingTask = this.findExistingTask(
-      resource.source,
-      resource.id,
-      numbersToDownload
-    );
-
-    if (existingTask) {
-      console.log(
-        `[DownloadService] 发现已有相同下载任务: ${existingTask.id} (${resource.source}_${resource.id}, 剧集数: ${episodesToDownload.length})`
-      );
-      return existingTask;
     }
 
     const taskId = `download_${Date.now()}_${Math.random()
@@ -351,6 +372,8 @@ export class DownloadService {
       resource,
       episodes: episodesToDownload,
       episodeNumbers: numbersToDownload,
+      forceRedownload,
+      addressMethod: opts.addressMethod ?? 'direct',
       status: DownloadStatus.PENDING,
       progress: 0,
       createdAt: Date.now(),
@@ -425,6 +448,8 @@ export class DownloadService {
 
       // 下载所有剧集（跳过已下载的）
       const downloadedEpisodes: string[] = [];
+      const episodeAudits: Record<string, EpisodeDownloadAuditSummary> = {};
+      const episodeErrors: string[] = [];
       let totalSize = 0;
       let skippedCount = 0;
 
@@ -435,12 +460,22 @@ export class DownloadService {
       const existingMetadata = this.storageManager.readMetadata(localPath);
       const existingEpisodes = existingMetadata?.episodes;
       let alignedEpisodes: string[];
-      if (Array.isArray(existingEpisodes) && existingEpisodes.length === totalEpisodes) {
+      if (
+        Array.isArray(existingEpisodes) &&
+        existingEpisodes.length === totalEpisodes
+      ) {
         alignedEpisodes = [...existingEpisodes];
-      } else if (Array.isArray(existingEpisodes) && existingEpisodes.length > 0) {
+      } else if (
+        Array.isArray(existingEpisodes) &&
+        existingEpisodes.length > 0
+      ) {
         // 集数变化时保留已有数据，扩展或截断数组
         alignedEpisodes = new Array(totalEpisodes).fill('');
-        for (let j = 0; j < Math.min(existingEpisodes.length, totalEpisodes); j++) {
+        for (
+          let j = 0;
+          j < Math.min(existingEpisodes.length, totalEpisodes);
+          j++
+        ) {
           if (existingEpisodes[j]) {
             alignedEpisodes[j] = existingEpisodes[j];
           }
@@ -459,8 +494,9 @@ export class DownloadService {
         const episodeUrl = task.episodes[i];
         const episodeIndex = task.episodeNumbers[i] ?? i + 1;
 
-        // 检查剧集是否已下载
+        // 检查剧集是否已下载（强制重下时保留旧版本直到新 generation 提交）
         if (
+          !task.forceRedownload &&
           this.storageManager.isEpisodeDownloaded(
             task.source,
             task.resourceId,
@@ -491,42 +527,57 @@ export class DownloadService {
           continue;
         }
 
+        let lockPath = '';
         try {
+          lockPath = acquireEpisodeLock(localPath, episodeIndex, {
+            taskId: task.id,
+            pid: process.pid,
+            generationId: `${Date.now()}-${task.id}`,
+          });
           console.log(
             `[DownloadService] 开始下载剧集 ${episodeIndex}/${task.episodes.length}`
           );
-          const { localFilePath, fileSize } = await this.downloadEpisode(
-            episodeUrl,
-            localPath,
-            episodeIndex,
-            {
-              preferParse:
-                task.resource?.source_type === 'official' ||
-                task.resource?.source === 'official',
-            },
-            (progress) => {
-              // 更新总进度
-              const episodeProgress = progress / task.episodes.length;
-              const baseProgress = (i / task.episodes.length) * 100;
-              task.progress = Math.round(baseProgress + episodeProgress);
-              this.updateTask(task);
-            }
-          );
+          const { localFilePath, fileSize, audit, rollback, finalize } =
+            await this.downloadEpisode(
+              episodeUrl,
+              localPath,
+              episodeIndex,
+              {
+                preferParse:
+                  task.resource?.source_type === 'official' ||
+                  task.resource?.source === 'official',
+                forceRedownload: task.forceRedownload,
+                addressMethod: task.addressMethod,
+              },
+              (progress) => {
+                // 更新总进度
+                const episodeProgress = progress / task.episodes.length;
+                const baseProgress = (i / task.episodes.length) * 100;
+                task.progress = Math.round(baseProgress + episodeProgress);
+                this.updateTask(task);
+              }
+            );
 
           downloadedEpisodes.push(localFilePath);
           totalSize += fileSize;
+          if (audit) episodeAudits[String(episodeIndex)] = audit;
           if (alignedEpisodes.length >= episodeIndex) {
             alignedEpisodes[episodeIndex - 1] = localFilePath;
           }
           console.log(`[DownloadService] ✓ 剧集 ${episodeIndex} 下载完成`);
 
           // 增量更新 metadata/index，使已完成集数立即在 TVBox 可见
+          const metadataPath = path.join(localPath, 'metadata.json');
+          const previousMetadata = fs.existsSync(metadataPath)
+            ? fs.readFileSync(metadataPath)
+            : null;
           try {
             await this.storageManager.generateMetadata(
               task.resource,
               localPath,
               alignedEpisodes.length > 0 ? alignedEpisodes : downloadedEpisodes,
-              totalSize
+              totalSize,
+              episodeAudits
             );
             this.storageManager.updateIndex(
               task.source,
@@ -535,15 +586,62 @@ export class DownloadService {
               task.resource.year,
               localPath
             );
+            finalize?.();
+            const previousGeneration =
+              existingMetadata?.episode_audits?.[String(episodeIndex)]
+                ?.generation_id;
+            if (
+              previousGeneration &&
+              audit &&
+              previousGeneration !== audit.generation_id
+            ) {
+              try {
+                fs.rmSync(
+                  path.join(
+                    localPath,
+                    `episode_${String(episodeIndex).padStart(
+                      2,
+                      '0'
+                    )}_generations`,
+                    previousGeneration
+                  ),
+                  { recursive: true, force: true }
+                );
+              } catch (cleanupError) {
+                console.warn(
+                  '[DownloadService] 旧 generation 清理失败，将保留待后续清理:',
+                  cleanupError
+                );
+              }
+            }
           } catch (e) {
-            console.warn(`[DownloadService] 增量更新 metadata 失败（不影响下载）:`, e);
+            rollback?.();
+            if (previousMetadata) {
+              fs.writeFileSync(metadataPath, previousMetadata);
+            } else {
+              fs.rmSync(metadataPath, { force: true });
+            }
+            throw new Error(
+              `metadata 更新失败，已恢复旧版本: ${
+                e instanceof Error ? e.message : String(e)
+              }`
+            );
           }
         } catch (error) {
           console.error(
-            `[DownloadService] ✗ 下载剧集 ${episodeIndex} 失败: ${episodeUrl}`,
+            `[DownloadService] ✗ 下载剧集 ${episodeIndex} 失败: ${redactDownloadUrl(
+              episodeUrl
+            )}`,
             error
           );
+          episodeErrors.push(
+            `第 ${episodeIndex} 集: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
           // 继续下载其他剧集
+        } finally {
+          if (lockPath) releaseEpisodeLock(lockPath);
         }
       }
 
@@ -604,7 +702,8 @@ export class DownloadService {
         task.resource,
         localPath,
         alignedEpisodes.length > 0 ? alignedEpisodes : downloadedEpisodes,
-        totalSize
+        totalSize,
+        episodeAudits
       );
 
       // 更新资源索引
@@ -615,6 +714,13 @@ export class DownloadService {
         task.resource.year,
         localPath
       );
+
+      if (episodeErrors.length > 0) {
+        task.status = DownloadStatus.FAILED;
+        task.error = episodeErrors.join('; ');
+        this.updateTask(task);
+        return;
+      }
 
       task.status = DownloadStatus.COMPLETED;
       task.progress = 100;
@@ -637,9 +743,19 @@ export class DownloadService {
     url: string,
     localPath: string,
     episodeIndex: number,
-    opts?: { preferParse?: boolean },
+    opts?: {
+      preferParse?: boolean;
+      forceRedownload?: boolean;
+      addressMethod?: DownloadTask['addressMethod'];
+    },
     progressCallback?: (progress: number) => void
-  ): Promise<{ localFilePath: string; fileSize: number }> {
+  ): Promise<{
+    localFilePath: string;
+    fileSize: number;
+    audit?: EpisodeDownloadAuditSummary;
+    rollback?: () => void;
+    finalize?: () => void;
+  }> {
     // 检测文件格式
     const isM3U8 =
       url.includes('.m3u8') ||
@@ -647,7 +763,13 @@ export class DownloadService {
       url.startsWith('/api/proxy/m3u8');
 
     if (isM3U8) {
-      return this.downloadM3U8(url, localPath, episodeIndex, progressCallback);
+      return this.downloadM3U8(url, localPath, episodeIndex, progressCallback, {
+        sourceUrl: url,
+        addressMethod:
+          opts?.addressMethod === 'direct' || !opts?.addressMethod
+            ? 'direct'
+            : opts.addressMethod,
+      });
     }
 
     const preferParse = opts?.preferParse === true;
@@ -657,21 +779,27 @@ export class DownloadService {
     // - 或者 URL 本身看起来就是站外播放页（*.html / youku 等）
     if (preferParse || isLikelyWebPageUrl(url)) {
       console.log(
-        `[DownloadService] 检测到站外播放页，先解析: ${url.substring(0, 120)}`
+        `[DownloadService] 检测到站外播放页，先解析: ${redactDownloadUrl(url)}`
       );
       const m3u8Url = await parseToM3u8Url(url);
       if (m3u8Url) {
         console.log(
-          `[DownloadService] ✓ 解析成功，开始下载 M3U8: ${m3u8Url.substring(
-            0,
-            120
+          `[DownloadService] ✓ 解析成功，开始下载 M3U8: ${redactDownloadUrl(
+            m3u8Url
           )}`
         );
         return this.downloadM3U8(
           m3u8Url,
           localPath,
           episodeIndex,
-          progressCallback
+          progressCallback,
+          {
+            sourceUrl: url,
+            addressMethod:
+              opts?.addressMethod === 'direct' || !opts?.addressMethod
+                ? 'parsed'
+                : opts.addressMethod,
+          }
         );
       }
       if (preferParse) {
@@ -698,9 +826,19 @@ export class DownloadService {
     m3u8Url: string,
     localPath: string,
     episodeIndex: number,
-    progressCallback?: (progress: number) => void
-  ): Promise<{ localFilePath: string; fileSize: number }> {
-    console.log(`[DownloadService] 下载 M3U8: ${m3u8Url}`);
+    progressCallback?: (progress: number) => void,
+    auditContext: {
+      sourceUrl: string;
+      addressMethod: EpisodeDownloadAuditSummary['address_method'];
+    } = { sourceUrl: m3u8Url, addressMethod: 'direct' }
+  ): Promise<{
+    localFilePath: string;
+    fileSize: number;
+    audit: EpisodeDownloadAuditSummary;
+    rollback?: () => void;
+    finalize?: () => void;
+  }> {
+    console.log(`[DownloadService] 下载 M3U8: ${redactDownloadUrl(m3u8Url)}`);
 
     // 下载 M3U8 播放列表（带重试）
     const m3u8Response = await fetchWithRetry(m3u8Url, {}, 3, 30000);
@@ -759,7 +897,9 @@ export class DownloadService {
       }
 
       console.log(
-        `[DownloadService] 选择最高质量流: ${mediaPlaylistUrl} (带宽: ${maxBandwidth})`
+        `[DownloadService] 选择最高质量流: ${redactDownloadUrl(
+          mediaPlaylistUrl
+        )} (带宽: ${maxBandwidth})`
       );
 
       // 下载子播放列表（带重试）
@@ -775,22 +915,25 @@ export class DownloadService {
       mediaPlaylistContent = await mediaResponse.text();
     }
 
-    const m3u8FileName = `episode_${episodeIndex
-      .toString()
-      .padStart(2, '0')}.m3u8`;
+    const epNo = episodeIndex.toString().padStart(2, '0');
+    const m3u8FileName = `episode_${epNo}.m3u8`;
     const m3u8FilePath = path.join(localPath, m3u8FileName);
-
-    // 创建剧集目录
-    const episodeDir = path.join(
+    const generationId = `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    const generation = createEpisodeGeneration(
       localPath,
-      `episode_${episodeIndex.toString().padStart(2, '0')}`
+      episodeIndex,
+      generationId
     );
-    if (!fs.existsSync(episodeDir)) {
-      fs.mkdirSync(episodeDir, { recursive: true });
-    }
+    const episodeDir = generation.segmentsDir;
+    const originalSegmentCount = mediaPlaylistContent
+      .split('\n')
+      .filter((line) => line.trim() && !line.trim().startsWith('#')).length;
+    fs.writeFileSync(generation.rawPlaylistPath, mediaPlaylistContent, 'utf-8');
 
-    // 落盘前去广告：源 m3u8 含原始 URL，可用全部策略（关键词+域名+DISCONTINUITY）
-    {
+    try {
+      // 落盘前去广告：源 m3u8 含原始 URL，可用全部策略（关键词+域名+DISCONTINUITY）
       const adResult = filterM3U8Ads(mediaPlaylistContent, {
         enableDomain: true,
         enableKeyword: true,
@@ -806,155 +949,219 @@ export class DownloadService {
       } else if (adResult.reason) {
         console.log(`[DownloadService] 未去广告: ${adResult.reason}`);
       }
-    }
+      fs.writeFileSync(
+        generation.cleanedPlaylistPath,
+        mediaPlaylistContent,
+        'utf-8'
+      );
 
-    // 解析媒体播放列表内容，提取 TS 片段 URL
-    const tsUrls: string[] = [];
-    const lines = mediaPlaylistContent.split('\n');
-    const mediaBaseUrl = new URL(mediaPlaylistUrl);
+      // 解析媒体播放列表内容，提取 TS 片段 URL
+      const tsUrls: string[] = [];
+      const lines = mediaPlaylistContent.split('\n');
+      const mediaBaseUrl = new URL(mediaPlaylistUrl);
 
-    // 先处理 KEY：下载并改写 URI 为本地相对路径（episode_XX/key_000.key）
-    const keyUrlToIndex = new Map<string, number>();
-    let nextKeyIndex = 0;
-    const epNo = episodeIndex.toString().padStart(2, '0');
-    const episodePrefix = `episode_${epNo}`;
+      // 先处理 KEY：下载并改写 URI 为本地相对路径（episode_XX/key_000.key）
+      const keyUrlToIndex = new Map<string, number>();
+      const mapUrlToIndex = new Map<string, number>();
+      let nextKeyIndex = 0;
+      let nextMapIndex = 0;
+      const episodePrefix = generation.relativePrefix;
 
-    const downloadKeyByUrl = async (keyAbsUrl: string, keyIndex: number) => {
-      const keyNo = String(keyIndex).padStart(3, '0');
-      const keyFileName = `key_${keyNo}.key`;
-      const keyFilePath = path.join(episodeDir, keyFileName);
+      const downloadKeyByUrl = async (keyAbsUrl: string, keyIndex: number) => {
+        const keyNo = String(keyIndex).padStart(3, '0');
+        const keyFileName = `key_${keyNo}.key`;
+        const keyFilePath = path.join(generation.keysDir, keyFileName);
 
-      const resp = await fetchWithRetry(
-        keyAbsUrl,
-        {
-          headers: {
-            // 防盗链/防缓存敏感：Referer 指向媒体播放列表 URL
-            Referer: mediaPlaylistUrl,
-            Accept: '*/*',
-            'Cache-Control': 'no-cache',
-            Pragma: 'no-cache',
+        const resp = await fetchWithRetry(
+          keyAbsUrl,
+          {
+            headers: {
+              // 防盗链/防缓存敏感：Referer 指向媒体播放列表 URL
+              Referer: mediaPlaylistUrl,
+              Accept: '*/*',
+              'Cache-Control': 'no-cache',
+              Pragma: 'no-cache',
+            },
           },
-        },
-        3,
-        30000
-      );
-      if (!resp.ok) {
-        throw new Error(`下载 KEY 失败: ${resp.status}`);
-      }
-
-      const ab = await resp.arrayBuffer();
-      const buf = Buffer.from(ab);
-      const h = sha256Hex(buf);
-
-      // 若已存在但 hash 不同：告警并覆盖（观测优先 + 自愈）
-      if (fs.existsSync(keyFilePath)) {
-        try {
-          const old = fs.readFileSync(keyFilePath);
-          const oldHash = sha256Hex(old);
-          if (oldHash !== h) {
-            console.warn(
-              `[DownloadService] ⚠️ KEY hash 变化，将覆盖写入: episode=${episodeIndex}, keyIndex=${keyIndex}, old=${oldHash}, new=${h}`
-            );
-          }
-        } catch {
-          // ignore
+          3,
+          30000
+        );
+        if (!resp.ok) {
+          throw new Error(`下载 KEY 失败: ${resp.status}`);
         }
-      }
 
-      fs.writeFileSync(keyFilePath, buf);
-      console.log(
-        `[DownloadService] ✓ KEY 已写入: episode=${episodeIndex}, keyIndex=${keyIndex}, bytes=${buf.length}, sha256=${h}`
-      );
-      return { keyFileName };
-    };
+        const ab = await resp.arrayBuffer();
+        const buf = Buffer.from(ab);
+        if (buf.length === 0) throw new Error('下载 KEY 为空');
+        const h = sha256Hex(buf);
 
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      // EXT-X-KEY: METHOD=AES-128,URI="..."
-      if (trimmedLine.startsWith('#EXT-X-KEY')) {
-        // METHOD=NONE 不处理
-        if (/METHOD=NONE/i.test(trimmedLine)) {
+        // 若已存在但 hash 不同：告警并覆盖（观测优先 + 自愈）
+        if (fs.existsSync(keyFilePath)) {
+          try {
+            const old = fs.readFileSync(keyFilePath);
+            const oldHash = sha256Hex(old);
+            if (oldHash !== h) {
+              console.warn(
+                `[DownloadService] ⚠️ KEY hash 变化，将覆盖写入: episode=${episodeIndex}, keyIndex=${keyIndex}, old=${oldHash}, new=${h}`
+              );
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        fs.writeFileSync(keyFilePath, buf);
+        console.log(
+          `[DownloadService] ✓ KEY 已写入: episode=${episodeIndex}, keyIndex=${keyIndex}, bytes=${buf.length}, sha256=${h}`
+        );
+        return { keyFileName };
+      };
+
+      const downloadMapByUrl = async (mapAbsUrl: string, mapIndex: number) => {
+        const mapFileName = `map_${String(mapIndex).padStart(3, '0')}.mp4`;
+        const mapFilePath = path.join(generation.mapsDir, mapFileName);
+        const resp = await fetchWithRetry(mapAbsUrl, {}, 3, 30000);
+        if (!resp.ok) throw new Error(`下载 MAP 失败: ${resp.status}`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        if (buf.length === 0) throw new Error('下载 MAP 为空');
+        fs.writeFileSync(mapFilePath, buf);
+      };
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        // EXT-X-KEY: METHOD=AES-128,URI="..."
+        if (trimmedLine.startsWith('#EXT-X-KEY')) {
+          // METHOD=NONE 不处理
+          if (/METHOD=NONE/i.test(trimmedLine)) {
+            continue;
+          }
+          const m = trimmedLine.match(/URI="([^"]+)"/);
+          if (m) {
+            const rawKeyUri = m[1];
+            let keyAbsUrl = rawKeyUri;
+            try {
+              keyAbsUrl =
+                rawKeyUri.startsWith('http://') ||
+                rawKeyUri.startsWith('https://')
+                  ? rawKeyUri
+                  : new URL(rawKeyUri, mediaBaseUrl).href;
+            } catch {
+              // keep raw
+            }
+            let keyIndex = keyUrlToIndex.get(keyAbsUrl);
+            if (keyIndex == null) {
+              keyIndex = nextKeyIndex++;
+              keyUrlToIndex.set(keyAbsUrl, keyIndex);
+              // 下载 key（只在首次见到该 key URL 时）
+              await downloadKeyByUrl(keyAbsUrl, keyIndex);
+            }
+          }
           continue;
         }
-        const m = trimmedLine.match(/URI="([^"]+)"/);
-        if (m) {
-          const rawKeyUri = m[1];
-          let keyAbsUrl = rawKeyUri;
-          try {
-            keyAbsUrl =
-              rawKeyUri.startsWith('http://') ||
-              rawKeyUri.startsWith('https://')
-                ? rawKeyUri
-                : new URL(rawKeyUri, mediaBaseUrl).href;
-          } catch {
-            // keep raw
+
+        if (trimmedLine.startsWith('#EXT-X-MAP')) {
+          const match = trimmedLine.match(/URI="([^"]+)"/);
+          if (match) {
+            const mapAbsUrl = new URL(match[1], mediaBaseUrl).href;
+            let mapIndex = mapUrlToIndex.get(mapAbsUrl);
+            if (mapIndex == null) {
+              mapIndex = nextMapIndex++;
+              mapUrlToIndex.set(mapAbsUrl, mapIndex);
+              await downloadMapByUrl(mapAbsUrl, mapIndex);
+            }
           }
-          let keyIndex = keyUrlToIndex.get(keyAbsUrl);
-          if (keyIndex == null) {
-            keyIndex = nextKeyIndex++;
-            keyUrlToIndex.set(keyAbsUrl, keyIndex);
-            // 下载 key（只在首次见到该 key URL 时）
-            await downloadKeyByUrl(keyAbsUrl, keyIndex);
+          continue;
+        }
+
+        if (trimmedLine && !trimmedLine.startsWith('#')) {
+          // 相对路径转换为绝对路径
+          let tsUrl = trimmedLine;
+          if (!tsUrl.startsWith('http')) {
+            tsUrl = new URL(tsUrl, mediaBaseUrl).href;
           }
-        }
-        continue;
-      }
-
-      if (trimmedLine && !trimmedLine.startsWith('#')) {
-        // 相对路径转换为绝对路径
-        let tsUrl = trimmedLine;
-        if (!tsUrl.startsWith('http')) {
-          tsUrl = new URL(tsUrl, mediaBaseUrl).href;
-        }
-        tsUrls.push(tsUrl);
-      }
-    }
-
-    console.log(
-      `[DownloadService] M3U8 包含 ${tsUrls.length} 个 TS 片段，将使用并发数: ${this.tsConcurrent}`
-    );
-
-    // 检查已下载的片段
-    let existingCount = 0;
-    const existingSizes: Map<number, number> = new Map();
-    for (let i = 0; i < tsUrls.length; i++) {
-      const segmentFileName = `segment_${i.toString().padStart(3, '0')}.ts`;
-      const segmentFilePath = path.join(episodeDir, segmentFileName);
-      if (fs.existsSync(segmentFilePath)) {
-        const stats = fs.statSync(segmentFilePath);
-        if (stats.size > 0) {
-          existingSizes.set(i, stats.size);
-          existingCount++;
+          tsUrls.push(tsUrl);
         }
       }
-    }
 
-    if (existingCount > 0) {
       console.log(
-        `[DownloadService] 检测到 ${existingCount}/${tsUrls.length} 个 TS 片段已存在，将跳过下载`
+        `[DownloadService] M3U8 包含 ${tsUrls.length} 个 TS 片段，将使用并发数: ${this.tsConcurrent}`
       );
-    }
 
-    // 下载所有 TS 片段（使用 p-limit 控制并发）
-    let totalSize = 0;
-    let completed = 0;
-    let skipped = 0;
-    const startTime = Date.now();
-
-    const downloadPromises = tsUrls.map((tsUrl, i) =>
-      this.tsLimit(async () => {
+      // 检查已下载的片段
+      let existingCount = 0;
+      const existingSizes: Map<number, number> = new Map();
+      for (let i = 0; i < tsUrls.length; i++) {
         const segmentFileName = `segment_${i.toString().padStart(3, '0')}.ts`;
         const segmentFilePath = path.join(episodeDir, segmentFileName);
-
-        // 检查文件是否已存在
         if (fs.existsSync(segmentFilePath)) {
           const stats = fs.statSync(segmentFilePath);
           if (stats.size > 0) {
-            // 文件已存在且大小大于0，跳过下载
-            const existingSize = existingSizes.get(i) || stats.size;
-            totalSize += existingSize;
+            existingSizes.set(i, stats.size);
+            existingCount++;
+          }
+        }
+      }
+
+      if (existingCount > 0) {
+        console.log(
+          `[DownloadService] 检测到 ${existingCount}/${tsUrls.length} 个 TS 片段已存在，将跳过下载`
+        );
+      }
+
+      // 下载所有 TS 片段（使用 p-limit 控制并发）
+      let totalSize = 0;
+      let completed = 0;
+      let skipped = 0;
+      const startTime = Date.now();
+
+      const downloadPromises = tsUrls.map((tsUrl, i) =>
+        this.tsLimit(async () => {
+          const segmentFileName = `segment_${i.toString().padStart(3, '0')}.ts`;
+          const segmentFilePath = path.join(episodeDir, segmentFileName);
+
+          // 检查文件是否已存在
+          if (fs.existsSync(segmentFilePath)) {
+            const stats = fs.statSync(segmentFilePath);
+            if (stats.size > 0) {
+              // 文件已存在且大小大于0，跳过下载
+              const existingSize = existingSizes.get(i) || stats.size;
+              totalSize += existingSize;
+              completed++;
+              skipped++;
+
+              // 更新进度
+              if (progressCallback) {
+                const progress = (completed / tsUrls.length) * 100;
+                progressCallback(progress);
+              }
+
+              // 每完成 10% 或每 50 个片段输出一次日志
+              if (
+                completed % Math.max(1, Math.floor(tsUrls.length / 10)) === 0 ||
+                completed % 50 === 0
+              ) {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                const speed = (completed / parseFloat(elapsed)).toFixed(1);
+                console.log(
+                  `[DownloadService] TS 片段进度: ${completed}/${
+                    tsUrls.length
+                  } (${((completed / tsUrls.length) * 100).toFixed(
+                    1
+                  )}%) - 已跳过: ${skipped}, 速度: ${speed} 片段/秒`
+                );
+              }
+              return;
+            }
+          }
+
+          // 文件不存在或大小为0，需要下载
+          try {
+            const segmentSize = await this.downloadFile(tsUrl, segmentFilePath);
+            if (segmentSize <= 0) {
+              throw new Error(`下载片段为空: index=${i}`);
+            }
+            totalSize += segmentSize;
             completed++;
-            skipped++;
 
             // 更新进度
             if (progressCallback) {
@@ -977,127 +1184,193 @@ export class DownloadService {
                 )}%) - 已跳过: ${skipped}, 速度: ${speed} 片段/秒`
               );
             }
-            return;
-          }
-        }
-
-        // 文件不存在或大小为0，需要下载
-        try {
-          const segmentSize = await this.downloadFile(tsUrl, segmentFilePath);
-          totalSize += segmentSize;
-          completed++;
-
-          // 更新进度
-          if (progressCallback) {
-            const progress = (completed / tsUrls.length) * 100;
-            progressCallback(progress);
-          }
-
-          // 每完成 10% 或每 50 个片段输出一次日志
-          if (
-            completed % Math.max(1, Math.floor(tsUrls.length / 10)) === 0 ||
-            completed % 50 === 0
-          ) {
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            const speed = (completed / parseFloat(elapsed)).toFixed(1);
-            console.log(
-              `[DownloadService] TS 片段进度: ${completed}/${tsUrls.length} (${(
-                (completed / tsUrls.length) *
-                100
-              ).toFixed(1)}%) - 已跳过: ${skipped}, 速度: ${speed} 片段/秒`
+          } catch (error) {
+            console.error(
+              `[DownloadService] 下载 TS 片段失败 [${i + 1}/${tsUrls.length}]`,
+              error
             );
+            throw error;
           }
-        } catch (error) {
-          console.error(
-            `[DownloadService] 下载 TS 片段失败 [${i + 1}/${
-              tsUrls.length
-            }]: ${tsUrl}`,
-            error
-          );
-          // p-limit 会自动处理错误，不会影响其他任务
-          // 继续下载其他片段，但需要更新完成计数以保持进度准确
-          completed++;
-          if (progressCallback) {
-            const progress = (completed / tsUrls.length) * 100;
-            progressCallback(progress);
-          }
-        }
-      })
-    );
+        })
+      );
 
-    // 等待所有下载完成（无论成功或失败）
-    await Promise.allSettled(downloadPromises);
+      // 任一片段失败都不得提交 generation。
+      await Promise.all(downloadPromises);
 
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const downloadedCount = completed - skipped;
-    console.log(
-      `[DownloadService] ✓ TS 片段处理完成: ${completed}/${
-        tsUrls.length
-      } 个片段 (已跳过: ${skipped}, 新下载: ${downloadedCount})，总大小: ${(
-        totalSize /
-        1024 /
-        1024
-      ).toFixed(2)}MB，耗时: ${elapsed}秒`
-    );
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const downloadedCount = completed - skipped;
+      console.log(
+        `[DownloadService] ✓ TS 片段处理完成: ${completed}/${
+          tsUrls.length
+        } 个片段 (已跳过: ${skipped}, 新下载: ${downloadedCount})，总大小: ${(
+          totalSize /
+          1024 /
+          1024
+        ).toFixed(2)}MB，耗时: ${elapsed}秒`
+      );
 
-    // 更新 M3U8 文件中的路径为相对路径（TS + KEY）
-    // 始终保存媒体播放列表的内容（因为实际下载的是媒体播放列表的 TS 片段）
-    let updatedM3U8Content = mediaPlaylistContent;
+      // 更新 M3U8 文件中的路径为相对路径（TS + KEY）
+      // 始终保存媒体播放列表的内容（因为实际下载的是媒体播放列表的 TS 片段）
+      let updatedM3U8Content = mediaPlaylistContent;
 
-    // 改写 KEY URI 为本地相对路径：episode_XX/key_000.key
-    if (keyUrlToIndex.size > 0) {
-      const mediaLines = updatedM3U8Content.split('\n');
-      updatedM3U8Content = mediaLines
-        .map((ln) => {
-          const t = ln.trim();
-          if (!t.startsWith('#EXT-X-KEY')) return ln;
-          if (/METHOD=NONE/i.test(t)) return ln;
-          const m = t.match(/URI="([^"]+)"/);
-          if (!m) return ln;
-          const rawKeyUri = m[1];
-          let keyAbsUrl = rawKeyUri;
-          try {
-            keyAbsUrl =
-              rawKeyUri.startsWith('http://') ||
-              rawKeyUri.startsWith('https://')
-                ? rawKeyUri
-                : new URL(rawKeyUri, mediaBaseUrl).href;
-          } catch {
-            // ignore
-          }
-          const idx = keyUrlToIndex.get(keyAbsUrl);
-          if (idx == null) return ln;
-          const keyRel = `${episodePrefix}/key_${String(idx).padStart(
-            3,
-            '0'
-          )}.key`;
-          return ln.replace(/URI="([^"]+)"/, `URI="${keyRel}"`);
+      // 改写 KEY URI 为本地相对路径：episode_XX/key_000.key
+      if (keyUrlToIndex.size > 0) {
+        const mediaLines = updatedM3U8Content.split('\n');
+        updatedM3U8Content = mediaLines
+          .map((ln) => {
+            const t = ln.trim();
+            if (!t.startsWith('#EXT-X-KEY')) return ln;
+            if (/METHOD=NONE/i.test(t)) return ln;
+            const m = t.match(/URI="([^"]+)"/);
+            if (!m) return ln;
+            const rawKeyUri = m[1];
+            let keyAbsUrl = rawKeyUri;
+            try {
+              keyAbsUrl =
+                rawKeyUri.startsWith('http://') ||
+                rawKeyUri.startsWith('https://')
+                  ? rawKeyUri
+                  : new URL(rawKeyUri, mediaBaseUrl).href;
+            } catch {
+              // ignore
+            }
+            const idx = keyUrlToIndex.get(keyAbsUrl);
+            if (idx == null) return ln;
+            const keyRel = `${episodePrefix}/keys/key_${String(idx).padStart(
+              3,
+              '0'
+            )}.key`;
+            return ln.replace(/URI="([^"]+)"/, `URI="${keyRel}"`);
+          })
+          .join('\n');
+      }
+
+      if (mapUrlToIndex.size > 0) {
+        updatedM3U8Content = updatedM3U8Content
+          .split('\n')
+          .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('#EXT-X-MAP')) return line;
+            const match = trimmed.match(/URI="([^"]+)"/);
+            if (!match) return line;
+            const absolute = new URL(match[1], mediaBaseUrl).href;
+            const index = mapUrlToIndex.get(absolute);
+            if (index == null) return line;
+            return line.replace(
+              /URI="([^"]+)"/,
+              `URI="${episodePrefix}/maps/map_${String(index).padStart(
+                3,
+                '0'
+              )}.mp4"`
+            );
+          })
+          .join('\n');
+      }
+
+      // 按播放列表顺序改写所有媒体片段，兼容查询参数和非 .ts 后缀。
+      let segmentIndex = 0;
+      updatedM3U8Content = updatedM3U8Content
+        .split('\n')
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) return line;
+          const rewritten = `${episodePrefix}/segments/segment_${String(
+            segmentIndex
+          ).padStart(3, '0')}.ts`;
+          segmentIndex++;
+          return rewritten;
         })
         .join('\n');
-    }
 
-    // 更新媒体播放列表中的 TS 路径为相对路径
-    updatedM3U8Content = updatedM3U8Content.replace(
-      /^[^#\n]+\.ts$/gm,
-      (match) => {
-        const trimmedMatch = match.trim();
-        const segmentIndex = tsUrls.findIndex((url) => {
-          const urlPath = new URL(url).pathname;
-          return urlPath.endsWith(trimmedMatch) || url.includes(trimmedMatch);
-        });
-        if (segmentIndex >= 0) {
-          return `${episodePrefix}/segment_${segmentIndex
-            .toString()
-            .padStart(3, '0')}.ts`;
-        }
-        return match;
+      // generation 内先落盘并完整校验，正式入口最后原子切换。
+      fs.writeFileSync(generation.playlistPath, updatedM3U8Content, 'utf-8');
+      const validation = validateLocalPlaylist(
+        generation.playlistPath,
+        localPath
+      );
+      if (validation.references <= 0 || tsUrls.length <= 0) {
+        throw new Error('播放列表不包含可提交的媒体片段');
       }
-    );
+      const audit: EpisodeDownloadAuditSummary = {
+        generation_id: generationId,
+        downloaded_at: Date.now(),
+        source_url: redactDownloadUrl(auditContext.sourceUrl),
+        media_playlist_url: redactDownloadUrl(mediaPlaylistUrl),
+        address_method: auditContext.addressMethod,
+        original_segments: originalSegmentCount,
+        removed_segments: adResult.removedSegments,
+        final_segments: tsUrls.length,
+        removed_duration_sec: adResult.removedDurationSec,
+        filter_version: 'm3u8-ad-filter-v2',
+        filter_reason: adResult.reason,
+        filter_reasons: adResult.matchedReasons,
+        validation_passed: validation.references > 0,
+      };
+      const privateReport = {
+        ...audit,
+        source_url: auditContext.sourceUrl,
+        media_playlist_url: mediaPlaylistUrl,
+        filter_options: {
+          enableDomain: true,
+          enableKeyword: true,
+          enableDiscontinuity: true,
+        },
+        raw_sha256: sha256Hex(
+          Buffer.from(fs.readFileSync(generation.rawPlaylistPath))
+        ),
+        cleaned_sha256: sha256Hex(
+          Buffer.from(fs.readFileSync(generation.cleanedPlaylistPath))
+        ),
+        validation: { passed: true, references: validation.references },
+      };
+      fs.writeFileSync(
+        generation.reportPath,
+        JSON.stringify(privateReport, null, 2),
+        'utf-8'
+      );
+      const backupPath = `${m3u8FilePath}.${generationId}.bak`;
+      const hadActive = fs.existsSync(m3u8FilePath);
+      if (hadActive) fs.copyFileSync(m3u8FilePath, backupPath);
+      commitPlaylistAtomically(m3u8FilePath, updatedM3U8Content);
 
-    // 保存 M3U8 文件
-    fs.writeFileSync(m3u8FilePath, updatedM3U8Content, 'utf-8');
-
-    return { localFilePath: m3u8FilePath, fileSize: totalSize };
+      return {
+        localFilePath: m3u8FilePath,
+        fileSize: totalSize,
+        audit,
+        rollback: () => {
+          if (hadActive) fs.renameSync(backupPath, m3u8FilePath);
+          else fs.rmSync(m3u8FilePath, { force: true });
+          fs.rmSync(generation.rootDir, { recursive: true, force: true });
+        },
+        finalize: () => fs.rmSync(backupPath, { force: true }),
+      };
+    } catch (error) {
+      const failuresDir = path.join(
+        localPath,
+        `episode_${epNo}_generations`,
+        'failures'
+      );
+      fs.mkdirSync(failuresDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(failuresDir, `${generationId}.json`),
+        JSON.stringify(
+          {
+            generation_id: generationId,
+            failed_at: Date.now(),
+            source_url: auditContext.sourceUrl,
+            media_playlist_url: mediaPlaylistUrl,
+            address_method: auditContext.addressMethod,
+            stage: 'download_or_validation',
+            error: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+      fs.rmSync(generation.rootDir, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   /**
@@ -1108,8 +1381,13 @@ export class DownloadService {
     localPath: string,
     episodeIndex: number,
     progressCallback?: (progress: number) => void
-  ): Promise<{ localFilePath: string; fileSize: number }> {
-    console.log(`[DownloadService] 下载直接文件: ${url}`);
+  ): Promise<{
+    localFilePath: string;
+    fileSize: number;
+    rollback?: () => void;
+    finalize?: () => void;
+  }> {
+    console.log(`[DownloadService] 下载直接文件: ${redactDownloadUrl(url)}`);
 
     // 获取文件扩展名
     const urlPath = new URL(url).pathname;
@@ -1119,9 +1397,33 @@ export class DownloadService {
       .padStart(2, '0')}${ext}`;
     const filePath = path.join(localPath, fileName);
 
-    const fileSize = await this.downloadFile(url, filePath, progressCallback);
-
-    return { localFilePath: filePath, fileSize };
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const tempPath = `${filePath}.${nonce}.download`;
+    const backupPath = `${filePath}.${nonce}.bak`;
+    const hadActive = fs.existsSync(filePath);
+    try {
+      const fileSize = await this.downloadFile(url, tempPath, progressCallback);
+      if (fileSize <= 0 || fs.statSync(tempPath).size !== fileSize) {
+        throw new Error('直接文件下载不完整');
+      }
+      if (hadActive) fs.renameSync(filePath, backupPath);
+      fs.renameSync(tempPath, filePath);
+      return {
+        localFilePath: filePath,
+        fileSize,
+        rollback: () => {
+          fs.rmSync(filePath, { force: true });
+          if (hadActive) fs.renameSync(backupPath, filePath);
+        },
+        finalize: () => fs.rmSync(backupPath, { force: true }),
+      };
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true });
+      if (hadActive && !fs.existsSync(filePath) && fs.existsSync(backupPath)) {
+        fs.renameSync(backupPath, filePath);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1143,36 +1445,46 @@ export class DownloadService {
       10
     );
 
-    // 使用流式下载
-    const fileStream = fs.createWriteStream(filePath);
     const reader = response.body?.getReader();
 
     if (!reader) {
       throw new Error('无法获取响应流');
     }
 
+    const fileStream = fs.createWriteStream(filePath);
+    const streamCompletion = new Promise<void>((resolve, reject) => {
+      fileStream.once('finish', resolve);
+      fileStream.once('error', reject);
+    });
     let downloaded = 0;
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        if (!fileStream.write(chunk)) {
+          await new Promise<void>((resolve, reject) => {
+            fileStream.once('drain', resolve);
+            fileStream.once('error', reject);
+          });
+        }
+        downloaded += value.length;
+        if (progressCallback && contentLength > 0) {
+          progressCallback((downloaded / contentLength) * 100);
+        }
       }
-
-      fileStream.write(Buffer.from(value));
-      downloaded += value.length;
-
-      // 更新进度
-      if (progressCallback && contentLength > 0) {
-        const progress = (downloaded / contentLength) * 100;
-        progressCallback(progress);
+      fileStream.end();
+      await streamCompletion;
+      if (contentLength > 0 && downloaded !== contentLength) {
+        throw new Error(`下载长度不匹配: ${downloaded}/${contentLength}`);
       }
+      return downloaded;
+    } catch (error) {
+      fileStream.destroy();
+      fs.rmSync(filePath, { force: true });
+      throw error;
     }
-
-    fileStream.end();
-
-    return downloaded;
   }
 
   /**

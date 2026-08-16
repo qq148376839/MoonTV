@@ -2,7 +2,12 @@
 
 import fs from 'fs';
 import { NextRequest, NextResponse } from 'next/server';
+import path from 'path';
 
+import {
+  redactDownloadUrl,
+  redactUrlsInText,
+} from '@/lib/download-transaction';
 import { getStorageManager } from '@/lib/local-storage';
 import { PathUtils } from '@/lib/path-utils';
 
@@ -56,20 +61,79 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const episodeStatus = (metadata.episodes || []).map((p, idx) => ({
-      episode: idx + 1,
-      downloaded: typeof p === 'string' && p.trim().length > 0,
-      file_path: p,
-    }));
+    const episodeStatus = (metadata.episodes || []).map((p, idx) => {
+      const audit = metadata.episode_audits?.[String(idx + 1)];
+      const epNo = String(idx + 1).padStart(2, '0');
+      const failuresDir = path.join(
+        localPath,
+        `episode_${epNo}_generations`,
+        'failures'
+      );
+      let latestFailure: Record<string, unknown> | null = null;
+      if (fs.existsSync(failuresDir)) {
+        const failureFiles = fs
+          .readdirSync(failuresDir)
+          .filter((name) => name.endsWith('.json'))
+          .sort()
+          .reverse();
+        if (failureFiles[0]) {
+          try {
+            latestFailure = JSON.parse(
+              fs.readFileSync(path.join(failuresDir, failureFiles[0]), 'utf-8')
+            ) as Record<string, unknown>;
+            for (const key of ['source_url', 'media_playlist_url']) {
+              if (typeof latestFailure[key] === 'string') {
+                latestFailure[key] = redactDownloadUrl(
+                  latestFailure[key] as string
+                );
+              }
+            }
+            if (typeof latestFailure.error === 'string') {
+              latestFailure.error = redactUrlsInText(latestFailure.error);
+            }
+          } catch {
+            latestFailure = null;
+          }
+        }
+      }
+      return {
+        episode: idx + 1,
+        downloaded: typeof p === 'string' && p.trim().length > 0,
+        file_path: p,
+        audit: audit
+          ? {
+              ...audit,
+              source_url: redactDownloadUrl(audit.source_url),
+              media_playlist_url: redactDownloadUrl(audit.media_playlist_url),
+            }
+          : null,
+        latest_failure: latestFailure,
+      };
+    });
 
     const downloadedEpisodes = episodeStatus.filter((e) => e.downloaded).length;
+    const safeMetadata = {
+      ...metadata,
+      episode_audits: metadata.episode_audits
+        ? Object.fromEntries(
+            Object.entries(metadata.episode_audits).map(([episode, audit]) => [
+              episode,
+              {
+                ...audit,
+                source_url: redactDownloadUrl(audit.source_url),
+                media_playlist_url: redactDownloadUrl(audit.media_playlist_url),
+              },
+            ])
+          )
+        : undefined,
+    };
 
     return NextResponse.json(
       {
         source,
         id,
         local_path: entry.local_path,
-        metadata,
+        metadata: safeMetadata,
         stats: {
           downloaded_episodes: downloadedEpisodes,
           total_episodes: metadata.episodes?.length || 0,

@@ -39,6 +39,8 @@ export interface AdFilterResult {
   removedDurationSec: number;
   /** 未过滤/回退原因，便于日志观测 */
   reason?: string;
+  /** 实际命中的过滤规则，供下载审计使用 */
+  matchedReasons?: string[];
 }
 
 // 广告 URL 特征正则（从 M3U8Cleaner.CLEAN_PATTERNS 扩充而来）
@@ -55,6 +57,7 @@ interface Seg {
   url: string;
   group: number;
   ad: boolean;
+  reasons: Set<string>;
 }
 
 const DISCONTINUITY_RE = /^#EXT-X-DISCONTINUITY\s*$/;
@@ -122,6 +125,7 @@ export function filterM3U8Ads(
         url: t,
         group: curGroup,
         ad: false,
+        reasons: new Set<string>(),
       });
       pendingDur = 0;
       pendingExtinf = -1;
@@ -143,7 +147,10 @@ export function filterM3U8Ads(
   // ── 策略 1: 关键词黑名单 ──
   if (enableKeyword) {
     for (const s of segs) {
-      if (AD_URL_PATTERNS.some((re) => re.test(s.url))) s.ad = true;
+      if (AD_URL_PATTERNS.some((re) => re.test(s.url))) {
+        s.ad = true;
+        s.reasons.add('keyword');
+      }
     }
   }
 
@@ -174,7 +181,10 @@ export function filterM3U8Ads(
         if (/^https?:\/\//i.test(s.url)) {
           try {
             const d = new URL(s.url).hostname;
-            if (d !== mainDomain) s.ad = true;
+            if (d !== mainDomain) {
+              s.ad = true;
+              s.reasons.add('minority-domain');
+            }
           } catch {
             // ignore
           }
@@ -196,7 +206,12 @@ export function filterM3U8Ads(
       const ratio = totalDur > 0 ? dur / totalDur : 0;
       if (dur < adMaxGroupSec && ratio < adMaxGroupRatio) {
         // 整组标记为广告
-        for (const s of segs) if (s.group === g) s.ad = true;
+        for (const s of segs) {
+          if (s.group === g) {
+            s.ad = true;
+            s.reasons.add('short-discontinuity-group');
+          }
+        }
       }
     }
   }
@@ -295,5 +310,8 @@ export function filterM3U8Ads(
     applied: true,
     removedSegments: removedCount,
     removedDurationSec: removedDur,
+    matchedReasons: Array.from(
+      new Set(adSegs.flatMap((segment) => Array.from(segment.reasons)))
+    ),
   };
 }
