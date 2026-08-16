@@ -75,12 +75,14 @@ export interface DownloadTaskDetail extends DownloadTaskSummary {
 export default function DownloadTaskDetails({
   detail,
   onCommand,
+  commandBusy = false,
 }: {
   detail: DownloadTaskDetail;
   onCommand: (
     taskId: string,
     action: DownloadCommandAction
   ) => Promise<void> | void;
+  commandBusy?: boolean;
 }) {
   return (
     <div className='space-y-4'>
@@ -94,6 +96,7 @@ export default function DownloadTaskDetails({
         episodes={detail.episodes}
         schedulerSlots={detail.scheduler_slots}
         onCommand={onCommand}
+        commandBusy={commandBusy}
       />
     </div>
   );

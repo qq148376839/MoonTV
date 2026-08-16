@@ -113,6 +113,35 @@ describe('DownloadTaskCard', () => {
     await waitFor(() => expect(loadDetails).toHaveBeenCalledTimes(2));
   });
 
+  test('marks existing details stale when a live refresh fails', async () => {
+    const loadDetails = jest
+      .fn()
+      .mockResolvedValueOnce({ ...summaryFixture(), episodes: [] })
+      .mockRejectedValueOnce(new Error('详情网络异常'));
+    const { rerender } = render(
+      <DownloadTaskCard
+        task={summaryFixture()}
+        loadDetails={loadDetails}
+        onCommand={jest.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: '展开详情' }));
+    await waitFor(() => expect(loadDetails).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <DownloadTaskCard
+        task={summaryFixture({ updated_at: 3 })}
+        loadDetails={loadDetails}
+        onCommand={jest.fn()}
+      />
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '详情刷新失败，当前显示上次数据：详情网络异常'
+    );
+    expect(screen.getByText('分片诊断')).toBeInTheDocument();
+  });
+
   test('requires explicit confirmation before cleaning temporary data', async () => {
     const onCommand = jest.fn().mockResolvedValue(undefined);
     render(

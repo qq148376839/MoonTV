@@ -137,6 +137,8 @@ export default function DownloadTaskCard({
       setBusy(false);
     }
   };
+  const runDetailCommand = (_taskId: string, action: DownloadCommandAction) =>
+    run(action);
   useEffect(() => {
     if (!expanded || !loadDetails) return;
     let active = true;
@@ -307,7 +309,19 @@ export default function DownloadTaskCard({
       {expanded && (
         <div className='border-t border-gray-200/70 bg-gray-50/60 p-4 dark:border-gray-700/70 dark:bg-gray-950/30'>
           {detail ? (
-            <DownloadTaskDetails detail={detail} onCommand={onCommand} />
+            <>
+              {detailError && (
+                <p role='alert' className='mb-3 text-sm text-amber-700'>
+                  详情刷新失败，当前显示上次数据：
+                  {redactSignedUrls(detailError)}
+                </p>
+              )}
+              <DownloadTaskDetails
+                detail={detail}
+                onCommand={runDetailCommand}
+                commandBusy={busy}
+              />
+            </>
           ) : detailError ? (
             <p role='alert' className='text-sm text-red-600'>
               {redactSignedUrls(detailError)}

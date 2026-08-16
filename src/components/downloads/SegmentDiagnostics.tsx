@@ -19,6 +19,7 @@ export default function SegmentDiagnostics({
   episodes,
   schedulerSlots,
   onCommand,
+  commandBusy = false,
 }: {
   taskId: string;
   episodes: DownloadEpisodeDetail[];
@@ -31,6 +32,7 @@ export default function SegmentDiagnostics({
     taskId: string,
     action: DownloadCommandAction
   ) => Promise<void> | void;
+  commandBusy?: boolean;
 }) {
   const totals = episodes.reduce(
     (r, e) => ({
@@ -126,6 +128,7 @@ export default function SegmentDiagnostics({
           <div className='flex items-center justify-between gap-2'>
             <h5 className='text-sm font-medium text-red-700'>失败项</h5>
             <button
+              disabled={commandBusy}
               onClick={() => void onCommand(taskId, 'retry_failed')}
               className='min-h-10 rounded-md bg-red-600 px-3 py-2 text-xs font-medium text-white'
             >

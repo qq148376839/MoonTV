@@ -10,6 +10,7 @@ import type { DownloadTaskSummary } from '../DownloadTaskCard';
 import DownloadTaskDetails, {
   DownloadTaskDetail,
 } from '../DownloadTaskDetails';
+import DownloadTaskCard from '../DownloadTaskCard';
 import DownloadTaskList, { DownloadTaskListView } from '../../DownloadTaskList';
 
 function summaryFixture(): DownloadTaskSummary {
@@ -157,6 +158,35 @@ describe('DownloadTaskDetails', () => {
     await waitFor(() =>
       expect(onCommand).toHaveBeenCalledWith('task-1', 'retry_failed')
     );
+  });
+
+  test('routes retry through card busy and visible error handling', async () => {
+    let rejectCommand: (reason: Error) => void = () => undefined;
+    const onCommand = jest.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCommand = reject;
+        })
+    );
+    render(
+      <DownloadTaskCard
+        task={summaryFixture()}
+        loadDetails={jest.fn().mockResolvedValue(detailFixture())}
+        onCommand={onCommand}
+      />
+    );
+    fireEvent.click(screen.getByRole('button', { name: '展开详情' }));
+    const retry = await screen.findByRole('button', {
+      name: '仅重试失败项',
+    });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(retry).toBeDisabled();
+    await act(async () => rejectCommand(new Error('重试失败')));
+    expect(await screen.findByRole('alert')).toHaveTextContent('重试失败');
+    expect(retry).not.toBeDisabled();
   });
 
   test('never renders signed query or fragment from failure fields', () => {

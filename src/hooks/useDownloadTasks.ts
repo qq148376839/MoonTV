@@ -39,24 +39,50 @@ export function useDownloadTasks() {
   const sourceRef = useRef<EventSource | null>(null);
   const pollingRef = useRef<number | null>(null);
   const reconnectRef = useRef<number | null>(null);
+  const refreshPromiseRef = useRef<Promise<void> | null>(null);
+  const refreshQueuedRef = useRef(false);
+  const refreshGenerationRef = useRef(0);
+  const modeGenerationRef = useRef(0);
 
-  const refresh = useCallback(async () => {
-    try {
-      const data = await responseJson<{ tasks?: DownloadTaskSummary[] }>(
-        await fetch('/api/download', { cache: 'no-store' })
-      );
-      setTasks(Array.isArray(data?.tasks) ? data.tasks : []);
-      setError(null);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setLoading(false);
+  const refresh = useCallback((): Promise<void> => {
+    refreshGenerationRef.current += 1;
+    if (refreshPromiseRef.current) {
+      refreshQueuedRef.current = true;
+      return refreshPromiseRef.current;
     }
+
+    const run = async (): Promise<void> => {
+      const generation = refreshGenerationRef.current;
+      try {
+        const data = await responseJson<{ tasks?: DownloadTaskSummary[] }>(
+          await fetch('/api/download', { cache: 'no-store' })
+        );
+        if (generation === refreshGenerationRef.current) {
+          setTasks(Array.isArray(data?.tasks) ? data.tasks : []);
+          setError(null);
+        }
+      } catch (reason) {
+        if (generation === refreshGenerationRef.current) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      } finally {
+        setLoading(false);
+        refreshPromiseRef.current = null;
+        if (refreshQueuedRef.current) {
+          refreshQueuedRef.current = false;
+          refreshPromiseRef.current = run();
+        }
+      }
+    };
+
+    refreshPromiseRef.current = run();
+    return refreshPromiseRef.current;
   }, []);
 
   useEffect(() => {
     let disposed = false;
     const changeConnection = (next: DownloadConnection) => {
+      modeGenerationRef.current += 1;
       connectionRef.current = next;
       setConnection(next);
     };
@@ -65,19 +91,29 @@ export function useDownloadTasks() {
       if (pollingRef.current !== null) window.clearTimeout(pollingRef.current);
       pollingRef.current = null;
     };
-    const poll = async () => {
-      if (disposed) return;
+    const poll = async (generation: number) => {
+      if (
+        disposed ||
+        connectionRef.current !== 'polling' ||
+        generation !== modeGenerationRef.current
+      )
+        return;
       await refresh();
-      if (disposed) return;
+      if (
+        disposed ||
+        connectionRef.current !== 'polling' ||
+        generation !== modeGenerationRef.current
+      )
+        return;
       pollingRef.current = window.setTimeout(
-        poll,
+        () => void poll(generation),
         document.hidden ? 8000 : 2000
       );
     };
     const connect = () => {
       if (disposed || typeof EventSource === 'undefined') {
         changeConnection('polling');
-        void poll();
+        void poll(modeGenerationRef.current);
         return;
       }
       clearPolling();
@@ -146,7 +182,7 @@ export function useDownloadTasks() {
         source.close();
         sourceRef.current = null;
         changeConnection('polling');
-        void poll();
+        void poll(modeGenerationRef.current);
         reconnectRef.current = window.setTimeout(() => {
           clearPolling();
           connect();
@@ -158,7 +194,7 @@ export function useDownloadTasks() {
     const visibility = () => {
       if (connectionRef.current === 'polling') {
         clearPolling();
-        void poll();
+        void poll(modeGenerationRef.current);
       }
     };
     document.addEventListener('visibilitychange', visibility);
