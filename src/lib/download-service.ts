@@ -213,6 +213,7 @@ interface DownloadStateStoreLike {
   loadRecoverableTasks(): DownloadTaskSnapshot[];
   saveTask(snapshot: DownloadTaskSnapshot): void;
   deleteTaskState(taskId: string): void;
+  cleanupHistory?(now: number): { removed: string[] };
 }
 
 export interface CommandResult {
@@ -295,15 +296,17 @@ async function fetchCurrentMediaPlaylist(
   return { playlistUrl: selectedUrl, content: await mediaResponse.text() };
 }
 
+export function readDownloadConcurrency(
+  raw = process.env.LOCAL_STORAGE_DOWNLOAD_CONCURRENCY
+): number {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed)) return 8;
+  return Math.max(2, Math.min(16, parsed));
+}
+
 function defaultDependencies(): DownloadServiceDependencies {
   const storageManager = getStorageManager();
-  const rawConcurrency = Number.parseInt(
-    process.env.LOCAL_STORAGE_DOWNLOAD_CONCURRENCY || '8',
-    10
-  );
-  const concurrency = Number.isFinite(rawConcurrency)
-    ? Math.max(2, Math.min(16, rawConcurrency))
-    : 8;
+  const concurrency = readDownloadConcurrency();
   return {
     storageManager,
     stateStore: new DownloadStateStore(
@@ -355,6 +358,7 @@ export class DownloadService {
     RemappedMediaPlaylistResources
   >();
   private readonly taskLifecycleVersions = new Map<string, number>();
+  private lastCleanupDay: number | null = null;
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
     this.storageManager = deps.storageManager;
@@ -366,9 +370,17 @@ export class DownloadService {
     this.reacquireEpisode = deps.reacquireEpisode ?? defaultReacquireEpisode;
     this.maxConcurrent =
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
+    this.cleanupHistoryOncePerDay();
     for (const snapshot of this.stateStore.loadRecoverableTasks()) {
       this.snapshots.set(snapshot.taskId, snapshot);
     }
+  }
+
+  private cleanupHistoryOncePerDay(now = Date.now()): void {
+    const day = Math.floor(now / (24 * 60 * 60 * 1000));
+    if (this.lastCleanupDay === day) return;
+    this.stateStore.cleanupHistory?.(now);
+    this.lastCleanupDay = day;
   }
 
   public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
@@ -2210,10 +2222,32 @@ export class DownloadService {
     return this.tasks.get(taskId) || null;
   }
 
+  public getTaskSummary(taskId: string):
+    | DownloadTaskSnapshot
+    | {
+        taskId: string;
+        progress: number;
+        progressEstimated: true;
+        status: DownloadStatus;
+      }
+    | null {
+    const snapshot = this.snapshots.get(taskId);
+    if (snapshot) return snapshot;
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
+    return {
+      taskId: task.id,
+      progress: task.progress,
+      progressEstimated: true,
+      status: task.status,
+    };
+  }
+
   /**
    * 获取所有任务
    */
   public getAllTasks(): DownloadTask[] {
+    this.cleanupHistoryOncePerDay();
     return Array.from(this.tasks.values());
   }
 

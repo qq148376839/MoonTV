@@ -3,6 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
+import { readDownloadConcurrency } from '@/lib/download-service';
 
 export const runtime = 'nodejs'; // 需要使用 config.ts，改为 Node.js runtime
 
@@ -13,6 +14,7 @@ export async function GET(request: NextRequest) {
   const result = {
     SiteName: config.SiteConfig.SiteName,
     StorageType: process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage',
+    DownloadConcurrency: readDownloadConcurrency(),
     SourceConfig: config.SourceConfig || [], // 添加 SourceConfig
   };
   console.log('[server-config] 返回配置:', {

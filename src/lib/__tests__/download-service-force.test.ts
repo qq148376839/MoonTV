@@ -12,7 +12,11 @@ jest.mock('p-limit', () => ({
 }));
 
 import { DownloadScheduler } from '../download-scheduler';
-import { DownloadService, DownloadStatus } from '../download-service';
+import {
+  DownloadService,
+  DownloadStatus,
+  readDownloadConcurrency,
+} from '../download-service';
 import type { DownloadTaskSnapshot } from '../download-types';
 
 const resource = {
@@ -48,6 +52,83 @@ describe('DownloadService force redownload', () => {
   afterEach(() => {
     jest.restoreAllMocks();
     delete (global as { fetch?: unknown }).fetch;
+  });
+
+  test.each([
+    ['1', 2],
+    ['8', 8],
+    ['99', 16],
+    ['invalid', 8],
+  ])('normalizes concurrency %s to %i', (raw, expected) => {
+    expect(readDownloadConcurrency(raw)).toBe(expected);
+  });
+
+  test('shows in-memory legacy tasks as estimated without persisting or migrating media', () => {
+    const saveTask = jest.fn();
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [],
+        saveTask,
+        deleteTaskState: jest.fn(),
+        cleanupHistory: jest.fn(() => ({ removed: [] })),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    (service as unknown as { tasks: Map<string, unknown> }).tasks.set(
+      'legacy',
+      {
+        id: 'legacy',
+        source: 'source-a',
+        resourceId: 'movie-1',
+        resource,
+        episodes: resource.episodes,
+        episodeNumbers: [1],
+        forceRedownload: false,
+        addressMethod: 'direct',
+        status: DownloadStatus.DOWNLOADING,
+        progress: 25,
+        createdAt: 1,
+        updatedAt: 1,
+      }
+    );
+
+    expect(service.getTaskSummary('legacy')).toMatchObject({
+      taskId: 'legacy',
+      progressEstimated: true,
+    });
+    expect(saveTask).not.toHaveBeenCalled();
+  });
+
+  test('cleans history on startup and only once per day while listing tasks', () => {
+    const cleanupHistory = jest.fn(() => ({ removed: [] }));
+    const now = 1_800_000_000_000;
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+        cleanupHistory,
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    expect(cleanupHistory).toHaveBeenCalledTimes(1);
+    service.getAllTasks();
+    service.getAllTasks();
+    expect(cleanupHistory).toHaveBeenCalledTimes(1);
+
+    jest.spyOn(Date, 'now').mockReturnValue(now + 24 * 60 * 60 * 1000);
+    service.getAllTasks();
+    expect(cleanupHistory).toHaveBeenCalledTimes(2);
   });
 
   test('keeps normal skip behavior but queues a forced task', () => {
