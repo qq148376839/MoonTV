@@ -220,7 +220,7 @@ export class DownloadScheduler {
   }
 
   private takeNext(): { task: TaskState; work: QueuedWork } | null {
-    while (true) {
+    for (;;) {
       if (this.round.length === 0) {
         this.createRound();
       }

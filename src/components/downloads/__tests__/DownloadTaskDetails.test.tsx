@@ -7,10 +7,10 @@ import {
 } from '@testing-library/react';
 
 import type { DownloadTaskSummary } from '../DownloadTaskCard';
+import DownloadTaskCard from '../DownloadTaskCard';
 import DownloadTaskDetails, {
   DownloadTaskDetail,
 } from '../DownloadTaskDetails';
-import DownloadTaskCard from '../DownloadTaskCard';
 import DownloadTaskList, { DownloadTaskListView } from '../../DownloadTaskList';
 
 function summaryFixture(): DownloadTaskSummary {
