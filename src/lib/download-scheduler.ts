@@ -30,6 +30,7 @@ export class DownloadCancelledError extends Error {
 }
 
 interface QueuedWork {
+  taskId: string;
   item: DownloadWorkItem;
   operation: (item: DownloadWorkItem) => unknown;
   resolve: (value: unknown) => void;
@@ -64,10 +65,12 @@ export class DownloadScheduler {
     item: DownloadWorkItem,
     operation: (item: DownloadWorkItem) => T | Promise<T>
   ): Promise<T> {
-    const task = this.getOrCreateTask(item.taskId);
+    const taskId = item.taskId;
+    const task = this.getOrCreateTask(taskId);
 
     const promise = new Promise<T>((resolve, reject) => {
       task.queue.push({
+        taskId,
         item,
         operation,
         resolve: (value) => resolve(value as T),
@@ -114,18 +117,17 @@ export class DownloadScheduler {
   }
 
   setPriority(taskId: string, priority: DownloadPriority): void {
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.priority = priority;
+      return;
+    }
+
     if (priority === 'high') {
       this.highPriorityTasks.add(taskId);
     } else {
       this.highPriorityTasks.delete(taskId);
     }
-
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      return;
-    }
-
-    task.priority = priority;
   }
 
   getGlobalStats(): DownloadGlobalStats {
@@ -183,7 +185,7 @@ export class DownloadScheduler {
       queue: [],
       active: 0,
       paused: false,
-      priority: this.highPriorityTasks.has(taskId) ? 'high' : 'normal',
+      priority: this.highPriorityTasks.delete(taskId) ? 'high' : 'normal',
     };
     this.tasks.set(taskId, task);
     return task;
@@ -273,12 +275,16 @@ export class DownloadScheduler {
   private complete(task: TaskState, work: QueuedWork): void {
     this.active -= 1;
     task.active -= 1;
-    this.removeTaskIfEmpty(work.item.taskId, task);
+    this.removeTaskIfEmpty(work.taskId, task);
     this.requestDrain();
   }
 
   private removeTaskIfEmpty(taskId: string, task: TaskState): void {
-    if (task.active === 0 && task.queue.length === 0) {
+    if (
+      task.active === 0 &&
+      task.queue.length === 0 &&
+      this.tasks.get(taskId) === task
+    ) {
       this.tasks.delete(taskId);
     }
   }

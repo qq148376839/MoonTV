@@ -197,6 +197,55 @@ describe('DownloadScheduler', () => {
     expect(nextRan).toBe(true);
   });
 
+  test('keeps lifecycle cleanup bound to the enqueued task when an operation mutates its item', async () => {
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const gate = deferred<void>();
+    const mutableItem = item('A');
+    let secondTaskRan = false;
+
+    const first = scheduler.enqueue(mutableItem, async () => {
+      mutableItem.taskId = 'B';
+      await gate.promise;
+    });
+    const second = scheduler.enqueue(item('B'), () => {
+      secondTaskRan = true;
+    });
+    await flush();
+
+    gate.resolve();
+    await first;
+    await flush();
+
+    expect(secondTaskRan).toBe(true);
+    await second;
+    await scheduler.onIdle();
+    expect(scheduler.getGlobalStats()).toEqual({
+      concurrency: 1,
+      active: 0,
+      queued: 0,
+      tasks: 0,
+      pausedTasks: 0,
+    });
+  });
+
+  test('consumes preconfigured high priority after a task lifecycle completes', async () => {
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const order: string[] = [];
+
+    scheduler.setPriority('A', 'high');
+    await scheduler.enqueue(item('A'), () => undefined);
+    await scheduler.onIdle();
+
+    const work = [
+      scheduler.enqueue(item('A', 0), () => order.push('A0')),
+      scheduler.enqueue(item('A', 1), () => order.push('A1')),
+      scheduler.enqueue(item('B', 0), () => order.push('B0')),
+    ];
+    await Promise.all(work);
+
+    expect(order).toEqual(['A0', 'B0', 'A1']);
+  });
+
   test('reports accurate global and per-task stats without retaining empty tasks', async () => {
     const scheduler = new DownloadScheduler({ concurrency: 2 });
     const gate = deferred<void>();
