@@ -122,6 +122,7 @@ describe('DownloadScheduler', () => {
         active -= 1;
       });
 
+    scheduler.setPriority('A', 'high');
     const work = [
       enqueue('A', 0),
       enqueue('A', 1),
@@ -130,7 +131,6 @@ describe('DownloadScheduler', () => {
       enqueue('B', 0),
       enqueue('B', 1),
     ];
-    scheduler.setPriority('A', 'high');
     await Promise.all(work);
 
     expect(order.slice(0, 3).map((entry) => entry[0])).toEqual(['A', 'A', 'B']);
@@ -146,10 +146,13 @@ describe('DownloadScheduler', () => {
       await gate.promise;
       completed = true;
     });
-    const cancelled = scheduler.enqueue(item('A', 1), () => undefined);
+    const queuedItem = item('A', 1);
+    const cancelled = scheduler.enqueue(queuedItem, () => undefined);
+    void cancelled.catch(() => undefined);
     await flush();
 
-    scheduler.cancelQueued('A');
+    expect(scheduler.cancelQueued('A')).toEqual([queuedItem]);
+    expect(scheduler.cancelQueued('missing')).toEqual([]);
     await expect(cancelled).rejects.toBeInstanceOf(DownloadCancelledError);
     gate.resolve();
     await active;
@@ -175,6 +178,23 @@ describe('DownloadScheduler', () => {
     await next;
     await expect(idle).resolves.toBeUndefined();
     expect(followedFailure).toBe(true);
+  });
+
+  test('preserves an asynchronous rejection object and continues scheduling', async () => {
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const failure = new Error('async download failed');
+    let nextRan = false;
+
+    const rejected = scheduler.enqueue(item('A', 0), () =>
+      Promise.reject(failure)
+    );
+    const next = scheduler.enqueue(item('A', 1), () => {
+      nextRan = true;
+    });
+
+    await expect(rejected).rejects.toBe(failure);
+    await next;
+    expect(nextRan).toBe(true);
   });
 
   test('reports accurate global and per-task stats without retaining empty tasks', async () => {
@@ -226,6 +246,21 @@ describe('DownloadScheduler', () => {
   test('resolves onIdle immediately when there is no work', async () => {
     const scheduler = new DownloadScheduler({ concurrency: 1 });
     await expect(scheduler.onIdle()).resolves.toBeUndefined();
+  });
+
+  test('resolves every onIdle waiter after all work completes', async () => {
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const gate = deferred<void>();
+    const work = scheduler.enqueue(item('A'), () => gate.promise);
+    const firstIdle = scheduler.onIdle();
+    const secondIdle = scheduler.onIdle();
+
+    gate.resolve();
+    await work;
+    await expect(Promise.all([firstIdle, secondIdle])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
   });
 
   test('handles one thousand immediately resolved operations without recursive stack growth', async () => {

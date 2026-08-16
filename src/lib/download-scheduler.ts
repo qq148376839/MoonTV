@@ -46,6 +46,7 @@ interface TaskState {
 export class DownloadScheduler {
   private readonly concurrency: number;
   private readonly tasks = new Map<string, TaskState>();
+  private readonly highPriorityTasks = new Set<string>();
   private readonly idleWaiters: Array<() => void> = [];
   private round: string[] = [];
   private active = 0;
@@ -97,10 +98,10 @@ export class DownloadScheduler {
     this.requestDrain();
   }
 
-  cancelQueued(taskId: string): void {
+  cancelQueued(taskId: string): DownloadWorkItem[] {
     const task = this.tasks.get(taskId);
     if (!task || task.queue.length === 0) {
-      return;
+      return [];
     }
 
     const cancelled = task.queue.splice(0);
@@ -109,9 +110,16 @@ export class DownloadScheduler {
     this.removeTaskIfEmpty(taskId, task);
     this.requestDrain();
     this.resolveIdleWaiters();
+    return cancelled.map((work) => work.item);
   }
 
   setPriority(taskId: string, priority: DownloadPriority): void {
+    if (priority === 'high') {
+      this.highPriorityTasks.add(taskId);
+    } else {
+      this.highPriorityTasks.delete(taskId);
+    }
+
     const task = this.tasks.get(taskId);
     if (!task) {
       return;
@@ -175,7 +183,7 @@ export class DownloadScheduler {
       queue: [],
       active: 0,
       paused: false,
-      priority: 'normal',
+      priority: this.highPriorityTasks.has(taskId) ? 'high' : 'normal',
     };
     this.tasks.set(taskId, task);
     return task;
