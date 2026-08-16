@@ -186,6 +186,20 @@ describe('DownloadStateStore', () => {
     expect(persisted).toContain('普通中文问号？必须保留');
   });
 
+  test('unconditionally removes query and fragments from Chinese relative failure paths', () => {
+    const state = snapshot();
+    state.episodes['1'].failures[0].path = '目录/片段.ts?signature=secret#part';
+    store.saveTask(state);
+
+    const persisted = fs.readFileSync(
+      path.join(root, 'download-tasks', state.taskId, 'episodes', '01.json'),
+      'utf8'
+    );
+    expect(persisted).toContain('目录/片段.ts');
+    expect(persisted).not.toContain('signature=secret');
+    expect(persisted).not.toContain('#part');
+  });
+
   test.each([
     ['task', 'rename'],
     ['episode', 'rename'],

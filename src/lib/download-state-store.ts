@@ -457,8 +457,8 @@ export class DownloadStateStore {
       /((?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?:\?[^\s#]*(?:#[^\s]*)?|#[^\s]*)/g,
       '$1'
     );
-    if (key === 'path' && !/[\u4e00-\u9fff]/.test(withoutPathTails)) {
-      return withoutPathTails.replace(/[?#][^\s]*/g, '');
+    if (key === 'path') {
+      return withoutPathTails.split(/[?#]/, 1)[0];
     }
     return withoutPathTails;
   }
