@@ -487,6 +487,71 @@ describe('DownloadService force redownload', () => {
     }
   );
 
+  test('first segment failure cancels queued work and waits for active work before returning partial_failed', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-settle-'));
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const playlist =
+      '#EXTM3U\n#EXTINF:1,\nfail.ts\n#EXTINF:1,\nactive.ts\n#EXTINF:1,\nqueued.ts';
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let activeStarted!: () => void;
+    const activeStart = new Promise<void>((resolve) => {
+      activeStarted = resolve;
+    });
+    let queuedRequests = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('list.m3u8')) return playlistResponse(playlist);
+      if (url.endsWith('fail.ts')) {
+        return { ok: false, status: 404 } as Response;
+      }
+      if (url.endsWith('active.ts')) {
+        activeStarted();
+        await activeGate;
+        return responseFor('active', 6);
+      }
+      queuedRequests += 1;
+      return responseFor('queued', 6);
+    });
+    const snapshot = activeSnapshot();
+    const service = serviceForSnapshot(snapshot, {
+      scheduler: new DownloadScheduler({ concurrency: 2 }),
+    }).service;
+    let settled = false;
+    const download = invokeDownloadM3U8(service, 'task-1', root).finally(() => {
+      settled = true;
+    });
+
+    await activeStart;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(queuedRequests).toBe(0);
+    releaseActive();
+    await expect(download).rejects.toThrow(/404/);
+    expect(queuedRequests).toBe(0);
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe(
+      'partial_failed'
+    );
+    const generationName = fs
+      .readdirSync(path.join(root, 'episode_01_generations'))
+      .find((name) => name !== 'failures') as string;
+    const segmentsDir = path.join(
+      root,
+      'episode_01_generations',
+      generationName,
+      'segments'
+    );
+    const filesAfterReturn = fs.readdirSync(segmentsDir);
+    await Promise.resolve();
+    expect(fs.readdirSync(segmentsDir)).toEqual(filesAfterReturn);
+    expect(fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')).toBe(
+      'old-entry'
+    );
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('recovery structure mismatch becomes partial_failed and preserves the old entry', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-mismatch-'));
     const generation = path.join(
@@ -631,31 +696,108 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('clean cancel waits for active task work before deleting generation and state', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-clean-wait-'));
+    const generationRoot = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(generationRoot, { recursive: true });
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const active = scheduler.enqueue(workItem(0), async () => {
+      await gate;
+      fs.writeFileSync(path.join(generationRoot, 'late-write.ts'), 'done');
+    });
+    await Promise.resolve();
+    const snapshot = activeSnapshot();
+    const { service, stateStore } = serviceForSnapshot(snapshot, {
+      scheduler,
+      resourcePath: root,
+    });
+    let cancelled = false;
+    const cancellation = service.cancelTask('task-1', true).then((result) => {
+      cancelled = true;
+      return result;
+    });
+
+    await Promise.resolve();
+    expect(cancelled).toBe(false);
+    expect(fs.existsSync(generationRoot)).toBe(true);
+    expect(stateStore.deleteTaskState).not.toHaveBeenCalled();
+    release();
+    await active;
+    await expect(cancellation).resolves.toMatchObject({ ok: true });
+    expect(fs.existsSync(generationRoot)).toBe(false);
+    expect(stateStore.deleteTaskState).toHaveBeenCalledWith('task-1');
+    expect(service.getSnapshot('task-1')).toBeNull();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('clean cancel invalidates a pending pause settle callback', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-pause-cancel-'));
+    const generationRoot = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(generationRoot, { recursive: true });
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const active = scheduler.enqueue(workItem(0), () => gate);
+    await Promise.resolve();
+    const snapshot = activeSnapshot();
+    const { service, stateStore } = serviceForSnapshot(snapshot, {
+      scheduler,
+      resourcePath: root,
+    });
+    service.pauseTask('task-1');
+    stateStore.saveTask.mockClear();
+    const cancellation = service.cancelTask('task-1', true);
+
+    release();
+    await active;
+    await cancellation;
+    stateStore.saveTask.mockClear();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(service.getSnapshot('task-1')).toBeNull();
+    expect(stateStore.saveTask).not.toHaveBeenCalled();
+    expect(stateStore.deleteTaskState).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(generationRoot)).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('retryFailed runs only recorded failed work and never completed work', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-retry-only-'));
+    const generation = recoveryGeneration(root, 'generation-a');
+    fs.writeFileSync(
+      path.join(generation, 'segments', 'segment_000.ts'),
+      'done'
+    );
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
     const snapshot = activeSnapshot();
     snapshot.status = 'failed';
     snapshot.episodes['1'].stage = 'partial_failed';
     snapshot.episodes['1'].completedSegmentIndices = [0];
     snapshot.episodes['1'].failedSegmentIndices = [1];
-    const { service } = serviceForSnapshot(snapshot);
+    const { service } = serviceForSnapshot(snapshot, { resourcePath: root });
     const completedOperation = jest.fn().mockResolvedValue(4);
     const failedOperation = jest.fn().mockResolvedValue(5);
-    const failedWork = (
-      service as unknown as {
-        failedWork: Map<
-          string,
-          {
-            item: ReturnType<typeof workItem>;
-            operation: () => Promise<number>;
-            path: string;
-          }
-        >;
-      }
-    ).failedWork;
-    failedWork.set('task-1:1:g:segment:1', {
-      item: workItem(1),
-      operation: failedOperation,
-      path: '/tmp/segment-1.ts',
+    installFailedSegmentWork(service, async (filePath) => {
+      await failedOperation();
+      fs.writeFileSync(filePath, 'retry');
+      return 5;
     });
 
     await expect(service.retryFailed('task-1')).resolves.toMatchObject({
@@ -667,6 +809,74 @@ describe('DownloadService force redownload', () => {
       completedSegmentIndices: [0, 1],
       failedSegmentIndices: [],
     });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('retryFailed rebuilds validates and atomically commits a completed episode', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-retry-commit-'));
+    const generation = recoveryGeneration(root, 'generation-a');
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts'
+    );
+    const active = path.join(root, 'episode_01.m3u8');
+    fs.writeFileSync(active, 'old-entry');
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.status = 'failed';
+    snapshot.episodes['1'].stage = 'partial_failed';
+    const { service } = serviceForSnapshot(snapshot, { resourcePath: root });
+    installFailedSegmentWork(service, async (filePath) => {
+      fs.writeFileSync(filePath, 'retried');
+      return 7;
+    });
+
+    await expect(service.retryFailed('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+      stage: 'completed',
+      oldEntryRetained: false,
+      recoverable: false,
+      failedSegmentIndices: [],
+    });
+    expect(fs.readFileSync(active, 'utf8')).toContain(
+      'generation-a/segments/segment_001.ts'
+    );
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('retryFailed commit failure keeps the old entry and partial_failed state', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-retry-fail-'));
+    const generation = recoveryGeneration(root, 'generation-a');
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="missing.key"\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts'
+    );
+    const active = path.join(root, 'episode_01.m3u8');
+    fs.writeFileSync(active, 'old-entry');
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.status = 'failed';
+    snapshot.episodes['1'].stage = 'partial_failed';
+    const { service } = serviceForSnapshot(snapshot, { resourcePath: root });
+    installFailedSegmentWork(service, async (filePath) => {
+      fs.writeFileSync(filePath, 'retried');
+      return 7;
+    });
+
+    await expect(service.retryFailed('task-1')).resolves.toMatchObject({
+      ok: false,
+      status: 'failed',
+    });
+    expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+      stage: 'partial_failed',
+      oldEntryRetained: true,
+      recoverable: true,
+    });
+    expect(fs.readFileSync(active, 'utf8')).toBe('old-entry');
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   test('batches segment persistence at 250ms or 20 changes and flushes terminals immediately', () => {
@@ -835,7 +1045,7 @@ function workItem(index: number) {
 
 function serviceForSnapshot(
   snapshot: ReturnType<typeof activeSnapshot>,
-  overrides: { scheduler?: DownloadScheduler } = {}
+  overrides: { scheduler?: DownloadScheduler; resourcePath?: string } = {}
 ) {
   const stateStore = {
     loadRecoverableTasks: () => [snapshot],
@@ -844,7 +1054,12 @@ function serviceForSnapshot(
   };
   const publishProgress = jest.fn();
   const service = new DownloadService({
-    storageManager: storageMock as never,
+    storageManager: {
+      ...storageMock,
+      ...(overrides.resourcePath
+        ? { getResourcePath: () => overrides.resourcePath }
+        : {}),
+    } as never,
     stateStore,
     scheduler: overrides.scheduler ?? new DownloadScheduler({ concurrency: 1 }),
     publishProgress,
@@ -852,6 +1067,60 @@ function serviceForSnapshot(
     random: () => 0,
   });
   return { service, stateStore, publishProgress };
+}
+
+function recoveryGeneration(root: string, generationId: string) {
+  const generation = path.join(root, 'episode_01_generations', generationId);
+  fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+  fs.mkdirSync(path.join(generation, 'keys'), { recursive: true });
+  fs.mkdirSync(path.join(generation, 'maps'), { recursive: true });
+  return generation;
+}
+
+function installFailedSegmentWork(
+  service: DownloadService,
+  operation: (filePath: string) => Promise<number>
+) {
+  const snapshot = service.getSnapshot('task-1') as DownloadTaskSnapshot;
+  const resourcePath = (
+    service as unknown as {
+      storageManager: { getResourcePath: (...args: string[]) => string };
+    }
+  ).storageManager.getResourcePath(
+    snapshot.title,
+    snapshot.year,
+    snapshot.source,
+    snapshot.resourceId
+  );
+  const failedPath = path.join(
+    resourcePath,
+    'episode_01_generations',
+    snapshot.episodes['1'].generationId,
+    'segments',
+    'segment_001.ts'
+  );
+  (
+    service as unknown as {
+      failedWork: Map<
+        string,
+        {
+          item: ReturnType<typeof workItem>;
+          operation: () => Promise<number>;
+          path: string;
+        }
+      >;
+    }
+  ).failedWork.set(
+    `task-1:1:${snapshot.episodes['1'].generationId}:segment:1`,
+    {
+      item: {
+        ...workItem(1),
+        generationId: snapshot.episodes['1'].generationId,
+      },
+      operation: () => operation(failedPath),
+      path: failedPath,
+    }
+  );
 }
 
 function playlistResponse(content: string) {

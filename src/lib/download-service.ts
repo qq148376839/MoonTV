@@ -8,7 +8,10 @@ import path from 'path';
 import { filterM3U8Ads } from './ad-filter';
 import { getAvailableApiSites } from './config';
 import { calculateEpisodeProgress } from './download-progress';
-import { DownloadScheduler } from './download-scheduler';
+import {
+  DownloadCancelledError,
+  DownloadScheduler,
+} from './download-scheduler';
 import { DownloadStateStore } from './download-state-store';
 import type {
   ParsedMediaPlaylistResources,
@@ -347,6 +350,7 @@ export class DownloadService {
     string,
     RemappedMediaPlaylistResources
   >();
+  private readonly taskLifecycleVersions = new Map<string, number>();
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
     this.storageManager = deps.storageManager;
@@ -459,7 +463,10 @@ export class DownloadService {
         this.runWithRetry((attempt) => {
           item.attempt = attempt;
           return operation();
-        }, refresh)
+        }, refresh).catch((error) => {
+          this.scheduler.cancelQueued(item.taskId);
+          throw error;
+        })
       );
       this.failedWork.delete(this.workKey(item));
       this.markUnitCompleted(episode, item, bytes);
@@ -1658,8 +1665,20 @@ export class DownloadService {
         })();
       });
 
-      // 任一片段失败都不得提交 generation。
-      await Promise.all(downloadPromises);
+      // 任一片段失败都不得提交 generation；先取消队列，再等待 active work
+      // 全部 settle，确保返回后不会继续写 generation 或修改状态。
+      const segmentResults = await Promise.allSettled(downloadPromises);
+      const firstFailure = segmentResults.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected' &&
+          !(result.reason instanceof DownloadCancelledError)
+      );
+      if (firstFailure) throw firstFailure.reason;
+      const cancellation = segmentResults.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected'
+      );
+      if (cancellation) throw cancellation.reason;
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const downloadedCount = completed - skipped;
@@ -2157,6 +2176,18 @@ export class DownloadService {
     return Array.from(this.tasks.values());
   }
 
+  private bumpTaskLifecycle(taskId: string): number {
+    const version = (this.taskLifecycleVersions.get(taskId) ?? 0) + 1;
+    this.taskLifecycleVersions.set(taskId, version);
+    return version;
+  }
+
+  private async waitForTaskIdle(taskId: string): Promise<void> {
+    while ((this.scheduler.getTaskStats(taskId)?.active ?? 0) > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   /**
    * 暂停任务（仅保证在“集边界”生效）
    */
@@ -2166,6 +2197,7 @@ export class DownloadService {
     if (!['pending', 'downloading'].includes(snapshot.status)) {
       return { ok: false, status: 'conflict' };
     }
+    const lifecycleVersion = this.bumpTaskLifecycle(taskId);
     this.scheduler.pauseTask(taskId);
     Object.values(snapshot.episodes).forEach((episode) => {
       if (!['completed', 'partial_failed'].includes(episode.stage)) {
@@ -2174,6 +2206,12 @@ export class DownloadService {
     });
     this.flushSnapshot(snapshot, 'task.updated');
     const settle = () => {
+      if (
+        this.taskLifecycleVersions.get(taskId) !== lifecycleVersion ||
+        this.snapshots.get(taskId) !== snapshot
+      ) {
+        return;
+      }
       const stats = this.scheduler.getTaskStats(taskId);
       if ((stats?.active ?? 0) > 0) {
         setTimeout(settle, 10);
@@ -2217,6 +2255,70 @@ export class DownloadService {
     }
     fs.writeFileSync(filePath, buffer);
     return buffer.length;
+  }
+
+  private buildLocalPlaylist(
+    content: string,
+    playlistUrl: string,
+    resources: ParsedMediaPlaylistResources,
+    relativePrefix: string
+  ): string {
+    const baseUrl = new URL(playlistUrl);
+    let segmentIndex = 0;
+    return content
+      .split('\n')
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('#EXT-X-KEY') && !/METHOD=NONE/i.test(trimmed)) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const key = resources.keys.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!key) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/keys/key_${String(key.index).padStart(
+              3,
+              '0'
+            )}.key"`
+          );
+        }
+        if (trimmed.startsWith('#EXT-X-MAP')) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const map = resources.maps.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!map) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/maps/map_${String(map.index).padStart(
+              3,
+              '0'
+            )}.mp4"`
+          );
+        }
+        if (!trimmed || trimmed.startsWith('#')) return line;
+        const local = `${relativePrefix}/segments/segment_${String(
+          segmentIndex
+        ).padStart(3, '0')}.ts`;
+        segmentIndex += 1;
+        return local;
+      })
+      .join('\n');
   }
 
   private async executeRecoveredEpisode(
@@ -2316,62 +2418,12 @@ export class DownloadService {
       );
     }
 
-    const baseUrl = new URL(playlistUrl);
-    let segmentIndex = 0;
-    const localPlaylist = refreshedContent
-      .split('\n')
-      .map((line) => {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('#EXT-X-KEY') && !/METHOD=NONE/i.test(trimmed)) {
-          const match = trimmed.match(/URI="([^"]+)"/i);
-          if (!match) return line;
-          const absolute = new URL(match[1], baseUrl).href;
-          const relationship = trimmed
-            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
-            .replace(/\s+/g, '');
-          const key = refreshed.keys.find(
-            (candidate) =>
-              candidate.url === absolute &&
-              candidate.relationship === relationship
-          );
-          if (!key) throw new Error('playlist structure mismatch');
-          return line.replace(
-            /URI="[^"]+"/i,
-            `URI="${relativePrefix}/keys/key_${String(key.index).padStart(
-              3,
-              '0'
-            )}.key"`
-          );
-        }
-        if (trimmed.startsWith('#EXT-X-MAP')) {
-          const match = trimmed.match(/URI="([^"]+)"/i);
-          if (!match) return line;
-          const absolute = new URL(match[1], baseUrl).href;
-          const relationship = trimmed
-            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
-            .replace(/\s+/g, '');
-          const map = refreshed.maps.find(
-            (candidate) =>
-              candidate.url === absolute &&
-              candidate.relationship === relationship
-          );
-          if (!map) throw new Error('playlist structure mismatch');
-          return line.replace(
-            /URI="[^"]+"/i,
-            `URI="${relativePrefix}/maps/map_${String(map.index).padStart(
-              3,
-              '0'
-            )}.mp4"`
-          );
-        }
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const local = `${relativePrefix}/segments/segment_${String(
-          segmentIndex
-        ).padStart(3, '0')}.ts`;
-        segmentIndex += 1;
-        return local;
-      })
-      .join('\n');
+    const localPlaylist = this.buildLocalPlaylist(
+      refreshedContent,
+      playlistUrl,
+      refreshed,
+      relativePrefix
+    );
     const playlistPath = path.join(generationRoot, 'playlist.m3u8');
     fs.writeFileSync(playlistPath, localPlaylist, 'utf-8');
     validateLocalPlaylist(playlistPath, resourcePath);
@@ -2395,6 +2447,7 @@ export class DownloadService {
     ) {
       return { ok: false, status: 'conflict' };
     }
+    this.bumpTaskLifecycle(taskId);
     const resourcePath = this.storageManager.getResourcePath(
       snapshot.title,
       snapshot.year,
@@ -2521,6 +2574,7 @@ export class DownloadService {
     if (!snapshot) return { ok: false, status: 'not_found' };
     if (snapshot.status === 'completed')
       return { ok: false, status: 'conflict' };
+    this.bumpTaskLifecycle(taskId);
     this.scheduler.pauseTask(taskId);
     this.scheduler.cancelQueued(taskId);
     const task = this.tasks.get(taskId);
@@ -2529,6 +2583,7 @@ export class DownloadService {
       this.updateTask(task);
     }
     if (clean) {
+      await this.waitForTaskIdle(taskId);
       const resourcePath = this.storageManager.getResourcePath(
         snapshot.title,
         snapshot.year,
@@ -2544,6 +2599,9 @@ export class DownloadService {
         );
         fs.rmSync(generationRoot, { recursive: true, force: true });
       }
+      const pending = this.pendingFlushes.get(taskId);
+      if (pending?.timer) clearTimeout(pending.timer);
+      this.pendingFlushes.delete(taskId);
       this.stateStore.deleteTaskState(taskId);
       this.snapshots.delete(taskId);
       return { ok: true, status: 'cancelled_resumable' };
@@ -2554,6 +2612,45 @@ export class DownloadService {
     });
     this.flushSnapshot(snapshot, 'task.updated');
     return { ok: true, status: snapshot.status };
+  }
+
+  private commitRetriedEpisode(
+    snapshot: DownloadTaskSnapshot,
+    episode: EpisodeDownloadState
+  ): void {
+    const resourcePath = this.storageManager.getResourcePath(
+      snapshot.title,
+      snapshot.year,
+      snapshot.source,
+      snapshot.resourceId
+    );
+    const episodeNumber = String(episode.episode).padStart(2, '0');
+    const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
+    const generationRoot = path.join(resourcePath, relativePrefix);
+    const cleanedPlaylistPath = path.join(
+      generationRoot,
+      'source.cleaned.m3u8'
+    );
+    const content = fs.readFileSync(cleanedPlaylistPath, 'utf-8');
+    const retryBaseUrl = 'https://retry.invalid/playlist.m3u8';
+    const resources = parseMediaPlaylistResources(content, retryBaseUrl);
+    const localPlaylist = this.buildLocalPlaylist(
+      content,
+      retryBaseUrl,
+      resources,
+      relativePrefix
+    );
+    const playlistPath = path.join(generationRoot, 'playlist.m3u8');
+    fs.writeFileSync(playlistPath, localPlaylist, 'utf-8');
+    validateLocalPlaylist(playlistPath, resourcePath);
+    episode.stage = 'committing';
+    commitPlaylistAtomically(
+      path.join(resourcePath, `episode_${episodeNumber}.m3u8`),
+      localPlaylist
+    );
+    episode.stage = 'completed';
+    episode.oldEntryRetained = false;
+    episode.recoverable = false;
   }
 
   public async retryFailed(taskId: string): Promise<CommandResult> {
@@ -2572,14 +2669,47 @@ export class DownloadService {
         return this.executeScheduled(episode, item, failedPath, operation);
       })
     );
-    const stillFailed = Array.from(this.failedWork.values()).some(
+    let stillFailed = Array.from(this.failedWork.values()).some(
       ({ item }) => item.taskId === taskId
     );
+    if (!stillFailed) {
+      const affectedEpisodes = Array.from(
+        new Set(failed.map(({ item }) => item.episode))
+      );
+      for (const episodeNumber of affectedEpisodes) {
+        const episode = snapshot.episodes[String(episodeNumber)];
+        if (!episode) continue;
+        try {
+          this.commitRetriedEpisode(snapshot, episode);
+        } catch (error) {
+          stillFailed = true;
+          episode.stage = 'partial_failed';
+          episode.oldEntryRetained = true;
+          episode.recoverable = true;
+          episode.failures.push({
+            kind: 'segment',
+            index: -1,
+            category: this.classifyFailure(error),
+            attempts: 1,
+            path: '',
+            message: redactDownloadUrl(
+              error instanceof Error ? error.message : String(error)
+            ),
+          });
+        }
+      }
+    }
     if (stillFailed) {
       snapshot.status = 'failed';
       Object.values(snapshot.episodes).forEach((episode) => {
         if (episode.failures.length) episode.stage = 'partial_failed';
       });
+    } else if (
+      Object.values(snapshot.episodes).every(
+        (episode) => episode.stage === 'completed'
+      )
+    ) {
+      snapshot.status = 'completed';
     }
     this.flushSnapshot(snapshot, 'task.updated');
     return { ok: !stillFailed, status: snapshot.status };
