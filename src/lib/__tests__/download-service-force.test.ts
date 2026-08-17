@@ -877,6 +877,56 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('applies post-download bitrate filtering without shifting surviving segment paths', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-post-filter-'));
+    const snapshot = activeSnapshot();
+    const { service } = serviceForSnapshot(snapshot, {
+      scheduler: new DownloadScheduler({ concurrency: 8 }),
+      resourcePath: root,
+    });
+    const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:5'];
+    for (let group = 0; group < 30; group += 1) {
+      if (group > 0) lines.push('#EXT-X-DISCONTINUITY');
+      for (let segment = 0; segment < 6; segment += 1) {
+        const index = group * 6 + segment;
+        lines.push('#EXTINF:4,', `segment-${index}.ts`);
+      }
+    }
+    lines.push('#EXT-X-ENDLIST');
+    global.fetch = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('list.m3u8')) return playlistResponse(lines.join('\n'));
+      const match = url.match(/segment-(\d+)\.ts$/);
+      const index = Number(match?.[1]);
+      const size = index >= 72 && index <= 77 ? 65 : 300;
+      return responseFor('x'.repeat(size), size);
+    });
+
+    await expect(
+      invokeDownloadM3U8(service, 'task-1', root)
+    ).resolves.toBeDefined();
+
+    const committed = fs.readFileSync(
+      path.join(root, 'episode_01.m3u8'),
+      'utf8'
+    );
+    expect(committed).toContain('segments/segment_071.ts');
+    expect(committed).toContain('segments/segment_078.ts');
+    expect(committed).not.toContain('segments/segment_072.ts');
+    expect(committed).not.toContain('segments/segment_077.ts');
+    const reportPath = fs
+      .readdirSync(path.join(root, 'episode_01_generations'))
+      .map((generation) =>
+        path.join(root, 'episode_01_generations', generation, 'report.json')
+      )[0];
+    expect(JSON.parse(fs.readFileSync(reportPath, 'utf8'))).toMatchObject({
+      removed_segments: 6,
+      final_segments: 174,
+      filter_reasons: ['isolated-bitrate-outlier'],
+    });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('default cancel retains generation and state while clean cancel removes only uncommitted data', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-cancel-'));
     const generationRoot = path.join(
@@ -1209,6 +1259,14 @@ describe('DownloadService force redownload', () => {
         'task.updated',
         expect.objectContaining({ status: 'failed' })
       );
+
+      snapshot.episodes['1'].stage = 'completed';
+      snapshot.episodes['1'].progress = 95;
+      snapshot.status = 'downloading';
+      flush('task-1', 'task.updated');
+      expect(snapshot.episodes['1'].progress).toBe(100);
+      expect(snapshot.progress).toBe(100);
+      expect(snapshot.status).toBe('completed');
     } finally {
       jest.useRealTimers();
     }
@@ -1307,6 +1365,15 @@ describe('DownloadService force redownload', () => {
       attempt: 1,
       speedBytesPerSecond: 2000,
     });
+
+    const flush = (
+      service as unknown as {
+        flushSnapshotForTask: (taskId: string, type: 'segment.batch') => void;
+      }
+    ).flushSnapshotForTask.bind(service);
+    flush('task-1', 'segment.batch');
+    expect(episode.speedBytesPerSecond).toBe(2000);
+    expect(snapshot.speedBytesPerSecond).toBe(2000);
 
     finish();
     await expect(completion).resolves.toBe(2000);

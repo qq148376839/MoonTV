@@ -1410,7 +1410,7 @@ export class DownloadService {
 
     try {
       // 落盘前去广告：源 m3u8 含原始 URL，可用全部策略（关键词+域名+DISCONTINUITY）
-      const adResult = filterM3U8Ads(mediaPlaylistContent, {
+      let adResult = filterM3U8Ads(mediaPlaylistContent, {
         enableDomain: true,
         enableKeyword: true,
         enableDiscontinuity: true,
@@ -1842,6 +1842,62 @@ export class DownloadService {
         ).toFixed(2)}MB，耗时: ${elapsed}秒`
       );
 
+      let localSegmentIndices = tsUrls.map((_, index) => index);
+      const segmentByteLengths = localSegmentIndices.map((index) => {
+        const segmentFilePath = path.join(
+          episodeDir,
+          `segment_${index.toString().padStart(3, '0')}.ts`
+        );
+        return fs.statSync(segmentFilePath).size;
+      });
+      const metricsAdResult = filterM3U8Ads(mediaPlaylistContent, {
+        enableDomain: true,
+        enableKeyword: true,
+        enableDiscontinuity: true,
+        segmentByteLengths,
+      });
+      if (metricsAdResult.applied) {
+        const removedIndices = new Set(
+          metricsAdResult.removedSegmentIndices ?? []
+        );
+        mediaPlaylistContent = metricsAdResult.content;
+        localSegmentIndices = localSegmentIndices.filter(
+          (index) => !removedIndices.has(index)
+        );
+        for (const index of removedIndices) {
+          fs.rmSync(
+            path.join(
+              episodeDir,
+              `segment_${index.toString().padStart(3, '0')}.ts`
+            ),
+            { force: true }
+          );
+        }
+        adResult = {
+          ...metricsAdResult,
+          removedSegments:
+            adResult.removedSegments + metricsAdResult.removedSegments,
+          removedDurationSec:
+            adResult.removedDurationSec + metricsAdResult.removedDurationSec,
+          matchedReasons: Array.from(
+            new Set([
+              ...(adResult.matchedReasons ?? []),
+              ...(metricsAdResult.matchedReasons ?? []),
+            ])
+          ),
+        };
+        fs.writeFileSync(
+          generation.cleanedPlaylistPath,
+          mediaPlaylistContent,
+          'utf-8'
+        );
+        console.log(
+          `[DownloadService] 下载后去广告: 删除 ${
+            metricsAdResult.removedSegments
+          } 片段 / ${metricsAdResult.removedDurationSec.toFixed(1)}s`
+        );
+      }
+
       // 更新 M3U8 文件中的路径为相对路径（TS + KEY）
       // 始终保存媒体播放列表的内容（因为实际下载的是媒体播放列表的 TS 片段）
       let updatedM3U8Content = mediaPlaylistContent;
@@ -1916,8 +1972,10 @@ export class DownloadService {
         .map((line) => {
           const trimmed = line.trim();
           if (!trimmed || trimmed.startsWith('#')) return line;
+          const sourceIndex = localSegmentIndices[segmentIndex];
+          if (sourceIndex === undefined) return line;
           const rewritten = `${episodePrefix}/segments/segment_${String(
-            segmentIndex
+            sourceIndex
           ).padStart(3, '0')}.ts`;
           segmentIndex++;
           return rewritten;
@@ -1943,7 +2001,7 @@ export class DownloadService {
         address_method: auditContext.addressMethod,
         original_segments: originalSegmentCount,
         removed_segments: adResult.removedSegments,
-        final_segments: tsUrls.length,
+        final_segments: localSegmentIndices.length,
         removed_duration_sec: adResult.removedDurationSec,
         filter_version: 'm3u8-ad-filter-v2',
         filter_reason: adResult.reason,
@@ -2275,6 +2333,15 @@ export class DownloadService {
     if (pending?.timer) clearTimeout(pending.timer);
     this.pendingFlushes.delete(snapshot.taskId);
     const episodes = Object.values(snapshot.episodes);
+    for (const episode of episodes) {
+      const progress = calculateEpisodeProgress(episode);
+      episode.progress = progress.progress;
+      episode.progressEstimated = progress.estimated;
+      episode.speedBytesPerSecond = episode.activeItems.reduce(
+        (total, item) => total + (item.speedBytesPerSecond ?? 0),
+        0
+      );
+    }
     snapshot.completedBytes = episodes.reduce(
       (total, episode) => total + episode.completedBytes,
       0
@@ -2285,6 +2352,10 @@ export class DownloadService {
       : snapshot.progress;
     snapshot.progressEstimated = episodes.some(
       (episode) => episode.progressEstimated
+    );
+    snapshot.speedBytesPerSecond = episodes.reduce(
+      (total, episode) => total + episode.speedBytesPerSecond,
+      0
     );
     snapshot.updatedAt = Date.now();
     if (

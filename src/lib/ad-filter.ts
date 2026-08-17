@@ -26,6 +26,8 @@ export interface AdFilterOptions {
   adMaxGroupSec?: number;
   /** 单个广告组时长占比上限，默认 0.10 */
   adMaxGroupRatio?: number;
+  /** 已下载分片的实际字节数，按播放列表顺序排列 */
+  segmentByteLengths?: readonly number[];
 }
 
 export interface AdFilterResult {
@@ -41,6 +43,8 @@ export interface AdFilterResult {
   reason?: string;
   /** 实际命中的过滤规则，供下载审计使用 */
   matchedReasons?: string[];
+  /** 被删除分片在输入播放列表中的位置 */
+  removedSegmentIndices?: number[];
 }
 
 // 广告 URL 特征正则（从 M3U8Cleaner.CLEAN_PATTERNS 扩充而来）
@@ -51,6 +55,7 @@ const AD_URL_PATTERNS: RegExp[] = [
 ];
 
 interface Seg {
+  index: number;
   extinfIdx: number; // #EXTINF 行号，-1 表示无
   urlIdx: number; // segment URL 行号
   duration: number;
@@ -79,6 +84,7 @@ export function filterM3U8Ads(
     minKeepRatio = 0.6,
     adMaxGroupSec = 90,
     adMaxGroupRatio = 0.1,
+    segmentByteLengths,
   } = opts;
 
   const lines = content.split('\n');
@@ -119,6 +125,7 @@ export function filterM3U8Ads(
     if (t.length > 0 && !t.startsWith('#')) {
       // segment URL 行
       segs.push({
+        index: segs.length,
         extinfIdx: pendingExtinf,
         urlIdx: i,
         duration: pendingDur,
@@ -196,20 +203,83 @@ export function filterM3U8Ads(
   // ── 策略 3: DISCONTINUITY 分组 + 时长占比 ──
   if (enableDiscontinuity && curGroup > 0) {
     const groupDur = new Map<number, number>();
+    const groupSegments = new Map<number, Seg[]>();
     for (const s of segs) {
       groupDur.set(s.group, (groupDur.get(s.group) || 0) + s.duration);
+      const members = groupSegments.get(s.group) ?? [];
+      members.push(s);
+      groupSegments.set(s.group, members);
     }
-    for (const [g, dur] of Array.from(groupDur.entries())) {
-      // 片头第 0 组豁免：开头无前导 DISCONTINUITY 时，group 0 是片头正片，
-      // 不可因其短小而误删（VOD 起始保护，见 PRD 算法第 4 步）
-      if (g === 0) continue;
-      const ratio = totalDur > 0 ? dur / totalDur : 0;
-      if (dur < adMaxGroupSec && ratio < adMaxGroupRatio) {
-        // 整组标记为广告
-        for (const s of segs) {
-          if (s.group === g) {
-            s.ad = true;
-            s.reasons.add('short-discontinuity-group');
+    const completeGroups = Array.from(groupSegments.entries()).filter(
+      ([g]) => g < curGroup
+    );
+    const countFrequency = new Map<number, number>();
+    for (const [, members] of completeGroups) {
+      countFrequency.set(
+        members.length,
+        (countFrequency.get(members.length) ?? 0) + 1
+      );
+    }
+    const dominantGroupCount = Array.from(countFrequency.entries()).sort(
+      (left, right) => right[1] - left[1]
+    )[0];
+    const periodicDiscontinuities =
+      completeGroups.length >= 10 &&
+      dominantGroupCount !== undefined &&
+      dominantGroupCount[1] / completeGroups.length >= 0.8;
+
+    if (periodicDiscontinuities && segmentByteLengths?.length === segs.length) {
+      const groups = Array.from(groupSegments.entries()).sort(
+        ([left], [right]) => left - right
+      );
+      const bitrate = (members: Seg[]): number => {
+        const duration = members.reduce(
+          (sum, segment) => sum + segment.duration,
+          0
+        );
+        const bytes = members.reduce(
+          (sum, segment) => sum + (segmentByteLengths[segment.index] ?? 0),
+          0
+        );
+        return duration > 0 ? (bytes * 8) / duration : 0;
+      };
+      for (let index = 1; index < groups.length - 1; index += 1) {
+        const [, previous] = groups[index - 1];
+        const [, current] = groups[index];
+        const [, next] = groups[index + 1];
+        const duration = current.reduce(
+          (sum, segment) => sum + segment.duration,
+          0
+        );
+        const ratio = totalDur > 0 ? duration / totalDur : 0;
+        const neighboringBitrate = Math.min(bitrate(previous), bitrate(next));
+        if (
+          current.length === previous.length &&
+          current.length === next.length &&
+          duration < adMaxGroupSec &&
+          ratio < adMaxGroupRatio &&
+          neighboringBitrate > 0 &&
+          bitrate(current) < neighboringBitrate * 0.35
+        ) {
+          for (const segment of current) {
+            segment.ad = true;
+            segment.reasons.add('isolated-bitrate-outlier');
+          }
+        }
+      }
+    } else if (!periodicDiscontinuities) {
+      for (const [g, dur] of Array.from(groupDur.entries())) {
+        // 片头第 0 组豁免：开头无前导 DISCONTINUITY 时，group 0 是片头正片，
+        // 不可因其短小而误删（VOD 起始保护，见 PRD 算法第 4 步）
+        if (g === 0) continue;
+        const ratio = totalDur > 0 ? dur / totalDur : 0;
+        if (dur < adMaxGroupSec && ratio < adMaxGroupRatio) {
+          // 整组标记为广告
+          for (const s of segs) {
+            if (s.group === g) {
+              s.ad = true;
+              s.reasons.add('short-discontinuity-group');
+            }
           }
         }
       }
@@ -313,5 +383,6 @@ export function filterM3U8Ads(
     matchedReasons: Array.from(
       new Set(adSegs.flatMap((segment) => Array.from(segment.reasons)))
     ),
+    removedSegmentIndices: adSegs.map((segment) => segment.index),
   };
 }
