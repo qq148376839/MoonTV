@@ -6,10 +6,13 @@ import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
   createEpisodeGeneration,
+  parseMediaPlaylistResources,
   redactDownloadUrl,
   redactUrlsInText,
   releaseEpisodeLock,
+  remapMediaPlaylistResources,
   validateLocalPlaylist,
+  validateResumeFiles,
 } from '../download-transaction';
 
 describe('download transaction', () => {
@@ -96,5 +99,114 @@ describe('download transaction', () => {
     expect(() =>
       acquireEpisodeLock(root, 1, { taskId: 'third' })
     ).not.toThrow();
+  });
+
+  test('validates resumable files by existence, nonempty size, and expected length', () => {
+    const valid = path.join(root, 'valid.ts');
+    const empty = path.join(root, 'empty.ts');
+    const wrong = path.join(root, 'wrong.ts');
+    fs.writeFileSync(valid, 'valid');
+    fs.writeFileSync(empty, '');
+    fs.writeFileSync(wrong, 'short');
+
+    expect(
+      validateResumeFiles([
+        { index: 0, path: valid, expectedLength: 5 },
+        { index: 1, path: empty, expectedLength: null },
+        { index: 2, path: wrong, expectedLength: 8 },
+        { index: 3, path: path.join(root, 'missing.ts') },
+      ])
+    ).toEqual({ valid: [0], invalid: [1, 2, 3], bytes: 5 });
+  });
+
+  test('counts a duplicated resumable index only once', () => {
+    const valid = path.join(root, 'valid.ts');
+    fs.writeFileSync(valid, 'valid');
+
+    expect(
+      validateResumeFiles([
+        { index: 0, path: valid, expectedLength: 5 },
+        { index: 0, path: valid, expectedLength: 5 },
+      ])
+    ).toEqual({ valid: [0], invalid: [], bytes: 5 });
+  });
+
+  test('remaps by media sequence and excludes already completed segments', () => {
+    const original = parseMediaPlaylistResources(
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:1,\nold-40.ts?token=old\n#EXTINF:1,\nold-41.ts?token=old',
+      'https://old.example/list.m3u8?token=old'
+    );
+    const refreshed = parseMediaPlaylistResources(
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:40\n#EXTINF:1,\nnew-40.ts?token=new\n#EXTINF:1,\nnew-41.ts?token=new',
+      'https://new.example/list.m3u8?token=new'
+    );
+
+    const remap = remapMediaPlaylistResources(original, refreshed, [0]);
+    expect(remap.preservedSegmentIndices).toEqual([0]);
+    expect(remap.pendingSegments).toEqual([
+      expect.objectContaining({ index: 1, sequence: 41 }),
+    ]);
+    expect(remap.pendingSegments[0].url).toContain('new-41.ts?token=new');
+  });
+
+  test('preserves KEY and MAP relationships while replacing their signed URLs', () => {
+    const original = parseMediaPlaylistResources(
+      [
+        '#EXTM3U',
+        '#EXT-X-MEDIA-SEQUENCE:7',
+        '#EXT-X-MAP:URI="init.mp4?token=old"',
+        '#EXT-X-KEY:METHOD=AES-128,URI="first.key?token=old"',
+        '#EXTINF:1,',
+        '7.ts?token=old',
+        '#EXT-X-KEY:METHOD=AES-128,URI="second.key?token=old"',
+        '#EXTINF:1,',
+        '8.ts?token=old',
+      ].join('\n'),
+      'https://old.example/list.m3u8'
+    );
+    const refreshed = parseMediaPlaylistResources(
+      [
+        '#EXTM3U',
+        '#EXT-X-MEDIA-SEQUENCE:7',
+        '#EXT-X-MAP:URI="fresh-init.mp4?token=new"',
+        '#EXT-X-KEY:METHOD=AES-128,URI="fresh-first.key?token=new"',
+        '#EXTINF:1,',
+        'fresh-7.ts?token=new',
+        '#EXT-X-KEY:METHOD=AES-128,URI="fresh-second.key?token=new"',
+        '#EXTINF:1,',
+        'fresh-8.ts?token=new',
+      ].join('\n'),
+      'https://new.example/list.m3u8'
+    );
+
+    const remap = remapMediaPlaylistResources(original, refreshed, []);
+    expect(remap.keys.map((item) => item.url)).toEqual([
+      'https://new.example/fresh-first.key?token=new',
+      'https://new.example/fresh-second.key?token=new',
+    ]);
+    expect(remap.maps.map((item) => item.url)).toEqual([
+      'https://new.example/fresh-init.mp4?token=new',
+    ]);
+    expect(
+      remap.pendingSegments.map((item) => [item.keyIndex, item.mapIndex])
+    ).toEqual([
+      [0, 0],
+      [1, 0],
+    ]);
+  });
+
+  test('rejects a refreshed playlist with incompatible media structure', () => {
+    const original = parseMediaPlaylistResources(
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:4\n#EXTINF:1,\n4.ts\n#EXTINF:1,\n5.ts',
+      'https://old.example/list.m3u8'
+    );
+    const refreshed = parseMediaPlaylistResources(
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:5\n#EXTINF:1,\n5.ts\n#EXTINF:1,\n6.ts',
+      'https://new.example/list.m3u8'
+    );
+
+    expect(() => remapMediaPlaylistResources(original, refreshed, [])).toThrow(
+      /structure mismatch/i
+    );
   });
 });

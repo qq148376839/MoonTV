@@ -3,19 +3,45 @@
 
 import { createHash } from 'crypto';
 import fs from 'fs';
-// @ts-expect-error - p-limit is ESM but works in Next.js Node.js runtime
-import pLimit from 'p-limit';
 import path from 'path';
 
 import { filterM3U8Ads } from './ad-filter';
+import { getAvailableApiSites } from './config';
+import { getDownloadEventBus } from './download-event-bus';
+import {
+  calculateEpisodeProgress,
+  DownloadSpeedWindow,
+} from './download-progress';
+import {
+  DownloadCancelledError,
+  DownloadScheduler,
+} from './download-scheduler';
+import {
+  assertSafeGenerationId,
+  DownloadStateStore,
+} from './download-state-store';
+import type {
+  ParsedMediaPlaylistResources,
+  RemappedMediaPlaylistResources,
+} from './download-transaction';
 import {
   acquireEpisodeLock,
   commitPlaylistAtomically,
   createEpisodeGeneration,
+  parseMediaPlaylistResources,
   redactDownloadUrl,
   releaseEpisodeLock,
+  remapMediaPlaylistResources,
   validateLocalPlaylist,
+  validateResumeFiles,
 } from './download-transaction';
+import type {
+  DownloadFailure,
+  DownloadTaskSnapshot,
+  DownloadWorkItem,
+  EpisodeDownloadState,
+} from './download-types';
+import { getDetailFromApi } from './downstream';
 import {
   EpisodeDownloadAuditSummary,
   getStorageManager,
@@ -186,30 +212,441 @@ export type ProgressCallback = (
   total: number
 ) => void;
 
+interface DownloadStateStoreLike {
+  loadRecoverableTasks(): DownloadTaskSnapshot[];
+  saveTask(snapshot: DownloadTaskSnapshot): void;
+  deleteTaskState(taskId: string): void;
+  cleanupHistory?(now: number): { removed: string[] };
+}
+
+export interface CommandResult {
+  ok: boolean;
+  status: DownloadTaskSnapshot['status'] | 'not_found' | 'conflict';
+}
+
+export interface DownloadServiceDependencies {
+  storageManager: StorageManager;
+  stateStore: DownloadStateStoreLike;
+  scheduler: DownloadScheduler;
+  publishProgress: (
+    type: 'task.updated' | 'episode.updated' | 'segment.batch',
+    data: unknown
+  ) => void;
+  timer: (milliseconds: number) => Promise<void>;
+  random: () => number;
+  reacquireEpisode?: (
+    task: DownloadTaskSnapshot,
+    episode: number
+  ) => Promise<{ playlistUrl: string; content: string }>;
+}
+
+async function defaultReacquireEpisode(
+  task: DownloadTaskSnapshot,
+  episode: number
+): Promise<{ playlistUrl: string; content: string }> {
+  const sites = await getAvailableApiSites();
+  const site = sites.find((candidate) => candidate.key === task.source);
+  if (!site)
+    throw new Error('unable to reacquire playlist: source unavailable');
+  const detail = await getDetailFromApi(site, task.resourceId);
+  let playlistUrl = detail.episodes[episode - 1];
+  if (!playlistUrl)
+    throw new Error('unable to reacquire playlist: episode unavailable');
+  if (!playlistUrl.toLowerCase().includes('m3u8')) {
+    const parsed = await parseToM3u8Url(playlistUrl);
+    if (!parsed) throw new Error('unable to reacquire playlist URL');
+    playlistUrl = parsed;
+  }
+  return fetchCurrentMediaPlaylist(playlistUrl);
+}
+
+async function fetchCurrentMediaPlaylist(
+  playlistUrl: string
+): Promise<{ playlistUrl: string; content: string }> {
+  const response = await fetchWithRetry(playlistUrl, {}, 3, 30000);
+  if (!response.ok) {
+    throw new Error(`playlist refresh failed: ${response.status}`);
+  }
+  const content = await response.text();
+  if (!content.includes('#EXT-X-STREAM-INF')) return { playlistUrl, content };
+
+  const lines = content.split('\n');
+  let selectedUrl = '';
+  let selectedBandwidth = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+    const bandwidth = Number.parseInt(
+      line.match(/BANDWIDTH=(\d+)/)?.[1] ?? '0',
+      10
+    );
+    const candidate = lines[index + 1]?.trim();
+    if (
+      candidate &&
+      !candidate.startsWith('#') &&
+      bandwidth > selectedBandwidth
+    ) {
+      selectedBandwidth = bandwidth;
+      selectedUrl = new URL(candidate, playlistUrl).href;
+    }
+  }
+  if (!selectedUrl)
+    throw new Error('playlist refresh master has no media stream');
+  const mediaResponse = await fetchWithRetry(selectedUrl, {}, 3, 30000);
+  if (!mediaResponse.ok) {
+    throw new Error(`playlist refresh failed: ${mediaResponse.status}`);
+  }
+  return { playlistUrl: selectedUrl, content: await mediaResponse.text() };
+}
+
+export function readDownloadConcurrency(
+  raw = process.env.LOCAL_STORAGE_DOWNLOAD_CONCURRENCY
+): number {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed)) return 8;
+  return Math.max(2, Math.min(16, parsed));
+}
+
+function defaultDependencies(): DownloadServiceDependencies {
+  const storageManager = getStorageManager();
+  const concurrency = readDownloadConcurrency();
+  return {
+    storageManager,
+    stateStore: new DownloadStateStore(
+      typeof storageManager.getStoragePath === 'function'
+        ? storageManager.getStoragePath()
+        : process.env.LOCAL_STORAGE_PATH ||
+          path.join(process.cwd(), 'data', 'videos')
+    ),
+    scheduler: sharedScheduler(concurrency),
+    publishProgress: (type, data) => getDownloadEventBus().publish(type, data),
+    timer: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    random: Math.random,
+    reacquireEpisode: defaultReacquireEpisode,
+  };
+}
+
+let globalScheduler: DownloadScheduler | null = null;
+function sharedScheduler(concurrency: number): DownloadScheduler {
+  globalScheduler ??= new DownloadScheduler({ concurrency });
+  return globalScheduler;
+}
+
+function containedGenerationPath(
+  resourcePath: string,
+  episode: number,
+  generationId: string
+): string {
+  assertSafeGenerationId(generationId);
+  const generationsRoot = path.resolve(
+    resourcePath,
+    `episode_${String(episode).padStart(2, '0')}_generations`
+  );
+  const generationPath = path.resolve(generationsRoot, generationId);
+  if (path.dirname(generationPath) !== generationsRoot) {
+    throw new Error('Invalid generation path: outside generations directory');
+  }
+  return generationPath;
+}
+
+function realDirectoryWithoutSymlink(
+  directoryPath: string,
+  label: string
+): string {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(directoryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Invalid generation path: missing ${label}`);
+    }
+    throw error;
+  }
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Invalid generation path: symbolic link ${label}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Invalid generation path: ${label} is not a directory`);
+  }
+  return fs.realpathSync(directoryPath);
+}
+
+function generationPathForRemoval(
+  resourcePath: string,
+  episode: number,
+  generationId: string
+): string {
+  const generationPath = containedGenerationPath(
+    resourcePath,
+    episode,
+    generationId
+  );
+  const resourceRoot = path.resolve(resourcePath);
+  const generationsRoot = path.dirname(generationPath);
+  const realResourceRoot = realDirectoryWithoutSymlink(
+    resourceRoot,
+    'resource root'
+  );
+  const realGenerationsRoot = realDirectoryWithoutSymlink(
+    generationsRoot,
+    'generations directory'
+  );
+  if (path.dirname(realGenerationsRoot) !== realResourceRoot) {
+    throw new Error('Invalid generation path: escaped resource root');
+  }
+  const realGenerationPath = realDirectoryWithoutSymlink(
+    generationPath,
+    'generation directory'
+  );
+  if (path.dirname(realGenerationPath) !== realGenerationsRoot) {
+    throw new Error('Invalid generation path: escaped generations directory');
+  }
+  return realGenerationPath;
+}
+
 // 下载服务类
 export class DownloadService {
   private storageManager: StorageManager;
   private tasks: Map<string, DownloadTask> = new Map();
   private maxConcurrent: number;
   private activeDownloads: Set<string> = new Set();
-  private tsConcurrent: number;
-  private tsLimit: ReturnType<typeof pLimit>;
+  private readonly stateStore: DownloadStateStoreLike;
+  private readonly scheduler: DownloadScheduler;
+  private readonly publishProgress: DownloadServiceDependencies['publishProgress'];
+  private readonly timer: DownloadServiceDependencies['timer'];
+  private readonly random: DownloadServiceDependencies['random'];
+  private readonly reacquireEpisode: NonNullable<
+    DownloadServiceDependencies['reacquireEpisode']
+  >;
+  private readonly snapshots = new Map<string, DownloadTaskSnapshot>();
+  private readonly failedWork = new Map<
+    string,
+    { item: DownloadWorkItem; operation: () => Promise<number>; path: string }
+  >();
+  private readonly pendingFlushes = new Map<
+    string,
+    { changes: number; timer: NodeJS.Timeout | null }
+  >();
+  private readonly recoveryPlans = new Map<
+    string,
+    RemappedMediaPlaylistResources
+  >();
+  private readonly taskLifecycleVersions = new Map<string, number>();
+  private lastCleanupDay: number | null = null;
 
-  constructor() {
-    this.storageManager = getStorageManager();
+  constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
+    this.storageManager = deps.storageManager;
+    this.stateStore = deps.stateStore;
+    this.scheduler = deps.scheduler;
+    this.publishProgress = deps.publishProgress;
+    this.timer = deps.timer;
+    this.random = deps.random;
+    this.reacquireEpisode = deps.reacquireEpisode ?? defaultReacquireEpisode;
     this.maxConcurrent =
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
+    for (const snapshot of this.stateStore.loadRecoverableTasks()) {
+      this.snapshots.set(snapshot.taskId, snapshot);
+    }
+    this.cleanupHistoryOncePerDay();
+  }
 
-    // TS 片段并发数配置
-    this.tsConcurrent =
-      parseInt(process.env.LOCAL_STORAGE_TS_CONCURRENT || '5', 10) || 5;
+  private cleanupHistoryOncePerDay(now = Date.now()): void {
+    const day = Math.floor(now / (24 * 60 * 60 * 1000));
+    if (this.lastCleanupDay === day) return;
+    const result = this.stateStore.cleanupHistory?.(now);
+    result?.removed.forEach((taskId) => this.evictCleanedTask(taskId));
+    this.lastCleanupDay = day;
+  }
 
-    // 创建 p-limit 实例用于控制 TS 片段并发下载
-    this.tsLimit = pLimit(this.tsConcurrent);
+  private evictCleanedTask(taskId: string): void {
+    const pending = this.pendingFlushes.get(taskId);
+    if (pending?.timer) clearTimeout(pending.timer);
+    this.pendingFlushes.delete(taskId);
 
-    console.log(
-      `[DownloadService] 初始化完成 - 任务并发: ${this.maxConcurrent}, TS片段并发: ${this.tsConcurrent}`
-    );
+    this.bumpTaskLifecycle(taskId);
+    this.scheduler.pauseTask(taskId);
+    this.scheduler.cancelQueued(taskId);
+    this.scheduler.setPriority(taskId, 'normal');
+
+    this.snapshots.delete(taskId);
+    this.tasks.delete(taskId);
+    this.activeDownloads.delete(taskId);
+    for (const [key, failed] of this.failedWork) {
+      if (failed.item.taskId === taskId) this.failedWork.delete(key);
+    }
+    for (const key of this.recoveryPlans.keys()) {
+      if (key.startsWith(`${taskId}:`)) this.recoveryPlans.delete(key);
+    }
+    this.taskLifecycleVersions.delete(taskId);
+  }
+
+  public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
+    return this.snapshots.get(taskId) ?? null;
+  }
+
+  public getSchedulerDiagnostics() {
+    return this.scheduler.getGlobalStats();
+  }
+
+  public getRecoverableTaskIds(): string[] {
+    return Array.from(this.snapshots.keys());
+  }
+
+  private async runWithRetry<T>(
+    operation: (attempt: number) => Promise<T>,
+    refresh?: () => Promise<void>
+  ): Promise<T> {
+    let lastError: unknown;
+    let refreshed = false;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await operation(attempt);
+      } catch (error) {
+        lastError = error;
+        if (
+          this.classifyFailure(error) === 'http_auth' &&
+          refresh &&
+          !refreshed
+        ) {
+          refreshed = true;
+          await refresh();
+        }
+        if (attempt === 3 || !this.isRetryable(error)) {
+          if (error instanceof Error) {
+            Object.assign(error, { downloadAttempts: attempt });
+          }
+          throw error;
+        }
+        await this.timer(500 * 2 ** (attempt - 1) + this.random() * 250);
+      }
+    }
+    throw lastError;
+  }
+
+  private isRetryable(error: unknown): boolean {
+    const category = this.classifyFailure(error);
+    return [
+      'timeout',
+      'http_auth',
+      'http_server',
+      'io',
+      'empty',
+      'length',
+    ].includes(category);
+  }
+
+  private classifyFailure(error: unknown): DownloadFailure['category'] {
+    const candidate = error as {
+      name?: string;
+      status?: number;
+      code?: string;
+      message?: string;
+    };
+    if (
+      candidate.name === 'AbortError' ||
+      /timed?\s*out/i.test(candidate.message || '')
+    )
+      return 'timeout';
+    if (
+      candidate.status === 401 ||
+      candidate.status === 403 ||
+      /\b(401|403)\b/.test(candidate.message || '')
+    )
+      return 'http_auth';
+    if (
+      (candidate.status ?? 0) >= 500 ||
+      /\b5\d\d\b/.test(candidate.message || '')
+    )
+      return 'http_server';
+    if (/empty|\u4e3a\u7a7a/.test(candidate.message || '')) return 'empty';
+    if (/length|\u957f\u5ea6/.test(candidate.message || '')) return 'length';
+    if (
+      candidate.code ||
+      /socket|stream|write|read|E[A-Z]+/.test(candidate.message || '')
+    )
+      return 'io';
+    return 'other';
+  }
+
+  private workKey(item: DownloadWorkItem): string {
+    return `${item.taskId}:${item.episode}:${item.generationId}:${item.kind}:${item.index}`;
+  }
+
+  private async executeScheduled(
+    episode: EpisodeDownloadState,
+    item: DownloadWorkItem,
+    filePath: string,
+    operation: (
+      reportWrittenBytes?: (bytes: number) => void
+    ) => Promise<number>,
+    refresh?: () => Promise<void>
+  ): Promise<number> {
+    try {
+      const bytes = await this.scheduler.enqueue(item, async () => {
+        const activeItem: DownloadWorkItem = {
+          ...item,
+          speedBytesPerSecond: 0,
+        };
+        episode.activeItems.push(activeItem);
+        const speedWindow = new DownloadSpeedWindow(10);
+        speedWindow.addSample(Date.now(), 0);
+        const reportWrittenBytes = (writtenBytes: number) => {
+          speedWindow.addSample(Date.now(), writtenBytes);
+          activeItem.speedBytesPerSecond =
+            speedWindow.getEstimate(0).bytesPerSecond;
+          this.queueSnapshotFlush(item.taskId);
+        };
+        try {
+          return await this.runWithRetry((attempt) => {
+            item.attempt = attempt;
+            activeItem.attempt = attempt;
+            return operation(reportWrittenBytes);
+          }, refresh).catch((error) => {
+            this.scheduler.cancelQueued(item.taskId);
+            throw error;
+          });
+        } finally {
+          episode.activeItems = episode.activeItems.filter(
+            (current) => current !== activeItem
+          );
+          this.queueSnapshotFlush(item.taskId);
+        }
+      });
+      this.failedWork.delete(this.workKey(item));
+      this.markUnitCompleted(episode, item, bytes);
+      this.queueSnapshotFlush(item.taskId);
+      return bytes;
+    } catch (error) {
+      const category = this.classifyFailure(error);
+      const failure: DownloadFailure = {
+        kind: item.kind,
+        index: item.index,
+        category,
+        attempts:
+          (error as { downloadAttempts?: number }).downloadAttempts ?? 1,
+        path: path.relative(process.cwd(), filePath),
+        message: redactDownloadUrl(
+          error instanceof Error ? error.message : String(error)
+        ),
+      };
+      episode.failures = episode.failures.filter(
+        (current) => current.kind !== item.kind || current.index !== item.index
+      );
+      episode.failures.push(failure);
+      if (
+        item.kind === 'segment' &&
+        !episode.failedSegmentIndices.includes(item.index)
+      ) {
+        episode.failedSegmentIndices.push(item.index);
+      }
+      this.failedWork.set(this.workKey(item), {
+        item,
+        operation,
+        path: filePath,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -381,6 +818,30 @@ export class DownloadService {
     };
 
     this.tasks.set(taskId, task);
+    const now = Date.now();
+    const snapshot: DownloadTaskSnapshot = {
+      schemaVersion: 1,
+      taskId,
+      source: task.source,
+      resourceId: task.resourceId,
+      title: task.resource.title,
+      year: task.resource.year,
+      poster: task.resource.poster,
+      episodeNumbers: numbersToDownload,
+      status: 'pending',
+      priority: 'normal',
+      currentEpisode: numbersToDownload[0] ?? null,
+      progress: 0,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      completedBytes: 0,
+      createdAt: now,
+      updatedAt: now,
+      episodes: {},
+    };
+    this.snapshots.set(taskId, snapshot);
+    this.flushSnapshot(snapshot, 'task.updated');
     this.processQueue();
 
     return task;
@@ -543,6 +1004,7 @@ export class DownloadService {
               localPath,
               episodeIndex,
               {
+                taskId: task.id,
                 preferParse:
                   task.resource?.source_type === 'official' ||
                   task.resource?.source === 'official',
@@ -744,6 +1206,7 @@ export class DownloadService {
     localPath: string,
     episodeIndex: number,
     opts?: {
+      taskId?: string;
       preferParse?: boolean;
       forceRedownload?: boolean;
       addressMethod?: DownloadTask['addressMethod'];
@@ -764,6 +1227,7 @@ export class DownloadService {
 
     if (isM3U8) {
       return this.downloadM3U8(url, localPath, episodeIndex, progressCallback, {
+        taskId: opts?.taskId ?? `legacy-${episodeIndex}`,
         sourceUrl: url,
         addressMethod:
           opts?.addressMethod === 'direct' || !opts?.addressMethod
@@ -794,6 +1258,7 @@ export class DownloadService {
           episodeIndex,
           progressCallback,
           {
+            taskId: opts?.taskId ?? `legacy-${episodeIndex}`,
             sourceUrl: url,
             addressMethod:
               opts?.addressMethod === 'direct' || !opts?.addressMethod
@@ -828,9 +1293,14 @@ export class DownloadService {
     episodeIndex: number,
     progressCallback?: (progress: number) => void,
     auditContext: {
+      taskId: string;
       sourceUrl: string;
       addressMethod: EpisodeDownloadAuditSummary['address_method'];
-    } = { sourceUrl: m3u8Url, addressMethod: 'direct' }
+    } = {
+      taskId: `legacy-${episodeIndex}`,
+      sourceUrl: m3u8Url,
+      addressMethod: 'direct',
+    }
   ): Promise<{
     localFilePath: string;
     fileSize: number;
@@ -926,6 +1396,12 @@ export class DownloadService {
       episodeIndex,
       generationId
     );
+    const episodeState = this.ensureEpisodeState(
+      auditContext.taskId,
+      episodeIndex,
+      generationId
+    );
+    episodeState.addressSource = auditContext.addressMethod;
     const episodeDir = generation.segmentsDir;
     const originalSegmentCount = mediaPlaylistContent
       .split('\n')
@@ -955,10 +1431,63 @@ export class DownloadService {
         'utf-8'
       );
 
+      const originalResources = parseMediaPlaylistResources(
+        mediaPlaylistContent,
+        mediaPlaylistUrl
+      );
+      let currentResources = originalResources;
+      let refreshPromise: Promise<void> | null = null;
+      const refreshResources = (): Promise<void> => {
+        if (refreshPromise) return refreshPromise;
+        refreshPromise = (async () => {
+          if (episodeState.refreshCount >= 1) {
+            throw new Error('playlist refresh limit reached');
+          }
+          const snapshot = this.snapshots.get(auditContext.taskId);
+          if (!snapshot) throw new Error('download task snapshot unavailable');
+          const reacquired = await this.reacquireEpisode(
+            snapshot,
+            episodeIndex
+          );
+          const refreshedAdResult = filterM3U8Ads(reacquired.content, {
+            enableDomain: true,
+            enableKeyword: true,
+            enableDiscontinuity: true,
+          });
+          const refreshedContent = refreshedAdResult.content;
+          const refreshedResources = parseMediaPlaylistResources(
+            refreshedContent,
+            reacquired.playlistUrl
+          );
+          episodeState.refreshCount += 1;
+          episodeState.addressSource = 'refreshed';
+          auditContext.addressMethod = 'refreshed';
+          const remapped = remapMediaPlaylistResources(
+            originalResources,
+            refreshedResources,
+            episodeState.completedSegmentIndices
+          );
+          currentResources = refreshedResources;
+          mediaPlaylistUrl = reacquired.playlistUrl;
+          mediaPlaylistContent = refreshedContent;
+          this.recoveryPlans.set(
+            `${auditContext.taskId}:${episodeIndex}`,
+            remapped
+          );
+          fs.writeFileSync(
+            generation.cleanedPlaylistPath,
+            mediaPlaylistContent,
+            'utf-8'
+          );
+          this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
+        })();
+        return refreshPromise;
+      };
+
       // 解析媒体播放列表内容，提取 TS 片段 URL
       const tsUrls: string[] = [];
       const lines = mediaPlaylistContent.split('\n');
-      const mediaBaseUrl = new URL(mediaPlaylistUrl);
+      let mediaBaseUrl = new URL(mediaPlaylistUrl);
 
       // 先处理 KEY：下载并改写 URI 为本地相对路径（episode_XX/key_000.key）
       const keyUrlToIndex = new Map<string, number>();
@@ -983,7 +1512,7 @@ export class DownloadService {
               Pragma: 'no-cache',
             },
           },
-          3,
+          1,
           30000
         );
         if (!resp.ok) {
@@ -993,6 +1522,15 @@ export class DownloadService {
         const ab = await resp.arrayBuffer();
         const buf = Buffer.from(ab);
         if (buf.length === 0) throw new Error('下载 KEY 为空');
+        const expectedLength = Number.parseInt(
+          resp.headers.get('content-length') || '0',
+          10
+        );
+        if (expectedLength > 0 && buf.length !== expectedLength) {
+          throw new Error(
+            `下载 KEY 长度不匹配: ${buf.length}/${expectedLength}`
+          );
+        }
         const h = sha256Hex(buf);
 
         // 若已存在但 hash 不同：告警并覆盖（观测优先 + 自愈）
@@ -1020,10 +1558,19 @@ export class DownloadService {
       const downloadMapByUrl = async (mapAbsUrl: string, mapIndex: number) => {
         const mapFileName = `map_${String(mapIndex).padStart(3, '0')}.mp4`;
         const mapFilePath = path.join(generation.mapsDir, mapFileName);
-        const resp = await fetchWithRetry(mapAbsUrl, {}, 3, 30000);
+        const resp = await fetchWithRetry(mapAbsUrl, {}, 1, 30000);
         if (!resp.ok) throw new Error(`下载 MAP 失败: ${resp.status}`);
         const buf = Buffer.from(await resp.arrayBuffer());
         if (buf.length === 0) throw new Error('下载 MAP 为空');
+        const expectedLength = Number.parseInt(
+          resp.headers.get('content-length') || '0',
+          10
+        );
+        if (expectedLength > 0 && buf.length !== expectedLength) {
+          throw new Error(
+            `下载 MAP 长度不匹配: ${buf.length}/${expectedLength}`
+          );
+        }
         fs.writeFileSync(mapFilePath, buf);
       };
 
@@ -1052,8 +1599,34 @@ export class DownloadService {
             if (keyIndex == null) {
               keyIndex = nextKeyIndex++;
               keyUrlToIndex.set(keyAbsUrl, keyIndex);
-              // 下载 key（只在首次见到该 key URL 时）
-              await downloadKeyByUrl(keyAbsUrl, keyIndex);
+              episodeState.keyTotal = nextKeyIndex;
+              const scheduledKeyIndex = keyIndex;
+              const item: DownloadWorkItem = {
+                taskId: auditContext.taskId,
+                episode: episodeIndex,
+                generationId,
+                kind: 'key',
+                index: keyIndex,
+                attempt: 1,
+              };
+              await this.executeScheduled(
+                episodeState,
+                item,
+                path.join(
+                  generation.keysDir,
+                  `key_${String(keyIndex).padStart(3, '0')}.key`
+                ),
+                async () => {
+                  const result = await downloadKeyByUrl(
+                    currentResources.keys[scheduledKeyIndex]?.url ?? keyAbsUrl,
+                    scheduledKeyIndex
+                  );
+                  return fs.statSync(
+                    path.join(generation.keysDir, result.keyFileName)
+                  ).size;
+                },
+                refreshResources
+              );
             }
           }
           continue;
@@ -1067,7 +1640,33 @@ export class DownloadService {
             if (mapIndex == null) {
               mapIndex = nextMapIndex++;
               mapUrlToIndex.set(mapAbsUrl, mapIndex);
-              await downloadMapByUrl(mapAbsUrl, mapIndex);
+              episodeState.mapTotal = nextMapIndex;
+              const scheduledMapIndex = mapIndex;
+              const item: DownloadWorkItem = {
+                taskId: auditContext.taskId,
+                episode: episodeIndex,
+                generationId,
+                kind: 'map',
+                index: mapIndex,
+                attempt: 1,
+              };
+              const mapPath = path.join(
+                generation.mapsDir,
+                `map_${String(mapIndex).padStart(3, '0')}.mp4`
+              );
+              await this.executeScheduled(
+                episodeState,
+                item,
+                mapPath,
+                async () => {
+                  await downloadMapByUrl(
+                    currentResources.maps[scheduledMapIndex]?.url ?? mapAbsUrl,
+                    scheduledMapIndex
+                  );
+                  return fs.statSync(mapPath).size;
+                },
+                refreshResources
+              );
             }
           }
           continue;
@@ -1083,9 +1682,11 @@ export class DownloadService {
         }
       }
 
-      console.log(
-        `[DownloadService] M3U8 包含 ${tsUrls.length} 个 TS 片段，将使用并发数: ${this.tsConcurrent}`
-      );
+      episodeState.totalSegments = tsUrls.length;
+      episodeState.keyTotal = keyUrlToIndex.size;
+      episodeState.mapTotal = mapUrlToIndex.size;
+      episodeState.stage = 'downloading';
+      this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
 
       // 检查已下载的片段
       let existingCount = 0;
@@ -1114,8 +1715,16 @@ export class DownloadService {
       let skipped = 0;
       const startTime = Date.now();
 
-      const downloadPromises = tsUrls.map((tsUrl, i) =>
-        this.tsLimit(async () => {
+      const downloadPromises = tsUrls.map((tsUrl, i) => {
+        const workItem: DownloadWorkItem = {
+          taskId: auditContext.taskId,
+          episode: episodeIndex,
+          generationId,
+          kind: 'segment',
+          index: i,
+          attempt: 1,
+        };
+        return (async () => {
           const segmentFileName = `segment_${i.toString().padStart(3, '0')}.ts`;
           const segmentFilePath = path.join(episodeDir, segmentFileName);
 
@@ -1156,7 +1765,19 @@ export class DownloadService {
 
           // 文件不存在或大小为0，需要下载
           try {
-            const segmentSize = await this.downloadFile(tsUrl, segmentFilePath);
+            const segmentSize = await this.executeScheduled(
+              episodeState,
+              workItem,
+              segmentFilePath,
+              (reportWrittenBytes) =>
+                this.downloadFile(
+                  currentResources.segments[i]?.url ?? tsUrl,
+                  segmentFilePath,
+                  (_progress, writtenBytes) =>
+                    reportWrittenBytes?.(writtenBytes)
+                ),
+              refreshResources
+            );
             if (segmentSize <= 0) {
               throw new Error(`下载片段为空: index=${i}`);
             }
@@ -1191,11 +1812,23 @@ export class DownloadService {
             );
             throw error;
           }
-        })
-      );
+        })();
+      });
 
-      // 任一片段失败都不得提交 generation。
-      await Promise.all(downloadPromises);
+      // 任一片段失败都不得提交 generation；先取消队列，再等待 active work
+      // 全部 settle，确保返回后不会继续写 generation 或修改状态。
+      const segmentResults = await Promise.allSettled(downloadPromises);
+      const firstFailure = segmentResults.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected' &&
+          !(result.reason instanceof DownloadCancelledError)
+      );
+      if (firstFailure) throw firstFailure.reason;
+      const cancellation = segmentResults.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected'
+      );
+      if (cancellation) throw cancellation.reason;
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const downloadedCount = completed - skipped;
@@ -1212,6 +1845,15 @@ export class DownloadService {
       // 更新 M3U8 文件中的路径为相对路径（TS + KEY）
       // 始终保存媒体播放列表的内容（因为实际下载的是媒体播放列表的 TS 片段）
       let updatedM3U8Content = mediaPlaylistContent;
+      mediaBaseUrl = new URL(mediaPlaylistUrl);
+      keyUrlToIndex.clear();
+      currentResources.keys.forEach((key) =>
+        keyUrlToIndex.set(key.url, key.index)
+      );
+      mapUrlToIndex.clear();
+      currentResources.maps.forEach((map) =>
+        mapUrlToIndex.set(map.url, map.index)
+      );
 
       // 改写 KEY URI 为本地相对路径：episode_XX/key_000.key
       if (keyUrlToIndex.size > 0) {
@@ -1291,6 +1933,8 @@ export class DownloadService {
       if (validation.references <= 0 || tsUrls.length <= 0) {
         throw new Error('播放列表不包含可提交的媒体片段');
       }
+      episodeState.stage = 'committing';
+      this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
       const audit: EpisodeDownloadAuditSummary = {
         generation_id: generationId,
         downloaded_at: Date.now(),
@@ -1332,6 +1976,10 @@ export class DownloadService {
       const hadActive = fs.existsSync(m3u8FilePath);
       if (hadActive) fs.copyFileSync(m3u8FilePath, backupPath);
       commitPlaylistAtomically(m3u8FilePath, updatedM3U8Content);
+      episodeState.stage = 'completed';
+      episodeState.oldEntryRetained = false;
+      episodeState.recoverable = false;
+      this.flushSnapshotForTask(auditContext.taskId, 'task.updated');
 
       return {
         localFilePath: m3u8FilePath,
@@ -1340,11 +1988,20 @@ export class DownloadService {
         rollback: () => {
           if (hadActive) fs.renameSync(backupPath, m3u8FilePath);
           else fs.rmSync(m3u8FilePath, { force: true });
-          fs.rmSync(generation.rootDir, { recursive: true, force: true });
+          fs.rmSync(
+            generationPathForRemoval(localPath, episodeIndex, generationId),
+            { recursive: true, force: true }
+          );
         },
         finalize: () => fs.rmSync(backupPath, { force: true }),
       };
     } catch (error) {
+      episodeState.stage = 'partial_failed';
+      episodeState.oldEntryRetained = fs.existsSync(
+        path.join(localPath, `episode_${epNo}.m3u8`)
+      );
+      episodeState.recoverable = true;
+      this.flushSnapshotForTask(auditContext.taskId, 'task.updated');
       const failuresDir = path.join(
         localPath,
         `episode_${epNo}_generations`,
@@ -1368,7 +2025,6 @@ export class DownloadService {
         ),
         'utf-8'
       );
-      fs.rmSync(generation.rootDir, { recursive: true, force: true });
       throw error;
     }
   }
@@ -1432,10 +2088,10 @@ export class DownloadService {
   private async downloadFile(
     url: string,
     filePath: string,
-    progressCallback?: (progress: number) => void
+    progressCallback?: (progress: number, writtenBytes: number) => void
   ): Promise<number> {
     // 使用带重试的 fetch（TS 片段下载使用更长的超时时间）
-    const response = await fetchWithRetry(url, {}, 3, 60000);
+    const response = await fetchWithRetry(url, {}, 1, 60000);
     if (!response.ok) {
       throw new Error(`下载失败: ${response.status}`);
     }
@@ -1470,12 +2126,16 @@ export class DownloadService {
           });
         }
         downloaded += value.length;
-        if (progressCallback && contentLength > 0) {
-          progressCallback((downloaded / contentLength) * 100);
-        }
+        progressCallback?.(
+          contentLength > 0 ? (downloaded / contentLength) * 100 : 0,
+          downloaded
+        );
       }
       fileStream.end();
       await streamCompletion;
+      if (downloaded <= 0) {
+        throw new Error('下载文件为空');
+      }
       if (contentLength > 0 && downloaded !== contentLength) {
         throw new Error(`下载长度不匹配: ${downloaded}/${contentLength}`);
       }
@@ -1485,6 +2145,167 @@ export class DownloadService {
       fs.rmSync(filePath, { force: true });
       throw error;
     }
+  }
+
+  private ensureEpisodeState(
+    taskId: string,
+    episode: number,
+    generationId: string
+  ): EpisodeDownloadState {
+    let snapshot = this.snapshots.get(taskId);
+    if (!snapshot) {
+      const now = Date.now();
+      snapshot = {
+        schemaVersion: 1,
+        taskId,
+        source: 'legacy',
+        resourceId: taskId,
+        title: taskId,
+        year: '',
+        episodeNumbers: [episode],
+        status: 'downloading',
+        priority: 'normal',
+        currentEpisode: episode,
+        progress: 0,
+        progressEstimated: true,
+        speedBytesPerSecond: 0,
+        etaSeconds: null,
+        completedBytes: 0,
+        createdAt: now,
+        updatedAt: now,
+        episodes: {},
+      };
+      this.snapshots.set(taskId, snapshot);
+    }
+    snapshot.status = 'downloading';
+    snapshot.currentEpisode = episode;
+    const key = String(episode);
+    snapshot.episodes[key] ??= {
+      episode,
+      generationId,
+      stage: 'preparing',
+      totalSegments: 0,
+      completedSegmentIndices: [],
+      failedSegmentIndices: [],
+      activeItems: [],
+      keyTotal: 0,
+      keyCompleted: 0,
+      mapTotal: 0,
+      mapCompleted: 0,
+      completedBytes: 0,
+      estimatedBytes: null,
+      progress: 5,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      failures: [],
+      oldEntryRetained: true,
+      recoverable: true,
+      refreshCount: 0,
+      updatedAt: Date.now(),
+    };
+    return snapshot.episodes[key];
+  }
+
+  private markUnitCompleted(
+    episode: EpisodeDownloadState,
+    item: DownloadWorkItem,
+    bytes: number
+  ): void {
+    if (bytes <= 0) throw new Error('downloaded file is empty');
+    if (item.kind === 'segment') {
+      if (!episode.completedSegmentIndices.includes(item.index)) {
+        episode.completedSegmentIndices.push(item.index);
+        episode.completedSegmentIndices.sort((a, b) => a - b);
+        episode.completedBytes += bytes;
+      }
+      episode.failedSegmentIndices = episode.failedSegmentIndices.filter(
+        (index) => index !== item.index
+      );
+    } else if (item.kind === 'key') {
+      episode.keyCompleted = Math.min(
+        episode.keyTotal,
+        episode.keyCompleted + 1
+      );
+    } else {
+      episode.mapCompleted = Math.min(
+        episode.mapTotal,
+        episode.mapCompleted + 1
+      );
+    }
+    episode.failures = episode.failures.filter(
+      (failure) => failure.kind !== item.kind || failure.index !== item.index
+    );
+    const progress = calculateEpisodeProgress(episode);
+    episode.progress = progress.progress;
+    episode.progressEstimated = progress.estimated;
+    episode.updatedAt = Date.now();
+  }
+
+  private queueSnapshotFlush(taskId: string): void {
+    const pending = this.pendingFlushes.get(taskId) ?? {
+      changes: 0,
+      timer: null,
+    };
+    pending.changes += 1;
+    this.pendingFlushes.set(taskId, pending);
+    if (pending.changes >= 20) {
+      this.flushSnapshotForTask(taskId, 'segment.batch');
+      return;
+    }
+    pending.timer ??= setTimeout(
+      () => this.flushSnapshotForTask(taskId, 'segment.batch'),
+      250
+    );
+  }
+
+  private flushSnapshotForTask(
+    taskId: string,
+    eventType: 'task.updated' | 'episode.updated' | 'segment.batch'
+  ): void {
+    const snapshot = this.snapshots.get(taskId);
+    if (snapshot) this.flushSnapshot(snapshot, eventType);
+  }
+
+  private flushSnapshot(
+    snapshot: DownloadTaskSnapshot,
+    eventType: 'task.updated' | 'episode.updated' | 'segment.batch'
+  ): void {
+    const pending = this.pendingFlushes.get(snapshot.taskId);
+    if (pending?.timer) clearTimeout(pending.timer);
+    this.pendingFlushes.delete(snapshot.taskId);
+    const episodes = Object.values(snapshot.episodes);
+    snapshot.completedBytes = episodes.reduce(
+      (total, episode) => total + episode.completedBytes,
+      0
+    );
+    snapshot.progress = episodes.length
+      ? episodes.reduce((total, episode) => total + episode.progress, 0) /
+        episodes.length
+      : snapshot.progress;
+    snapshot.progressEstimated = episodes.some(
+      (episode) => episode.progressEstimated
+    );
+    snapshot.updatedAt = Date.now();
+    if (
+      episodes.length &&
+      episodes.every((episode) => episode.stage === 'completed')
+    ) {
+      snapshot.status = 'completed';
+    } else if (episodes.some((episode) => episode.stage === 'partial_failed')) {
+      snapshot.status = episodes.some(
+        (episode) => episode.stage === 'completed'
+      )
+        ? 'partial_completed'
+        : 'failed';
+    }
+    this.stateStore.saveTask(snapshot);
+    this.publishProgress(eventType, {
+      taskId: snapshot.taskId,
+      status: snapshot.status,
+      progress: snapshot.progress,
+      completedBytes: snapshot.completedBytes,
+    });
   }
 
   /**
@@ -1502,74 +2323,599 @@ export class DownloadService {
     return this.tasks.get(taskId) || null;
   }
 
+  public getTaskSummary(taskId: string):
+    | DownloadTaskSnapshot
+    | {
+        taskId: string;
+        progress: number;
+        progressEstimated: true;
+        status: DownloadStatus;
+      }
+    | null {
+    const snapshot = this.snapshots.get(taskId);
+    if (snapshot) return snapshot;
+    const task = this.tasks.get(taskId);
+    if (!task) return null;
+    return {
+      taskId: task.id,
+      progress: task.progress,
+      progressEstimated: true,
+      status: task.status,
+    };
+  }
+
   /**
    * 获取所有任务
    */
   public getAllTasks(): DownloadTask[] {
+    this.cleanupHistoryOncePerDay();
     return Array.from(this.tasks.values());
+  }
+
+  private bumpTaskLifecycle(taskId: string): number {
+    const version = (this.taskLifecycleVersions.get(taskId) ?? 0) + 1;
+    this.taskLifecycleVersions.set(taskId, version);
+    return version;
+  }
+
+  private async waitForTaskIdle(taskId: string): Promise<void> {
+    while ((this.scheduler.getTaskStats(taskId)?.active ?? 0) > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   /**
    * 暂停任务（仅保证在“集边界”生效）
    */
-  public pauseTask(taskId: string): boolean {
-    const task = this.tasks.get(taskId);
-    if (!task) return false;
-    if (
-      task.status === DownloadStatus.PENDING ||
-      task.status === DownloadStatus.DOWNLOADING
-    ) {
-      task.status = DownloadStatus.PAUSED;
-      this.updateTask(task);
-      return true;
+  public pauseTask(taskId: string): CommandResult {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (!['pending', 'downloading'].includes(snapshot.status)) {
+      return { ok: false, status: 'conflict' };
     }
-    return false;
+    const lifecycleVersion = this.bumpTaskLifecycle(taskId);
+    this.scheduler.pauseTask(taskId);
+    Object.values(snapshot.episodes).forEach((episode) => {
+      if (!['completed', 'partial_failed'].includes(episode.stage)) {
+        episode.stage = 'pausing';
+      }
+    });
+    this.flushSnapshot(snapshot, 'task.updated');
+    const settle = () => {
+      if (
+        this.taskLifecycleVersions.get(taskId) !== lifecycleVersion ||
+        this.snapshots.get(taskId) !== snapshot
+      ) {
+        return;
+      }
+      const stats = this.scheduler.getTaskStats(taskId);
+      if ((stats?.active ?? 0) > 0) {
+        setTimeout(settle, 10);
+        return;
+      }
+      snapshot.status = 'paused';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'pausing') episode.stage = 'paused';
+      });
+      const task = this.tasks.get(taskId);
+      if (task) {
+        task.status = DownloadStatus.PAUSED;
+        this.updateTask(task);
+      }
+      this.flushSnapshot(snapshot, 'task.updated');
+    };
+    settle();
+    return { ok: true, status: snapshot.status };
   }
 
   /**
    * 恢复任务
    */
-  public resumeTask(taskId: string): boolean {
-    const task = this.tasks.get(taskId);
-    if (!task) return false;
-    if (task.status !== DownloadStatus.PAUSED) return false;
+  private async downloadRecoveredBinary(
+    url: string,
+    filePath: string,
+    headers: Record<string, string> = {}
+  ): Promise<number> {
+    const response = await fetchWithRetry(url, { headers }, 1, 30000);
+    if (!response.ok) {
+      throw new Error(`下载资源失败: ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0) throw new Error('下载资源为空');
+    const expectedLength = Number.parseInt(
+      response.headers.get('content-length') || '0',
+      10
+    );
+    if (expectedLength > 0 && buffer.length !== expectedLength) {
+      throw new Error(`下载资源长度不匹配: ${buffer.length}/${expectedLength}`);
+    }
+    fs.writeFileSync(filePath, buffer);
+    return buffer.length;
+  }
 
-    // 如果任务下载线程仍在 activeDownloads 中（暂停等待中），直接切回 downloading 继续
-    if (this.activeDownloads.has(taskId)) {
-      task.status = DownloadStatus.DOWNLOADING;
-      this.updateTask(task);
-      return true;
+  private buildLocalPlaylist(
+    content: string,
+    playlistUrl: string,
+    resources: ParsedMediaPlaylistResources,
+    relativePrefix: string
+  ): string {
+    const baseUrl = new URL(playlistUrl);
+    let segmentIndex = 0;
+    return content
+      .split('\n')
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('#EXT-X-KEY') && !/METHOD=NONE/i.test(trimmed)) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const key = resources.keys.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!key) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/keys/key_${String(key.index).padStart(
+              3,
+              '0'
+            )}.key"`
+          );
+        }
+        if (trimmed.startsWith('#EXT-X-MAP')) {
+          const match = trimmed.match(/URI="([^"]+)"/i);
+          if (!match) return line;
+          const absolute = new URL(match[1], baseUrl).href;
+          const relationship = trimmed
+            .replace(/URI="[^"]+"/i, 'URI="<redacted>"')
+            .replace(/\s+/g, '');
+          const map = resources.maps.find(
+            (candidate) =>
+              candidate.url === absolute &&
+              candidate.relationship === relationship
+          );
+          if (!map) throw new Error('playlist structure mismatch');
+          return line.replace(
+            /URI="[^"]+"/i,
+            `URI="${relativePrefix}/maps/map_${String(map.index).padStart(
+              3,
+              '0'
+            )}.mp4"`
+          );
+        }
+        if (!trimmed || trimmed.startsWith('#')) return line;
+        const local = `${relativePrefix}/segments/segment_${String(
+          segmentIndex
+        ).padStart(3, '0')}.ts`;
+        segmentIndex += 1;
+        return local;
+      })
+      .join('\n');
+  }
+
+  private async executeRecoveredEpisode(
+    snapshot: DownloadTaskSnapshot,
+    episode: EpisodeDownloadState,
+    resourcePath: string,
+    refreshedContent: string,
+    playlistUrl: string,
+    refreshed: ParsedMediaPlaylistResources,
+    remapped: RemappedMediaPlaylistResources
+  ): Promise<void> {
+    const episodeNumber = String(episode.episode).padStart(2, '0');
+    const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
+    const generationRoot = path.join(resourcePath, relativePrefix);
+    const segmentsDir = path.join(generationRoot, 'segments');
+    const keysDir = path.join(generationRoot, 'keys');
+    const mapsDir = path.join(generationRoot, 'maps');
+    fs.mkdirSync(segmentsDir, { recursive: true });
+    fs.mkdirSync(keysDir, { recursive: true });
+    fs.mkdirSync(mapsDir, { recursive: true });
+
+    const validExisting = (filePath: string) =>
+      fs.existsSync(filePath) && fs.statSync(filePath).size > 0;
+    episode.keyTotal = refreshed.keys.length;
+    episode.mapTotal = refreshed.maps.length;
+    episode.keyCompleted = refreshed.keys.filter((key) =>
+      validExisting(
+        path.join(keysDir, `key_${String(key.index).padStart(3, '0')}.key`)
+      )
+    ).length;
+    episode.mapCompleted = refreshed.maps.filter((map) =>
+      validExisting(
+        path.join(mapsDir, `map_${String(map.index).padStart(3, '0')}.mp4`)
+      )
+    ).length;
+
+    for (const key of refreshed.keys) {
+      const keyPath = path.join(
+        keysDir,
+        `key_${String(key.index).padStart(3, '0')}.key`
+      );
+      if (validExisting(keyPath)) continue;
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'key',
+          index: key.index,
+          attempt: 1,
+        },
+        keyPath,
+        () =>
+          this.downloadRecoveredBinary(key.url, keyPath, {
+            Referer: playlistUrl,
+          })
+      );
+    }
+    for (const map of refreshed.maps) {
+      const mapPath = path.join(
+        mapsDir,
+        `map_${String(map.index).padStart(3, '0')}.mp4`
+      );
+      if (validExisting(mapPath)) continue;
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'map',
+          index: map.index,
+          attempt: 1,
+        },
+        mapPath,
+        () => this.downloadRecoveredBinary(map.url, mapPath)
+      );
+    }
+    for (const segment of remapped.pendingSegments) {
+      const segmentPath = path.join(
+        segmentsDir,
+        `segment_${String(segment.index).padStart(3, '0')}.ts`
+      );
+      await this.executeScheduled(
+        episode,
+        {
+          taskId: snapshot.taskId,
+          episode: episode.episode,
+          generationId: episode.generationId,
+          kind: 'segment',
+          index: segment.index,
+          attempt: 1,
+        },
+        segmentPath,
+        (reportWrittenBytes) =>
+          this.downloadFile(
+            segment.url,
+            segmentPath,
+            (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
+          )
+      );
     }
 
-    // 否则重新进入队列
-    task.status = DownloadStatus.PENDING;
-    this.updateTask(task);
-    this.processQueue();
-    return true;
+    const localPlaylist = this.buildLocalPlaylist(
+      refreshedContent,
+      playlistUrl,
+      refreshed,
+      relativePrefix
+    );
+    const playlistPath = path.join(generationRoot, 'playlist.m3u8');
+    fs.writeFileSync(playlistPath, localPlaylist, 'utf-8');
+    validateLocalPlaylist(playlistPath, resourcePath);
+    commitPlaylistAtomically(
+      path.join(resourcePath, `episode_${episodeNumber}.m3u8`),
+      localPlaylist
+    );
+    episode.failedSegmentIndices = [];
+    episode.stage = 'completed';
+    episode.oldEntryRetained = false;
+    episode.recoverable = false;
+  }
+
+  public async resumeTask(taskId: string): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (
+      !['paused', 'recovery_wait', 'cancelled_resumable'].includes(
+        snapshot.status
+      )
+    ) {
+      return { ok: false, status: 'conflict' };
+    }
+    this.bumpTaskLifecycle(taskId);
+    const scheduled = this.scheduler.getTaskStats(taskId);
+    if ((scheduled?.active ?? 0) > 0 || (scheduled?.queued ?? 0) > 0) {
+      this.scheduler.resumeTask(taskId);
+      snapshot.status = 'downloading';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'paused' || episode.stage === 'pausing') {
+          episode.stage = 'downloading';
+        }
+      });
+      this.flushSnapshot(snapshot, 'task.updated');
+      return { ok: true, status: snapshot.status };
+    }
+    const resourcePath = this.storageManager.getResourcePath(
+      snapshot.title,
+      snapshot.year,
+      snapshot.source,
+      snapshot.resourceId
+    );
+    this.scheduler.resumeTask(taskId);
+    try {
+      for (const episode of Object.values(snapshot.episodes)) {
+        if (episode.stage === 'completed') continue;
+        const files = episode.completedSegmentIndices.map((index) => ({
+          index,
+          path: path.join(
+            resourcePath,
+            `episode_${String(episode.episode).padStart(2, '0')}_generations`,
+            episode.generationId,
+            'segments',
+            `segment_${String(index).padStart(3, '0')}.ts`
+          ),
+        }));
+        const validation = validateResumeFiles(files);
+        episode.completedSegmentIndices = validation.valid;
+        episode.failedSegmentIndices = Array.from(
+          new Set([...episode.failedSegmentIndices, ...validation.invalid])
+        );
+        episode.completedBytes = validation.bytes;
+        const generationRoot = containedGenerationPath(
+          resourcePath,
+          episode.episode,
+          episode.generationId
+        );
+        const cleanedPlaylistPath = path.join(
+          generationRoot,
+          'source.cleaned.m3u8'
+        );
+        const originalContent = fs.readFileSync(cleanedPlaylistPath, 'utf-8');
+        const original = parseMediaPlaylistResources(
+          originalContent,
+          'https://resume.invalid/playlist.m3u8'
+        );
+        const reacquired = await this.reacquireEpisode(
+          snapshot,
+          episode.episode
+        );
+        const refreshedAdResult = filterM3U8Ads(reacquired.content, {
+          enableDomain: true,
+          enableKeyword: true,
+          enableDiscontinuity: true,
+        });
+        episode.refreshCount = Math.max(1, episode.refreshCount);
+        episode.addressSource = 'refreshed';
+        const refreshed = parseMediaPlaylistResources(
+          refreshedAdResult.content,
+          reacquired.playlistUrl
+        );
+        const remapped = remapMediaPlaylistResources(
+          original,
+          refreshed,
+          episode.completedSegmentIndices
+        );
+        this.recoveryPlans.set(`${taskId}:${episode.episode}`, remapped);
+        episode.failedSegmentIndices = remapped.pendingSegments.map(
+          (segment) => segment.index
+        );
+        episode.stage = 'downloading';
+        await this.executeRecoveredEpisode(
+          snapshot,
+          episode,
+          resourcePath,
+          refreshedAdResult.content,
+          reacquired.playlistUrl,
+          refreshed,
+          remapped
+        );
+      }
+    } catch (error) {
+      snapshot.status = 'failed';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.stage === 'completed') return;
+        episode.stage = 'partial_failed';
+        episode.oldEntryRetained = true;
+        episode.recoverable = true;
+        episode.failures.push({
+          kind: 'segment',
+          index: -1,
+          category: 'other',
+          attempts: 1,
+          path: '',
+          message: redactDownloadUrl(
+            error instanceof Error ? error.message : String(error)
+          ),
+        });
+      });
+      this.flushSnapshot(snapshot, 'task.updated');
+      return { ok: false, status: snapshot.status };
+    }
+    snapshot.status = Object.values(snapshot.episodes).every(
+      (episode) => episode.stage === 'completed'
+    )
+      ? 'completed'
+      : 'downloading';
+    this.flushSnapshot(snapshot, 'task.updated');
+    const task = this.tasks.get(taskId);
+    if (task) {
+      task.status =
+        snapshot.status === 'completed'
+          ? DownloadStatus.COMPLETED
+          : this.activeDownloads.has(taskId)
+          ? DownloadStatus.DOWNLOADING
+          : DownloadStatus.PENDING;
+      this.updateTask(task);
+      this.processQueue();
+    }
+    return { ok: true, status: snapshot.status };
   }
 
   /**
    * 取消任务
    */
-  public cancelTask(taskId: string): boolean {
+  public async cancelTask(
+    taskId: string,
+    clean = false
+  ): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (snapshot.status === 'completed')
+      return { ok: false, status: 'conflict' };
+    this.bumpTaskLifecycle(taskId);
+    this.scheduler.pauseTask(taskId);
+    this.scheduler.cancelQueued(taskId);
     const task = this.tasks.get(taskId);
-    if (!task) {
-      return false;
-    }
-
-    if (
-      task.status === DownloadStatus.PENDING ||
-      task.status === DownloadStatus.DOWNLOADING ||
-      task.status === DownloadStatus.PAUSED
-    ) {
+    if (task) {
       task.status = DownloadStatus.CANCELLED;
       this.updateTask(task);
-      this.activeDownloads.delete(taskId);
-      this.processQueue(); // 处理下一个任务
-      return true;
     }
+    if (clean) {
+      await this.waitForTaskIdle(taskId);
+      const resourcePath = this.storageManager.getResourcePath(
+        snapshot.title,
+        snapshot.year,
+        snapshot.source,
+        snapshot.resourceId
+      );
+      for (const episode of Object.values(snapshot.episodes)) {
+        if (episode.stage === 'completed') continue;
+        const generationRoot = generationPathForRemoval(
+          resourcePath,
+          episode.episode,
+          episode.generationId
+        );
+        fs.rmSync(generationRoot, { recursive: true, force: true });
+      }
+      const pending = this.pendingFlushes.get(taskId);
+      if (pending?.timer) clearTimeout(pending.timer);
+      this.pendingFlushes.delete(taskId);
+      this.stateStore.deleteTaskState(taskId);
+      this.snapshots.delete(taskId);
+      return { ok: true, status: 'cancelled_resumable' };
+    }
+    snapshot.status = 'cancelled_resumable';
+    Object.values(snapshot.episodes).forEach((episode) => {
+      if (episode.stage !== 'completed') episode.stage = 'cancelled_resumable';
+    });
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: true, status: snapshot.status };
+  }
 
-    return false;
+  private commitRetriedEpisode(
+    snapshot: DownloadTaskSnapshot,
+    episode: EpisodeDownloadState
+  ): void {
+    const resourcePath = this.storageManager.getResourcePath(
+      snapshot.title,
+      snapshot.year,
+      snapshot.source,
+      snapshot.resourceId
+    );
+    const episodeNumber = String(episode.episode).padStart(2, '0');
+    const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
+    const generationRoot = path.join(resourcePath, relativePrefix);
+    const cleanedPlaylistPath = path.join(
+      generationRoot,
+      'source.cleaned.m3u8'
+    );
+    const content = fs.readFileSync(cleanedPlaylistPath, 'utf-8');
+    const retryBaseUrl = 'https://retry.invalid/playlist.m3u8';
+    const resources = parseMediaPlaylistResources(content, retryBaseUrl);
+    const localPlaylist = this.buildLocalPlaylist(
+      content,
+      retryBaseUrl,
+      resources,
+      relativePrefix
+    );
+    const playlistPath = path.join(generationRoot, 'playlist.m3u8');
+    fs.writeFileSync(playlistPath, localPlaylist, 'utf-8');
+    validateLocalPlaylist(playlistPath, resourcePath);
+    episode.stage = 'committing';
+    commitPlaylistAtomically(
+      path.join(resourcePath, `episode_${episodeNumber}.m3u8`),
+      localPlaylist
+    );
+    episode.stage = 'completed';
+    episode.oldEntryRetained = false;
+    episode.recoverable = false;
+  }
+
+  public async retryFailed(taskId: string): Promise<CommandResult> {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    const failed = Array.from(this.failedWork.values()).filter(
+      ({ item }) => item.taskId === taskId
+    );
+    if (failed.length === 0) return { ok: false, status: 'conflict' };
+    snapshot.status = 'downloading';
+    await Promise.allSettled(
+      failed.map(({ item, operation, path: failedPath }) => {
+        const episode = snapshot.episodes[String(item.episode)];
+        if (!episode) return Promise.resolve();
+        episode.stage = 'downloading';
+        return this.executeScheduled(episode, item, failedPath, operation);
+      })
+    );
+    let stillFailed = Array.from(this.failedWork.values()).some(
+      ({ item }) => item.taskId === taskId
+    );
+    if (!stillFailed) {
+      const affectedEpisodes = Array.from(
+        new Set(failed.map(({ item }) => item.episode))
+      );
+      for (const episodeNumber of affectedEpisodes) {
+        const episode = snapshot.episodes[String(episodeNumber)];
+        if (!episode) continue;
+        try {
+          this.commitRetriedEpisode(snapshot, episode);
+        } catch (error) {
+          stillFailed = true;
+          episode.stage = 'partial_failed';
+          episode.oldEntryRetained = true;
+          episode.recoverable = true;
+          episode.failures.push({
+            kind: 'segment',
+            index: -1,
+            category: this.classifyFailure(error),
+            attempts: 1,
+            path: '',
+            message: redactDownloadUrl(
+              error instanceof Error ? error.message : String(error)
+            ),
+          });
+        }
+      }
+    }
+    if (stillFailed) {
+      snapshot.status = 'failed';
+      Object.values(snapshot.episodes).forEach((episode) => {
+        if (episode.failures.length) episode.stage = 'partial_failed';
+      });
+    } else if (
+      Object.values(snapshot.episodes).every(
+        (episode) => episode.stage === 'completed'
+      )
+    ) {
+      snapshot.status = 'completed';
+    }
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: !stillFailed, status: snapshot.status };
+  }
+
+  public prioritizeTask(taskId: string): CommandResult {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    snapshot.priority = 'high';
+    this.scheduler.setPriority(taskId, 'high');
+    this.flushSnapshot(snapshot, 'task.updated');
+    return { ok: true, status: snapshot.status };
   }
 }
 

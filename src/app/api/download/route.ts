@@ -6,10 +6,13 @@ import path from 'path';
 
 import { getAvailableApiSites } from '@/lib/config';
 import { DownloadStatus, getDownloadService } from '@/lib/download-service';
+import { redactDownloadUrl } from '@/lib/download-transaction';
 import { getDetailFromApi } from '@/lib/downstream';
 import { getStorageManager } from '@/lib/local-storage';
 import { PathUtils } from '@/lib/path-utils';
 import { SearchResult } from '@/lib/types';
+
+import { redactPublicText, summarizeDownloadTask } from './public-view';
 
 export const runtime = 'nodejs'; // 需要文件系统访问，使用 Node.js runtime
 
@@ -387,6 +390,12 @@ export async function GET(request: NextRequest) {
     if (taskId) {
       // 获取单个任务状态
       const task = downloadService.getTask(taskId);
+      const snapshot = downloadService.getSnapshot(taskId);
+      if (!task && !snapshot) {
+        return NextResponse.json({ error: '任务不存在' }, { status: 404 });
+      }
+
+      if (snapshot) return NextResponse.json(summarizeDownloadTask(snapshot));
       if (!task) {
         return NextResponse.json({ error: '任务不存在' }, { status: 404 });
       }
@@ -396,7 +405,8 @@ export async function GET(request: NextRequest) {
           task_id: task.id,
           status: task.status,
           progress: task.progress,
-          error: task.error,
+          progress_estimated: true,
+          error: task.error ? redactPublicText(task.error) : undefined,
           created_at: task.createdAt,
           updated_at: task.updatedAt,
         },
@@ -405,24 +415,40 @@ export async function GET(request: NextRequest) {
     } else {
       // 获取所有任务
       const tasks = downloadService.getAllTasks();
+      const taskIds = new Set(tasks.map((task) => task.id));
+      const summaries = tasks.map((task) => {
+        const snapshot = downloadService.getSnapshot(task.id);
+        if (snapshot) return summarizeDownloadTask(snapshot);
+        return {
+          task_id: task.id,
+          source: task.source,
+          id: task.resourceId,
+          title: task.resource?.title,
+          year: task.resource?.year,
+          poster: task.resource?.poster
+            ? redactDownloadUrl(task.resource.poster)
+            : undefined,
+          episode_numbers: Array.isArray(task.episodeNumbers)
+            ? task.episodeNumbers
+            : undefined,
+          status: task.status,
+          progress: task.progress,
+          progress_estimated: true,
+          error: task.error ? redactPublicText(task.error) : undefined,
+          created_at: task.createdAt,
+          updated_at: task.updatedAt,
+        };
+      });
+      // Recovered snapshots are intentionally not inserted into the legacy
+      // in-memory task queue until the user resumes them.
+      for (const candidateId of downloadService.getRecoverableTaskIds()) {
+        if (taskIds.has(candidateId)) continue;
+        const snapshot = downloadService.getSnapshot(candidateId);
+        if (snapshot) summaries.push(summarizeDownloadTask(snapshot));
+      }
       return NextResponse.json(
         {
-          tasks: tasks.map((task) => ({
-            task_id: task.id,
-            source: task.source,
-            id: task.resourceId,
-            title: task.resource?.title,
-            year: task.resource?.year,
-            poster: task.resource?.poster,
-            episode_numbers: Array.isArray(task.episodeNumbers)
-              ? task.episodeNumbers
-              : undefined,
-            status: task.status,
-            progress: task.progress,
-            error: task.error,
-            created_at: task.createdAt,
-            updated_at: task.updatedAt,
-          })),
+          tasks: summaries,
         },
         { status: 200 }
       );
@@ -457,11 +483,11 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const success = downloadService.cancelTask(taskId);
-    if (!success) {
+    const result = await downloadService.cancelTask(taskId);
+    if (!result.ok) {
       return NextResponse.json(
         { error: '任务不存在或无法取消' },
-        { status: 404 }
+        { status: result.status === 'not_found' ? 404 : 409 }
       );
     }
 
@@ -501,15 +527,15 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const ok =
+    const result =
       action === 'pause'
         ? downloadService.pauseTask(taskId)
-        : downloadService.resumeTask(taskId);
+        : await downloadService.resumeTask(taskId);
 
-    if (!ok) {
+    if (!result.ok) {
       return NextResponse.json(
         { error: '任务不存在或当前状态不允许该操作' },
-        { status: 400 }
+        { status: result.status === 'not_found' ? 404 : 409 }
       );
     }
 
