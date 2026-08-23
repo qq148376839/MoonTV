@@ -2784,22 +2784,6 @@ export class DownloadService {
     try {
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
-        const files = episode.completedSegmentIndices.map((index) => ({
-          index,
-          path: path.join(
-            resourcePath,
-            `episode_${String(episode.episode).padStart(2, '0')}_generations`,
-            episode.generationId,
-            'segments',
-            `segment_${String(index).padStart(3, '0')}.ts`
-          ),
-        }));
-        const validation = validateResumeFiles(files);
-        episode.completedSegmentIndices = validation.valid;
-        episode.failedSegmentIndices = Array.from(
-          new Set([...episode.failedSegmentIndices, ...validation.invalid])
-        );
-        episode.completedBytes = validation.bytes;
         const generationRoot = containedGenerationPath(
           resourcePath,
           episode.episode,
@@ -2814,6 +2798,30 @@ export class DownloadService {
           originalContent,
           'https://resume.invalid/playlist.m3u8'
         );
+        const segmentsPath = path.join(generationRoot, 'segments');
+        const discoveredIndices = fs.existsSync(segmentsPath)
+          ? fs
+              .readdirSync(segmentsPath)
+              .map((name) => /^segment_(\d+)\.ts$/.exec(name))
+              .filter((match): match is RegExpExecArray => match !== null)
+              .map((match) => Number(match[1]))
+              .filter((index) => index < original.segments.length)
+          : [];
+        const files = Array.from(
+          new Set([...episode.completedSegmentIndices, ...discoveredIndices])
+        ).map((index) => ({
+          index,
+          path: path.join(
+            segmentsPath,
+            `segment_${String(index).padStart(3, '0')}.ts`
+          ),
+        }));
+        const validation = validateResumeFiles(files);
+        episode.completedSegmentIndices = validation.valid;
+        episode.failedSegmentIndices = Array.from(
+          new Set([...episode.failedSegmentIndices, ...validation.invalid])
+        );
+        episode.completedBytes = validation.bytes;
         const reacquired = await this.reacquireForResume(
           snapshot,
           episode.episode,

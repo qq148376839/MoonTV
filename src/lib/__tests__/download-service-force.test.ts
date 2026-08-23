@@ -607,8 +607,12 @@ describe('DownloadService force redownload', () => {
     fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
     fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
     fs.writeFileSync(
+      path.join(generation, 'segments', 'segment_001.ts'),
+      'unflushed'
+    );
+    fs.writeFileSync(
       path.join(generation, 'source.cleaned.m3u8'),
-      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts'
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts\n#EXTINF:1,\nhttps://saved.example/12.ts'
     );
     const snapshot = recoverySnapshot('generation-a');
     snapshot.title = '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB';
@@ -636,12 +640,16 @@ describe('DownloadService force redownload', () => {
       status: 'completed',
     });
     expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
-      completedSegmentIndices: [0, 1],
+      completedSegmentIndices: [0, 1, 2],
       failedSegmentIndices: [],
     });
     expect(
       fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
     ).toEqual(Buffer.from('ok'));
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_001.ts'))
+    ).toEqual(Buffer.from('unflushed'));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(wrongRoot)).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
