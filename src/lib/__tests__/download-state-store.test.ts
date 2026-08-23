@@ -323,22 +323,34 @@ describe('DownloadStateStore', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  test('never recovers terminal tasks even if their episode files contain active stages', () => {
-    for (const status of [
-      'completed',
-      'failed',
-      'partial_completed',
-      'cancelled_resumable',
-    ] as const) {
+  test('loads recoverable failed and partially completed tasks after restart', () => {
+    for (const status of ['failed', 'partial_completed'] as const) {
       store.saveTask(
-        snapshot(`terminal-${status}`, {
+        snapshot(`recoverable-${status}`, {
           status,
           episodes: {
-            '1': episode(1, { stage: 'downloading' }),
-            '2': episode(2, { stage: 'queued' }),
+            '1': episode(1, { stage: 'completed', recoverable: false }),
+            '2': episode(2, { stage: 'partial_failed', recoverable: true }),
           },
         })
       );
+    }
+
+    expect(store.loadRecoverableTasks()).toEqual([
+      expect.objectContaining({
+        taskId: 'recoverable-failed',
+        status: 'recovery_wait',
+      }),
+      expect.objectContaining({
+        taskId: 'recoverable-partial_completed',
+        status: 'recovery_wait',
+      }),
+    ]);
+  });
+
+  test('never recovers completed or cancelled tasks', () => {
+    for (const status of ['completed', 'cancelled_resumable'] as const) {
+      store.saveTask(snapshot(`terminal-${status}`, { status }));
     }
 
     expect(store.loadRecoverableTasks()).toEqual([]);

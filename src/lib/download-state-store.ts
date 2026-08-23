@@ -27,6 +27,8 @@ const RECOVERABLE_TASK_STATUSES = new Set<DownloadTaskStatus>([
   'downloading',
   'paused',
   'recovery_wait',
+  'partial_completed',
+  'failed',
 ]);
 
 const TASK_STATUSES = new Set<DownloadTaskStatus>([
@@ -457,6 +459,12 @@ export class DownloadStateStore {
   loadRecoverableTasks(): DownloadTaskSnapshot[] {
     return this.listTasks().flatMap((snapshot) => {
       if (!RECOVERABLE_TASK_STATUSES.has(snapshot.status)) return [];
+      if (
+        ['partial_completed', 'failed'].includes(snapshot.status) &&
+        !Object.values(snapshot.episodes).some((episode) => episode.recoverable)
+      ) {
+        return [];
+      }
 
       const episodes = Object.fromEntries(
         Object.entries(snapshot.episodes).map(([key, episode]) => [
