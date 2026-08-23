@@ -159,9 +159,10 @@ export default function DownloadTaskCard({
   }, [expanded, loadDetails, task.task_id, task.updated_at]);
 
   const active = ['pending', 'downloading'].includes(task.status);
-  const resumable = ['paused', 'recovery_wait', 'cancelled_resumable'].includes(
-    task.status
-  );
+  const resumable =
+    ['paused', 'recovery_wait', 'cancelled_resumable'].includes(task.status) ||
+    (task.recoverable === true &&
+      ['partial_completed', 'failed'].includes(task.status));
   const cancellable =
     active || ['paused', 'recovery_wait'].includes(task.status);
   const cleanable = [
@@ -205,7 +206,9 @@ export default function DownloadTaskCard({
                 onClick={() => void run('resume')}
                 className='min-h-10 rounded-md border border-gray-300 px-3 py-2 text-xs font-medium dark:border-gray-600'
               >
-                恢复
+                {['partial_completed', 'failed'].includes(task.status)
+                  ? '恢复下载'
+                  : '恢复'}
               </button>
             )}
             {cancellable && (

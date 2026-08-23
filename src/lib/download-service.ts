@@ -2693,9 +2693,17 @@ export class DownloadService {
     const snapshot = this.snapshots.get(taskId);
     if (!snapshot) return { ok: false, status: 'not_found' };
     if (
-      !['paused', 'recovery_wait', 'cancelled_resumable'].includes(
-        snapshot.status
-      )
+      ![
+        'paused',
+        'recovery_wait',
+        'cancelled_resumable',
+        'partial_completed',
+        'failed',
+      ].includes(snapshot.status) ||
+      (['partial_completed', 'failed'].includes(snapshot.status) &&
+        !Object.values(snapshot.episodes).some(
+          (episode) => episode.recoverable
+        ))
     ) {
       return { ok: false, status: 'conflict' };
     }
@@ -2787,6 +2795,43 @@ export class DownloadService {
           remapped
         );
       }
+      const episodePaths = Array.from(
+        { length: Math.max(0, ...snapshot.episodeNumbers) },
+        () => ''
+      );
+      for (const episodeNumber of snapshot.episodeNumbers) {
+        const episodePath = path.join(
+          resourcePath,
+          `episode_${String(episodeNumber).padStart(2, '0')}.m3u8`
+        );
+        if (fs.existsSync(episodePath))
+          episodePaths[episodeNumber - 1] = episodePath;
+      }
+      await this.storageManager.generateMetadata(
+        {
+          id: snapshot.resourceId,
+          title: snapshot.title,
+          poster: snapshot.poster || '',
+          episodes: snapshot.episodeNumbers.map(() => ''),
+          source: snapshot.source,
+          source_name: snapshot.source,
+          year: snapshot.year,
+        },
+        resourcePath,
+        episodePaths,
+        Object.values(snapshot.episodes).reduce(
+          (total, episode) => total + episode.completedBytes,
+          0
+        ),
+        {}
+      );
+      this.storageManager.updateIndex(
+        snapshot.source,
+        snapshot.resourceId,
+        snapshot.title,
+        snapshot.year,
+        resourcePath
+      );
     } catch (error) {
       snapshot.status = 'failed';
       Object.values(snapshot.episodes).forEach((episode) => {

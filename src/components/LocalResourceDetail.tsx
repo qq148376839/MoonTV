@@ -185,33 +185,36 @@ export default function LocalResourceDetail({
         <div className='font-medium text-gray-900 dark:text-gray-100 mb-3'>
           剧集列表
         </div>
-        <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2'>
+        <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3'>
           {data.episode_status.map((ep) => (
             <div
               key={ep.episode}
-              className={`rounded border px-2 py-2 text-sm flex items-center justify-between gap-2 ${
+              data-testid={`episode-card-${ep.episode}`}
+              className={`flex min-w-0 flex-col gap-3 rounded border px-3 py-3 text-sm ${
                 ep.downloaded
                   ? 'border-green-500/40 bg-green-500/10'
                   : 'border-gray-300/60 dark:border-gray-700/60 bg-transparent'
               }`}
             >
-              <span className='text-gray-900 dark:text-gray-100'>
-                第 {ep.episode} 集
-              </span>
-              {ep.downloaded ? (
-                <button
-                  onClick={() => deleteEpisode(ep.episode)}
-                  className='px-2 py-1 rounded bg-red-600/90 hover:bg-red-600 text-white text-xs'
-                >
-                  删除
-                </button>
-              ) : (
-                <span className='text-xs text-gray-500 dark:text-gray-400'>
-                  未下载
+              <div className='flex items-center justify-between gap-3'>
+                <span className='font-medium text-gray-900 dark:text-gray-100'>
+                  第 {ep.episode} 集
                 </span>
-              )}
+                {ep.downloaded ? (
+                  <button
+                    onClick={() => deleteEpisode(ep.episode)}
+                    className='flex-shrink-0 rounded bg-red-600/90 px-2 py-1 text-xs text-white hover:bg-red-600'
+                  >
+                    删除
+                  </button>
+                ) : (
+                  <span className='text-xs text-gray-500 dark:text-gray-400'>
+                    未下载
+                  </span>
+                )}
+              </div>
               {ep.downloaded && (
-                <div className='col-span-full mt-1 w-full text-[11px] text-gray-600 dark:text-gray-400'>
+                <div className='min-w-0 w-full space-y-1 text-[11px] text-gray-600 dark:text-gray-400'>
                   {ep.audit ? (
                     <>
                       <div>

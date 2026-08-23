@@ -23,6 +23,19 @@ type ViewProps = {
   ) => Promise<void> | void;
 };
 
+export function compareDownloadTasks(
+  left: DownloadTaskSummary,
+  right: DownloadTaskSummary
+) {
+  const priorityDifference =
+    (right.priority === 'high' ? 1 : 0) - (left.priority === 'high' ? 1 : 0);
+  return (
+    priorityDifference ||
+    (left.created_at || 0) - (right.created_at || 0) ||
+    left.task_id.localeCompare(right.task_id)
+  );
+}
+
 export function DownloadTaskListView({
   tasks,
   connection,
@@ -69,9 +82,7 @@ export function DownloadTaskListView({
         <div className='space-y-3'>
           {tasks
             .slice()
-            .sort(
-              (left, right) => (right.updated_at || 0) - (left.updated_at || 0)
-            )
+            .sort(compareDownloadTasks)
             .map((task) => (
               <DownloadTaskCard
                 key={task.task_id}

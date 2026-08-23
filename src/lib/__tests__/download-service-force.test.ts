@@ -1,6 +1,8 @@
 const storageMock = {
   isEnabled: () => true,
   isEpisodeDownloaded: jest.fn(() => true),
+  generateMetadata: jest.fn().mockResolvedValue(undefined),
+  updateIndex: jest.fn(),
 };
 
 jest.mock('../local-storage', () => ({
@@ -574,7 +576,6 @@ describe('DownloadService force redownload', () => {
       '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI="old.key"\n#EXT-X-MAP:URI="old.mp4"\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
     );
     fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
-    const snapshot = recoverySnapshot('generation-a');
     const fetchSpy = jest.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('fresh.key')) return bufferResponse('key!', 4);
@@ -582,13 +583,19 @@ describe('DownloadService force redownload', () => {
       return responseFor('fresh', 5);
     });
     global.fetch = fetchSpy;
+    const persisted = recoverySnapshot('generation-a');
+    persisted.status = 'partial_completed';
+    const generateMetadata = jest.fn().mockResolvedValue(undefined);
+    const updateIndex = jest.fn();
     const service = new DownloadService({
       storageManager: {
         ...storageMock,
         getResourcePath: () => root,
+        generateMetadata,
+        updateIndex,
       } as never,
       stateStore: {
-        loadRecoverableTasks: () => [snapshot],
+        loadRecoverableTasks: () => [persisted],
         saveTask: jest.fn(),
         deleteTaskState: jest.fn(),
       },
@@ -630,6 +637,14 @@ describe('DownloadService force redownload', () => {
     expect(
       fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')
     ).toContain('generation-a/segments/segment_001.ts');
+    expect(generateMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'movie-1', source: 'source-a' }),
+      root,
+      [path.join(root, 'episode_01.m3u8')],
+      expect.any(Number),
+      expect.any(Object)
+    );
+    expect(updateIndex).toHaveBeenCalled();
     fs.rmSync(root, { recursive: true, force: true });
   });
 

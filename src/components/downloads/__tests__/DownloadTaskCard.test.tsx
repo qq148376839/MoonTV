@@ -186,4 +186,22 @@ describe('DownloadTaskCard', () => {
       screen.queryByRole('button', { name: '暂停' })
     ).not.toBeInTheDocument();
   });
+
+  test('offers direct recovery for a recoverable partially completed task', async () => {
+    const onCommand = jest.fn().mockResolvedValue(undefined);
+    render(
+      <DownloadTaskCard
+        task={summaryFixture({
+          status: 'partial_completed',
+          recoverable: true,
+        })}
+        onCommand={onCommand}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '恢复下载' }));
+    await waitFor(() =>
+      expect(onCommand).toHaveBeenCalledWith('task-1', 'resume')
+    );
+  });
 });
