@@ -603,7 +603,8 @@ export class DownloadService {
     operation: (
       reportWrittenBytes?: (bytes: number) => void
     ) => Promise<number>,
-    refresh?: () => Promise<void>
+    refresh?: () => Promise<void>,
+    cancelQueuedOnFailure = true
   ): Promise<number> {
     try {
       const bytes = await this.scheduler.enqueue(item, async () => {
@@ -626,7 +627,7 @@ export class DownloadService {
             activeItem.attempt = attempt;
             return operation(reportWrittenBytes);
           }, refresh).catch((error) => {
-            this.scheduler.cancelQueued(item.taskId);
+            if (cancelQueuedOnFailure) this.scheduler.cancelQueued(item.taskId);
             throw error;
           });
         } finally {
@@ -2700,7 +2701,9 @@ export class DownloadService {
               segment.url,
               segmentPath,
               (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
-            )
+            ),
+          undefined,
+          false
         );
       })
     );

@@ -19,7 +19,11 @@ import {
   DownloadStatus,
   readDownloadConcurrency,
 } from '../download-service';
-import type { DownloadTaskSnapshot } from '../download-types';
+import type {
+  DownloadTaskSnapshot,
+  DownloadWorkItem,
+  EpisodeDownloadState,
+} from '../download-types';
 
 const resource = {
   id: 'movie-1',
@@ -661,6 +665,58 @@ describe('DownloadService force redownload', () => {
     expect(maxActiveFetches).toBe(2);
     expect(fs.existsSync(wrongRoot)).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('recovery keeps queued missing segments running after one segment fails', async () => {
+    const scheduler = new DownloadScheduler({ concurrency: 1 });
+    const cancelQueued = jest.spyOn(scheduler, 'cancelQueued');
+    const { service } = serviceForSnapshot(activeSnapshot(), { scheduler });
+    const episode = service.getSnapshot('task-1')?.episodes['1'];
+    if (!episode) throw new Error('missing test episode');
+    const execute = (
+      service as unknown as {
+        executeScheduled: (
+          episode: EpisodeDownloadState,
+          item: DownloadWorkItem,
+          path: string,
+          operation: () => Promise<number>,
+          refresh: undefined,
+          cancelQueuedOnFailure: boolean
+        ) => Promise<number>;
+      }
+    ).executeScheduled.bind(service);
+    const completed: number[] = [];
+    const results = await Promise.allSettled(
+      [0, 1, 2].map((index) =>
+        execute(
+          episode,
+          {
+            taskId: 'task-1',
+            episode: 1,
+            generationId: episode.generationId,
+            kind: 'segment',
+            index,
+            attempt: 1,
+          },
+          `segment_${index}.ts`,
+          async () => {
+            if (index === 0) throw new Error('下载失败: 404');
+            completed.push(index);
+            return 1;
+          },
+          undefined,
+          false
+        )
+      )
+    );
+
+    expect(results.map((result) => result.status)).toEqual([
+      'rejected',
+      'fulfilled',
+      'fulfilled',
+    ]);
+    expect(completed).toEqual([1, 2]);
+    expect(cancelQueued).not.toHaveBeenCalled();
   });
 
   test('recovery uses the persisted episode entry before refreshing the source', async () => {
