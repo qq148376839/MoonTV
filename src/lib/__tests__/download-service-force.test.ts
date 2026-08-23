@@ -595,6 +595,57 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('recovery resolves the existing indexed path when the persisted title is encoded', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-indexed-path-'));
+    const wrongRoot = path.join(root, '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB');
+    const indexedRoot = path.join(root, '潜行狙击_2011', 'source-a_movie-1');
+    const generation = path.join(
+      indexedRoot,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts'
+    );
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.title = '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB';
+    global.fetch = jest.fn().mockResolvedValue(responseFor('saved', 5));
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => wrongRoot,
+        resolveExistingResourcePath: () => indexedRoot,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode: jest.fn().mockRejectedValue(new Error('offline')),
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
+      completedSegmentIndices: [0, 1],
+      failedSegmentIndices: [],
+    });
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
+    ).toEqual(Buffer.from('ok'));
+    expect(fs.existsSync(wrongRoot)).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('recovery uses the persisted episode entry before refreshing the source', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-recipe-'));
     const generation = path.join(

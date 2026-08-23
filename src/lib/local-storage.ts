@@ -220,6 +220,34 @@ export class StorageManager {
   }
 
   /**
+   * Resolve an already indexed resource before deriving a path from display
+   * metadata. Persisted task titles may be encoded or renamed, while the index
+   * remains the authority for the directory that already contains media.
+   */
+  public resolveExistingResourcePath(
+    title: string,
+    year: string,
+    source: string,
+    id: string
+  ): string {
+    const indexedPath = this.readIndex()[`${source}_${id}`]?.local_path;
+    if (indexedPath) {
+      const resolved = PathUtils.resolveResourcePath(
+        indexedPath,
+        this.storagePath
+      );
+      const relative = path.relative(this.storagePath, resolved);
+      const contained =
+        relative !== '' &&
+        !relative.startsWith(`..${path.sep}`) &&
+        relative !== '..' &&
+        !path.isAbsolute(relative);
+      if (contained && fs.existsSync(resolved)) return resolved;
+    }
+    return this.getResourcePath(title, year, source, id);
+  }
+
+  /**
    * 获取资源根目录路径
    */
   public getResourceRootPath(title: string, year: string): string {

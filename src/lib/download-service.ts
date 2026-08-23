@@ -2722,6 +2722,29 @@ export class DownloadService {
     episode.recoverable = false;
   }
 
+  private resolveSnapshotResourcePath(snapshot: DownloadTaskSnapshot): string {
+    const resolver = (
+      this.storageManager as StorageManager & {
+        resolveExistingResourcePath?: StorageManager['getResourcePath'];
+      }
+    ).resolveExistingResourcePath;
+    if (typeof resolver === 'function') {
+      return resolver.call(
+        this.storageManager,
+        snapshot.title,
+        snapshot.year,
+        snapshot.source,
+        snapshot.resourceId
+      );
+    }
+    return this.storageManager.getResourcePath(
+      snapshot.title,
+      snapshot.year,
+      snapshot.source,
+      snapshot.resourceId
+    );
+  }
+
   public async resumeTask(
     taskId: string,
     currentResource?: SearchResult
@@ -2756,12 +2779,7 @@ export class DownloadService {
       this.flushSnapshot(snapshot, 'task.updated');
       return { ok: true, status: snapshot.status };
     }
-    const resourcePath = this.storageManager.getResourcePath(
-      snapshot.title,
-      snapshot.year,
-      snapshot.source,
-      snapshot.resourceId
-    );
+    const resourcePath = this.resolveSnapshotResourcePath(snapshot);
     this.scheduler.resumeTask(taskId);
     try {
       for (const episode of Object.values(snapshot.episodes)) {
@@ -2982,12 +3000,7 @@ export class DownloadService {
     }
     if (clean) {
       await this.waitForTaskIdle(taskId);
-      const resourcePath = this.storageManager.getResourcePath(
-        snapshot.title,
-        snapshot.year,
-        snapshot.source,
-        snapshot.resourceId
-      );
+      const resourcePath = this.resolveSnapshotResourcePath(snapshot);
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
         const generationRoot = generationPathForRemoval(
@@ -3016,12 +3029,7 @@ export class DownloadService {
     snapshot: DownloadTaskSnapshot,
     episode: EpisodeDownloadState
   ): void {
-    const resourcePath = this.storageManager.getResourcePath(
-      snapshot.title,
-      snapshot.year,
-      snapshot.source,
-      snapshot.resourceId
-    );
+    const resourcePath = this.resolveSnapshotResourcePath(snapshot);
     const episodeNumber = String(episode.episode).padStart(2, '0');
     const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
     const generationRoot = path.join(resourcePath, relativePrefix);
