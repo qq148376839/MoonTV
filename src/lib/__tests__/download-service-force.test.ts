@@ -648,11 +648,25 @@ describe('DownloadService force redownload', () => {
       'unflushed'
     );
     fs.writeFileSync(
+      path.join(generation, 'segments', 'segment_002.ts'),
+      'interrupted-partial'
+    );
+    fs.writeFileSync(
       path.join(generation, 'source.cleaned.m3u8'),
       '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts\n#EXTINF:1,\nhttps://saved.example/12.ts\n#EXTINF:1,\nhttps://saved.example/13.ts\n#EXTINF:1,\nhttps://saved.example/14.ts'
     );
     const snapshot = recoverySnapshot('generation-a');
     snapshot.title = '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB';
+    snapshot.episodes['1'].activeItems = [
+      {
+        taskId: snapshot.taskId,
+        episode: 1,
+        generationId: 'generation-a',
+        kind: 'segment',
+        index: 2,
+        attempt: 1,
+      },
+    ];
     let activeFetches = 0;
     let maxActiveFetches = 0;
     global.fetch = jest.fn(async () => {
@@ -694,6 +708,17 @@ describe('DownloadService force redownload', () => {
     expect(
       fs.readFileSync(path.join(generation, 'segments', 'segment_001.ts'))
     ).toEqual(Buffer.from('unflushed'));
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_002.ts'))
+    ).toEqual(Buffer.from('saved'));
+    expect(
+      fs.existsSync(
+        path.join(generation, 'segments', 'segment_002.ts.download')
+      )
+    ).toBe(false);
+    expect(service.getSnapshot('task-1')?.episodes['1'].activeItems).toEqual(
+      []
+    );
     expect(global.fetch).toHaveBeenCalledTimes(3);
     expect(maxActiveFetches).toBe(2);
     expect(fs.existsSync(wrongRoot)).toBe(false);

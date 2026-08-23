@@ -2720,12 +2720,21 @@ export class DownloadService {
             attempt: 1,
           },
           segmentPath,
-          (reportWrittenBytes) =>
-            this.downloadFile(
-              segment.url,
-              segmentPath,
-              (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
-            ),
+          async (reportWrittenBytes) => {
+            const temporaryPath = `${segmentPath}.download`;
+            fs.rmSync(temporaryPath, { force: true });
+            try {
+              const bytes = await this.downloadFile(
+                segment.url,
+                temporaryPath,
+                (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
+              );
+              fs.renameSync(temporaryPath, segmentPath);
+              return bytes;
+            } finally {
+              fs.rmSync(temporaryPath, { force: true });
+            }
+          },
           undefined,
           false
         );
@@ -2832,13 +2841,28 @@ export class DownloadService {
           'https://resume.invalid/playlist.m3u8'
         );
         const segmentsPath = path.join(generationRoot, 'segments');
+        const completedBeforeRestart = new Set(episode.completedSegmentIndices);
+        const interruptedIndices = new Set(
+          episode.activeItems
+            .filter(
+              (item) =>
+                item.kind === 'segment' &&
+                !completedBeforeRestart.has(item.index)
+            )
+            .map((item) => item.index)
+        );
+        episode.activeItems = [];
         const discoveredIndices = fs.existsSync(segmentsPath)
           ? fs
               .readdirSync(segmentsPath)
               .map((name) => /^segment_(\d+)\.ts$/.exec(name))
               .filter((match): match is RegExpExecArray => match !== null)
               .map((match) => Number(match[1]))
-              .filter((index) => index < original.segments.length)
+              .filter(
+                (index) =>
+                  index < original.segments.length &&
+                  !interruptedIndices.has(index)
+              )
           : [];
         const files = Array.from(
           new Set([...episode.completedSegmentIndices, ...discoveredIndices])
