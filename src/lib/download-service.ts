@@ -2678,30 +2678,36 @@ export class DownloadService {
         () => this.downloadRecoveredBinary(map.url, mapPath)
       );
     }
-    for (const segment of remapped.pendingSegments) {
-      const segmentPath = path.join(
-        segmentsDir,
-        `segment_${String(segment.index).padStart(3, '0')}.ts`
-      );
-      await this.executeScheduled(
-        episode,
-        {
-          taskId: snapshot.taskId,
-          episode: episode.episode,
-          generationId: episode.generationId,
-          kind: 'segment',
-          index: segment.index,
-          attempt: 1,
-        },
-        segmentPath,
-        (reportWrittenBytes) =>
-          this.downloadFile(
-            segment.url,
-            segmentPath,
-            (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
-          )
-      );
-    }
+    const segmentResults = await Promise.allSettled(
+      remapped.pendingSegments.map((segment) => {
+        const segmentPath = path.join(
+          segmentsDir,
+          `segment_${String(segment.index).padStart(3, '0')}.ts`
+        );
+        return this.executeScheduled(
+          episode,
+          {
+            taskId: snapshot.taskId,
+            episode: episode.episode,
+            generationId: episode.generationId,
+            kind: 'segment',
+            index: segment.index,
+            attempt: 1,
+          },
+          segmentPath,
+          (reportWrittenBytes) =>
+            this.downloadFile(
+              segment.url,
+              segmentPath,
+              (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
+            )
+        );
+      })
+    );
+    const failedSegment = segmentResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+    if (failedSegment) throw failedSegment.reason;
 
     const localPlaylist = this.buildLocalPlaylist(
       refreshedContent,

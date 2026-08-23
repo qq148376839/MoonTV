@@ -612,11 +612,19 @@ describe('DownloadService force redownload', () => {
     );
     fs.writeFileSync(
       path.join(generation, 'source.cleaned.m3u8'),
-      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts\n#EXTINF:1,\nhttps://saved.example/12.ts'
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts\n#EXTINF:1,\nhttps://saved.example/11.ts\n#EXTINF:1,\nhttps://saved.example/12.ts\n#EXTINF:1,\nhttps://saved.example/13.ts\n#EXTINF:1,\nhttps://saved.example/14.ts'
     );
     const snapshot = recoverySnapshot('generation-a');
     snapshot.title = '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB';
-    global.fetch = jest.fn().mockResolvedValue(responseFor('saved', 5));
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    global.fetch = jest.fn(async () => {
+      activeFetches += 1;
+      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeFetches -= 1;
+      return responseFor('saved', 5);
+    });
     const service = new DownloadService({
       storageManager: {
         ...storageMock,
@@ -628,7 +636,7 @@ describe('DownloadService force redownload', () => {
         saveTask: jest.fn(),
         deleteTaskState: jest.fn(),
       },
-      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      scheduler: new DownloadScheduler({ concurrency: 2 }),
       publishProgress: jest.fn(),
       timer: async () => undefined,
       random: () => 0,
@@ -640,7 +648,7 @@ describe('DownloadService force redownload', () => {
       status: 'completed',
     });
     expect(service.getSnapshot('task-1')?.episodes['1']).toMatchObject({
-      completedSegmentIndices: [0, 1, 2],
+      completedSegmentIndices: [0, 1, 2, 3, 4],
       failedSegmentIndices: [],
     });
     expect(
@@ -649,7 +657,8 @@ describe('DownloadService force redownload', () => {
     expect(
       fs.readFileSync(path.join(generation, 'segments', 'segment_001.ts'))
     ).toEqual(Buffer.from('unflushed'));
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(maxActiveFetches).toBe(2);
     expect(fs.existsSync(wrongRoot)).toBe(false);
     fs.rmSync(root, { recursive: true, force: true });
   });
