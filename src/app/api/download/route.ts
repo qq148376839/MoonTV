@@ -293,6 +293,45 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '没有可下载的剧集' }, { status: 400 });
     }
 
+    if (!force_redownload) {
+      const requestedEpisodes = new Set(episodeNumbers);
+      const recoverableSnapshot = downloadService
+        .getRecoverableTaskIds()
+        .map((taskId) => downloadService.getSnapshot(taskId))
+        .find(
+          (candidate) =>
+            candidate &&
+            candidate.source === resource.source &&
+            candidate.resourceId === resource.id &&
+            candidate.episodeNumbers.some((episode) =>
+              requestedEpisodes.has(episode)
+            )
+        );
+      if (recoverableSnapshot) {
+        const recovered = await downloadService.resumeTask(
+          recoverableSnapshot.taskId,
+          resource
+        );
+        if (!recovered.ok) {
+          return NextResponse.json(
+            { error: '当前资源入口无法恢复未完成任务' },
+            { status: 409 }
+          );
+        }
+        return NextResponse.json({
+          success: true,
+          task_id: recoverableSnapshot.taskId,
+          status: recovered.status,
+          progress: downloadService.getSnapshot(recoverableSnapshot.taskId)
+            ?.progress,
+          episode_numbers: recoverableSnapshot.episodeNumbers,
+          message: '已使用当前资源入口恢复未完成下载',
+          is_existing: true,
+          is_already_downloaded: recovered.status === 'completed',
+        });
+      }
+    }
+
     console.log(
       `[Download API] 准备创建下载任务: ${source}_${id}, 剧集数: ${episodesToDownload.length}`
     );

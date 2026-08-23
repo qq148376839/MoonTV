@@ -260,6 +260,21 @@ async function defaultReacquireEpisode(
   return fetchCurrentMediaPlaylist(playlistUrl);
 }
 
+async function reacquireEpisodeFromCurrentResource(
+  resource: SearchResult,
+  episode: number
+): Promise<{ playlistUrl: string; content: string }> {
+  let playlistUrl = resource.episodes[episode - 1];
+  if (!playlistUrl)
+    throw new Error('unable to reacquire playlist: episode unavailable');
+  if (!playlistUrl.toLowerCase().includes('m3u8')) {
+    const parsed = await parseToM3u8Url(playlistUrl);
+    if (!parsed) throw new Error('unable to reacquire playlist URL');
+    playlistUrl = parsed;
+  }
+  return fetchCurrentMediaPlaylist(playlistUrl);
+}
+
 async function fetchCurrentMediaPlaylist(
   playlistUrl: string
 ): Promise<{ playlistUrl: string; content: string }> {
@@ -2689,7 +2704,10 @@ export class DownloadService {
     episode.recoverable = false;
   }
 
-  public async resumeTask(taskId: string): Promise<CommandResult> {
+  public async resumeTask(
+    taskId: string,
+    currentResource?: SearchResult
+  ): Promise<CommandResult> {
     const snapshot = this.snapshots.get(taskId);
     if (!snapshot) return { ok: false, status: 'not_found' };
     if (
@@ -2760,10 +2778,12 @@ export class DownloadService {
           originalContent,
           'https://resume.invalid/playlist.m3u8'
         );
-        const reacquired = await this.reacquireEpisode(
-          snapshot,
-          episode.episode
-        );
+        const reacquired = currentResource
+          ? await reacquireEpisodeFromCurrentResource(
+              currentResource,
+              episode.episode
+            )
+          : await this.reacquireEpisode(snapshot, episode.episode);
         const refreshedAdResult = filterM3U8Ads(reacquired.content, {
           enableDomain: true,
           enableKeyword: true,

@@ -587,6 +587,9 @@ describe('DownloadService force redownload', () => {
     persisted.status = 'partial_completed';
     const generateMetadata = jest.fn().mockResolvedValue(undefined);
     const updateIndex = jest.fn();
+    const reacquireEpisode = jest
+      .fn()
+      .mockRejectedValue(new Error('configured source unavailable'));
     const service = new DownloadService({
       storageManager: {
         ...storageMock,
@@ -603,18 +606,36 @@ describe('DownloadService force redownload', () => {
       publishProgress: jest.fn(),
       timer: async () => undefined,
       random: () => 0,
-      reacquireEpisode: jest.fn().mockResolvedValue({
-        playlistUrl: 'https://fresh.example/list.m3u8',
-        content:
-          '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI="fresh.key"\n#EXT-X-MAP:URI="fresh.mp4"\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts',
-      }),
+      reacquireEpisode,
     });
 
-    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+    fetchSpy.mockImplementation(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('list.m3u8')) {
+        return playlistResponse(
+          '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI="fresh.key"\n#EXT-X-MAP:URI="fresh.mp4"\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts'
+        );
+      }
+      if (url.endsWith('fresh.key')) return bufferResponse('key!', 4);
+      if (url.endsWith('fresh.mp4')) return bufferResponse('map!', 4);
+      return responseFor('fresh', 5);
+    });
+    await expect(
+      (
+        service.resumeTask as unknown as (
+          taskId: string,
+          currentResource: typeof resource
+        ) => Promise<unknown>
+      )('task-1', {
+        ...resource,
+        episodes: ['https://fresh.example/list.m3u8'],
+      })
+    ).resolves.toMatchObject({
       ok: true,
       status: 'completed',
     });
-    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(reacquireEpisode).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
     expect(
       fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
     ).toEqual(Buffer.from('ok'));

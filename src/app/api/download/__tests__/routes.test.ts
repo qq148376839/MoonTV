@@ -20,6 +20,7 @@ const service = {
   cancelTask: jest.fn(),
   retryFailed: jest.fn(),
   prioritizeTask: jest.fn(),
+  createTask: jest.fn(),
   isEnabled: jest.fn(() => true),
 };
 
@@ -56,7 +57,7 @@ jest.mock('@/lib/local-storage', () => ({
 import { POST as POST_COMMAND } from '../[taskId]/command/route';
 import { GET as GET_DETAIL } from '../[taskId]/detail/route';
 import { createDownloadEventResponse } from '../events/route';
-import { GET as GET_DOWNLOADS } from '../route';
+import { GET as GET_DOWNLOADS, POST as POST_DOWNLOAD } from '../route';
 
 function request(
   url: string,
@@ -206,6 +207,41 @@ describe('download routes', () => {
       { params: { taskId: 'missing' } }
     );
     expect(response.status).toBe(404);
+  });
+
+  test('a fresh matching download request resumes the persisted task with current resource URLs', async () => {
+    const persisted = snapshot();
+    persisted.status = 'recovery_wait';
+    persisted.source = 'source-a';
+    persisted.resourceId = 'movie-1';
+    persisted.episodeNumbers = [1];
+    service.getRecoverableTaskIds.mockReturnValue(['task-1']);
+    service.getSnapshot.mockReturnValue(persisted);
+    service.resumeTask.mockResolvedValue({ ok: true, status: 'completed' });
+    const currentResource = {
+      id: 'movie-1',
+      source: 'source-a',
+      source_name: '当前源',
+      title: '测试影片',
+      year: '2026',
+      poster: '',
+      episodes: ['https://fresh.example/episode-1.m3u8'],
+    };
+
+    const response = await POST_DOWNLOAD(
+      request('http://localhost/api/download', {
+        body: {
+          source: 'source-a',
+          id: 'movie-1',
+          auto_download: true,
+          resource: currentResource,
+        },
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.resumeTask).toHaveBeenCalledWith('task-1', currentResource);
+    expect(service.createTask).not.toHaveBeenCalled();
   });
 
   test('rejects commands that conflict with current state', async () => {
