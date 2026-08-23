@@ -82,6 +82,12 @@ export type DownloadTaskStatus =
   | 'failed'
   | 'cancelled_resumable';
 
+export interface DownloadRecoveryRecipe {
+  source: string;
+  resourceId: string;
+  episodeEntries: Record<string, string>;
+}
+
 export interface DownloadTaskSnapshot {
   schemaVersion: 1;
   taskId: string;
@@ -90,6 +96,7 @@ export interface DownloadTaskSnapshot {
   title: string;
   year: string;
   poster?: string;
+  recovery?: DownloadRecoveryRecipe;
   episodeNumbers: number[];
   status: DownloadTaskStatus;
   priority: 'normal' | 'high';

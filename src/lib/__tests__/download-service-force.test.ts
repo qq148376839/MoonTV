@@ -106,6 +106,39 @@ describe('DownloadService force redownload', () => {
     expect(saveTask).not.toHaveBeenCalled();
   });
 
+  test('persists a private recovery recipe when a task is created', () => {
+    const saveTask = jest.fn();
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        isEpisodeDownloaded: jest.fn(() => false),
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [],
+        saveTask,
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    (service as unknown as { processQueue: () => Promise<void> }).processQueue =
+      jest.fn().mockResolvedValue(undefined);
+
+    const task = service.createTask(resource, resource.episodes, [1]);
+    const persisted = saveTask.mock.calls[0]?.[0] as Record<string, unknown>;
+
+    expect(task.id).toMatch(/^download_/);
+    expect(persisted).toMatchObject({
+      recovery: {
+        source: 'source-a',
+        resourceId: 'movie-1',
+        episodeEntries: { '1': 'https://media.example/movie.m3u8' },
+      },
+    });
+  });
+
   test('cleans history on startup and only once per day while listing tasks', () => {
     const cleanupHistory = jest.fn(() => ({ removed: [] }));
     const now = 1_800_000_000_000;
@@ -559,6 +592,234 @@ describe('DownloadService force redownload', () => {
     expect(fs.readFileSync(active, 'utf8')).toContain(
       'generation-a/segments/segment_001.ts'
     );
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('recovery uses the persisted episode entry before refreshing the source', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-recipe-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const persisted = recoverySnapshot('generation-a') as DownloadTaskSnapshot &
+      Record<string, unknown>;
+    persisted.recovery = {
+      source: 'source-a',
+      resourceId: 'movie-1',
+      episodeEntries: { '1': 'https://persisted.example/list.m3u8' },
+    };
+    const reacquireEpisode = jest
+      .fn()
+      .mockRejectedValue(new Error('source refresh must not run'));
+    const fetchSpy = jest.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('list.m3u8')) {
+        return playlistResponse(
+          '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts'
+        );
+      }
+      return responseFor('fresh', 5);
+    });
+    global.fetch = fetchSpy;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [persisted],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode,
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(reacquireEpisode).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
+    ).toEqual(Buffer.from('ok'));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('recovery refreshes the source when the persisted entry has expired', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-refresh-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const persisted = recoverySnapshot('generation-a') as DownloadTaskSnapshot &
+      Record<string, unknown>;
+    persisted.recovery = {
+      source: 'source-a',
+      resourceId: 'movie-1',
+      episodeEntries: { '1': 'https://expired.example/list.m3u8' },
+    };
+    const reacquireEpisode = jest.fn().mockResolvedValue({
+      playlistUrl: 'https://fresh.example/list.m3u8',
+      content:
+        '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts',
+    });
+    const fetchSpy = jest.fn(async (input: string | URL | Request) => {
+      if (String(input).includes('expired.example')) {
+        return { ok: false, status: 403 } as Response;
+      }
+      return responseFor('fresh', 5);
+    });
+    global.fetch = fetchSpy;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [persisted],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode,
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(reacquireEpisode).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-1' }),
+      1
+    );
+    expect(
+      fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes('expired.example')
+      )
+    ).toBe(true);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('legacy recovery without a recipe reports that the source must be selected again', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-legacy-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(generation, { recursive: true });
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nold-10.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const snapshot = recoverySnapshot('generation-a');
+    const saveTask = jest.fn();
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask,
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode: jest
+        .fn()
+        .mockRejectedValue(new Error('configured source unavailable')),
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: false,
+      status: 'failed',
+    });
+    expect(
+      service.getSnapshot('task-1')?.episodes['1'].failures.at(-1)?.message
+    ).toBe('旧任务缺少恢复入口，请重新选择来源');
+    expect(fs.readFileSync(path.join(root, 'episode_01.m3u8'), 'utf8')).toBe(
+      'old-entry'
+    );
+    expect(saveTask).toHaveBeenCalled();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('legacy recovery falls back to absolute URLs in the saved media manifest', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-manifest-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nhttps://saved.example/10.ts?token=old\n#EXTINF:1,\nhttps://saved.example/11.ts?token=old'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), 'old-entry');
+    const snapshot = recoverySnapshot('generation-a');
+    const fetchSpy = jest.fn().mockResolvedValue(responseFor('saved', 5));
+    global.fetch = fetchSpy;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode: jest
+        .fn()
+        .mockRejectedValue(new Error('configured source unavailable')),
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toMatchObject({
+      ok: true,
+      status: 'completed',
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/11.ts?token=old');
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_000.ts'))
+    ).toEqual(Buffer.from('ok'));
+    expect(
+      fs.readFileSync(path.join(generation, 'segments', 'segment_001.ts'))
+    ).toEqual(Buffer.from('saved'));
     fs.rmSync(root, { recursive: true, force: true });
   });
 

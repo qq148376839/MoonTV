@@ -36,6 +36,7 @@ import {
   validateResumeFiles,
 } from './download-transaction';
 import type {
+  DownloadAddressSource,
   DownloadFailure,
   DownloadTaskSnapshot,
   DownloadWorkItem,
@@ -264,9 +265,16 @@ async function reacquireEpisodeFromCurrentResource(
   resource: SearchResult,
   episode: number
 ): Promise<{ playlistUrl: string; content: string }> {
-  let playlistUrl = resource.episodes[episode - 1];
+  const playlistUrl = resource.episodes[episode - 1];
   if (!playlistUrl)
     throw new Error('unable to reacquire playlist: episode unavailable');
+  return reacquireEpisodeFromEntry(playlistUrl);
+}
+
+async function reacquireEpisodeFromEntry(
+  entry: string
+): Promise<{ playlistUrl: string; content: string }> {
+  let playlistUrl = entry;
   if (!playlistUrl.toLowerCase().includes('m3u8')) {
     const parsed = await parseToM3u8Url(playlistUrl);
     if (!parsed) throw new Error('unable to reacquire playlist URL');
@@ -842,6 +850,16 @@ export class DownloadService {
       title: task.resource.title,
       year: task.resource.year,
       poster: task.resource.poster,
+      recovery: {
+        source: task.source,
+        resourceId: task.resourceId,
+        episodeEntries: Object.fromEntries(
+          numbersToDownload.map((episodeNumber, index) => [
+            String(episodeNumber),
+            episodesToDownload[index],
+          ])
+        ),
+      },
       episodeNumbers: numbersToDownload,
       status: 'pending',
       priority: 'normal',
@@ -2778,19 +2796,19 @@ export class DownloadService {
           originalContent,
           'https://resume.invalid/playlist.m3u8'
         );
-        const reacquired = currentResource
-          ? await reacquireEpisodeFromCurrentResource(
-              currentResource,
-              episode.episode
-            )
-          : await this.reacquireEpisode(snapshot, episode.episode);
+        const reacquired = await this.reacquireForResume(
+          snapshot,
+          episode.episode,
+          currentResource,
+          originalContent
+        );
         const refreshedAdResult = filterM3U8Ads(reacquired.content, {
           enableDomain: true,
           enableKeyword: true,
           enableDiscontinuity: true,
         });
         episode.refreshCount = Math.max(1, episode.refreshCount);
-        episode.addressSource = 'refreshed';
+        episode.addressSource = reacquired.addressSource ?? 'refreshed';
         const refreshed = parseMediaPlaylistResources(
           refreshedAdResult.content,
           reacquired.playlistUrl
@@ -2891,6 +2909,56 @@ export class DownloadService {
       this.processQueue();
     }
     return { ok: true, status: snapshot.status };
+  }
+
+  private async reacquireForResume(
+    snapshot: DownloadTaskSnapshot,
+    episode: number,
+    currentResource?: SearchResult,
+    savedManifest?: string
+  ): Promise<{
+    playlistUrl: string;
+    content: string;
+    addressSource?: DownloadAddressSource;
+  }> {
+    if (currentResource) {
+      return reacquireEpisodeFromCurrentResource(currentResource, episode);
+    }
+
+    const persistedEntry = snapshot.recovery?.episodeEntries[String(episode)];
+    if (persistedEntry) {
+      try {
+        return await reacquireEpisodeFromEntry(persistedEntry);
+      } catch {
+        // Signed or parsed entries may expire. The stable source recipe is the
+        // authoritative second chance and deliberately stores no credentials.
+      }
+    }
+
+    try {
+      return await this.reacquireEpisode(snapshot, episode);
+    } catch {
+      const savedSegments = savedManifest
+        ?.split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'));
+      if (
+        savedManifest &&
+        savedSegments?.length &&
+        savedSegments.every((entry) => /^https?:\/\//i.test(entry))
+      ) {
+        return {
+          playlistUrl: 'https://resume.invalid/playlist.m3u8',
+          content: savedManifest,
+          addressSource: 'historical_fallback',
+        };
+      }
+      throw new Error(
+        persistedEntry
+          ? '自动刷新下载地址失败，请重新选择来源'
+          : '旧任务缺少恢复入口，请重新选择来源'
+      );
+    }
   }
 
   /**

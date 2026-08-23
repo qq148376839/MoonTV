@@ -171,6 +171,50 @@ describe('DownloadStateStore', () => {
     expect(persisted).toContain('https://cdn.example/segment.ts');
   });
 
+  test('keeps signed recovery entries private while still redacting diagnostic text', () => {
+    const state = snapshot() as DownloadTaskSnapshot & Record<string, unknown>;
+    state.recovery = {
+      source: 'provider',
+      resourceId: 'resource-1',
+      episodeEntries: {
+        '1': 'https://media.example/list.m3u8?signature=resume-secret',
+      },
+    };
+    state.episodes['1'].failures[0].message =
+      'failed https://media.example/list.m3u8?signature=resume-secret';
+
+    store.saveTask(state);
+
+    const taskDir = path.join(root, 'download-tasks', state.taskId);
+    const taskJson = fs.readFileSync(path.join(taskDir, 'task.json'), 'utf8');
+    const episodeJson = fs.readFileSync(
+      path.join(taskDir, 'episodes', '01.json'),
+      'utf8'
+    );
+    expect(taskJson).toContain('signature=resume-secret');
+    expect(episodeJson).not.toContain('signature=resume-secret');
+    const loaded = store.loadTask(state.taskId) as DownloadTaskSnapshot &
+      Record<string, unknown>;
+    expect(loaded.recovery).toEqual(state.recovery);
+    expect(loaded.episodes['1'].failures[0].message).toBe(
+      'failed https://media.example/list.m3u8'
+    );
+  });
+
+  test('rejects a recovery recipe that does not match the task identity', () => {
+    const state = snapshot() as DownloadTaskSnapshot & Record<string, unknown>;
+    state.recovery = {
+      source: 'different-provider',
+      resourceId: 'resource-1',
+      episodeEntries: { '1': 'https://media.example/list.m3u8' },
+    };
+    store.saveTask(state);
+
+    expect(() => store.loadTask(state.taskId)).toThrow(
+      /recovery source mismatch/i
+    );
+  });
+
   test('recursively redacts signed URLs and path-like sensitive tails before persistence', () => {
     const state = snapshot();
     state.poster = 'https://images.example/poster.jpg?signature=secret#preview';

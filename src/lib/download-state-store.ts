@@ -333,6 +333,33 @@ function assertPersistedTask(value: unknown, label: string): void {
     assertString(required(task, key, label), `${label}.${key}`);
   }
   if ('poster' in task) assertString(task.poster, `${label}.poster`);
+  if ('recovery' in task) {
+    const recovery = assertRecord(task.recovery, `${label}.recovery`);
+    const recoverySource = required(recovery, 'source', `${label}.recovery`);
+    assertString(recoverySource, `${label}.recovery.source`);
+    if (recoverySource !== task.source) {
+      throw new Error(`Invalid ${label}: recovery source mismatch`);
+    }
+    const recoveryResourceId = required(
+      recovery,
+      'resourceId',
+      `${label}.recovery`
+    );
+    assertString(recoveryResourceId, `${label}.recovery.resourceId`);
+    if (recoveryResourceId !== task.resourceId) {
+      throw new Error(`Invalid ${label}: recovery resourceId mismatch`);
+    }
+    const episodeEntries = assertRecord(
+      required(recovery, 'episodeEntries', `${label}.recovery`),
+      `${label}.recovery.episodeEntries`
+    );
+    Object.entries(episodeEntries).forEach(([episode, entry]) => {
+      if (!/^\d+$/.test(episode)) {
+        throw new Error(`Invalid ${label}.recovery.episodeEntries key`);
+      }
+      assertString(entry, `${label}.recovery.episodeEntries.${episode}`);
+    });
+  }
   assertNumberArray(
     required(task, 'episodeNumbers', label),
     `${label}.episodeNumbers`
