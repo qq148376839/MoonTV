@@ -329,6 +329,39 @@ describe('DownloadService force redownload', () => {
     ).rejects.toThrow(/empty|为空/);
   });
 
+  test('aborts and removes a segment when the response stream stays idle', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-idle-stream-'));
+    const filePath = path.join(root, 'segment.ts');
+    const cancel = jest.fn().mockResolvedValue(undefined);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => '0' },
+      body: {
+        getReader: () => ({
+          read: () => new Promise(() => undefined),
+          cancel,
+        }),
+      },
+    });
+    const service = serviceForSnapshot(activeSnapshot()).service;
+    const promise = (
+      service as unknown as {
+        downloadFile: (
+          url: string,
+          path: string,
+          progress: undefined,
+          idleTimeoutMs: number
+        ) => Promise<number>;
+      }
+    ).downloadFile('https://media.example/idle.ts', filePath, undefined, 20);
+
+    await expect(promise).rejects.toThrow('下载流读取超时');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(filePath)).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('keeps the old direct file when the replacement is incomplete', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-direct-'));
     const active = path.join(root, 'episode_01.mp4');

@@ -110,6 +110,26 @@ async function fetchWithRetry(
   throw lastError || new Error('请求失败');
 }
 
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs = 60000
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeoutId: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          void reader.cancel().catch(() => undefined);
+          reject(new Error('下载流读取超时'));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 function isLikelyWebPageUrl(url: string): boolean {
   try {
     if (!(url.startsWith('http://') || url.startsWith('https://')))
@@ -2180,7 +2200,8 @@ export class DownloadService {
   private async downloadFile(
     url: string,
     filePath: string,
-    progressCallback?: (progress: number, writtenBytes: number) => void
+    progressCallback?: (progress: number, writtenBytes: number) => void,
+    streamIdleTimeoutMs = 60000
   ): Promise<number> {
     // 使用带重试的 fetch（TS 片段下载使用更长的超时时间）
     const response = await fetchWithRetry(url, {}, 1, 60000);
@@ -2208,7 +2229,10 @@ export class DownloadService {
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunk(
+          reader,
+          streamIdleTimeoutMs
+        );
         if (done) break;
         const chunk = Buffer.from(value);
         if (!fileStream.write(chunk)) {
