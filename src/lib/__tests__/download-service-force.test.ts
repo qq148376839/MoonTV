@@ -362,6 +362,42 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('finishes after Content-Length bytes when the source never closes the stream', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-full-stream-'));
+    const filePath = path.join(root, 'segment.ts');
+    let reads = 0;
+    const cancel = jest.fn().mockResolvedValue(undefined);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => '4' },
+      body: {
+        getReader: () => ({
+          read: () => {
+            reads += 1;
+            return reads === 1
+              ? Promise.resolve({ done: false, value: Buffer.from('done') })
+              : new Promise(() => undefined);
+          },
+          cancel,
+        }),
+      },
+    });
+    const service = serviceForSnapshot(activeSnapshot()).service;
+
+    await expect(
+      (
+        service as unknown as {
+          downloadFile: (url: string, path: string) => Promise<number>;
+        }
+      ).downloadFile('https://media.example/full.ts', filePath)
+    ).resolves.toBe(4);
+    expect(reads).toBe(1);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('done');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('keeps the old direct file when the replacement is incomplete', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-direct-'));
     const active = path.join(root, 'episode_01.mp4');

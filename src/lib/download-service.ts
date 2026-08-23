@@ -2246,6 +2246,7 @@ export class DownloadService {
           contentLength > 0 ? (downloaded / contentLength) * 100 : 0,
           downloaded
         );
+        if (contentLength > 0 && downloaded >= contentLength) break;
       }
       fileStream.end();
       await streamCompletion;
