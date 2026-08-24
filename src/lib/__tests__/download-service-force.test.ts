@@ -433,6 +433,9 @@ describe('DownloadService force redownload', () => {
 
   test('waits for the writable stream to finish before resolving', async () => {
     const chunks: Buffer[] = [];
+    const rename = jest
+      .spyOn(fs, 'renameSync')
+      .mockImplementation(() => undefined);
     jest.spyOn(fs, 'createWriteStream').mockReturnValue(
       new Writable({
         write(chunk, _encoding, callback) {
@@ -456,9 +459,11 @@ describe('DownloadService force redownload', () => {
     expect(size).toBe(8);
     expect(Buffer.concat(chunks).toString()).toBe('complete');
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    expect(rename).toHaveBeenCalledWith('/tmp/unused.part', '/tmp/unused');
   });
 
   test('keeps writable stream listeners bounded across many chunks', async () => {
+    jest.spyOn(fs, 'renameSync').mockImplementation(() => undefined);
     let maxErrorListeners = 0;
     const writable = new Writable({
       write(_chunk, _encoding, callback) {
@@ -1013,6 +1018,30 @@ describe('DownloadService force redownload', () => {
     );
     const whileWriting = service.getProgressivePlayback('task-1', 1);
     expect(whileWriting).toMatchObject({ status: 'ready', segmentCount: 2 });
+
+    snapshot.episodes['1'].stage = 'completed';
+    fs.writeFileSync(
+      path.join(root, 'episode_01.m3u8'),
+      [
+        '#EXTM3U',
+        '#EXT-X-PLAYLIST-TYPE:VOD',
+        '#EXTINF:5,',
+        'episode_01_generations/generation-a/segments/segment_000.ts',
+        '#EXTINF:8,',
+        'episode_01_generations/generation-a/segments/segment_003.ts',
+        '#EXT-X-ENDLIST',
+      ].join('\n')
+    );
+    const completed = service.getProgressivePlayback('task-1', 1);
+    expect(completed).toMatchObject({
+      status: 'ready',
+      complete: true,
+      segmentCount: 2,
+      durationSeconds: 13,
+    });
+    if (completed.status !== 'ready') throw new Error('playback not ready');
+    expect(completed.content).toContain('segment_003.ts');
+    expect(completed.content).toContain('#EXT-X-ENDLIST');
     fs.rmSync(root, { recursive: true, force: true });
   });
 
