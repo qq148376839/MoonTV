@@ -384,6 +384,25 @@ describe('DownloadStateStore', () => {
     expect(store.loadRecoverableTasks()).toEqual([pending]);
   });
 
+  test('normalizes a started-without-episode snapshot back to pending', () => {
+    const started = snapshot('started-without-episode', {
+      status: 'downloading',
+      progress: 0,
+      completedBytes: 0,
+      episodes: {},
+      recovery: {
+        source: 'provider',
+        resourceId: 'resource-1',
+        episodeEntries: { '1': 'https://media.example/episode-1.m3u8' },
+      },
+    });
+    store.saveTask(started);
+
+    expect(store.loadRecoverableTasks()).toEqual([
+      { ...started, status: 'pending' },
+    ]);
+  });
+
   test('loads recoverable failed and partially completed tasks after restart', () => {
     for (const status of ['failed', 'partial_completed'] as const) {
       store.saveTask(

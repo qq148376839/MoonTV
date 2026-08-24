@@ -961,6 +961,11 @@ export class DownloadService {
       this.activeDownloads.add(pendingTask.id);
       pendingTask.status = DownloadStatus.DOWNLOADING;
       this.updateTask(pendingTask);
+      const snapshot = this.snapshots.get(pendingTask.id);
+      if (snapshot) {
+        snapshot.status = 'downloading';
+        this.flushSnapshot(snapshot, 'task.updated');
+      }
 
       void this.downloadTask(pendingTask)
         .catch((error) => {
@@ -974,6 +979,16 @@ export class DownloadService {
           this.updateTask(pendingTask);
         })
         .finally(() => {
+          const completedSnapshot = this.snapshots.get(pendingTask.id);
+          if (completedSnapshot) {
+            completedSnapshot.status =
+              pendingTask.status === DownloadStatus.COMPLETED
+                ? 'completed'
+                : pendingTask.status === DownloadStatus.FAILED
+                ? 'failed'
+                : completedSnapshot.status;
+            this.flushSnapshot(completedSnapshot, 'task.updated');
+          }
           this.activeDownloads.delete(pendingTask.id);
           void this.processQueue();
         });

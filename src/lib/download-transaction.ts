@@ -1,5 +1,8 @@
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+
+const DOWNLOAD_PROCESS_INSTANCE = randomUUID();
 
 export interface EpisodeGenerationPaths {
   generationId: string;
@@ -305,7 +308,11 @@ export function acquireEpisodeLock(
   try {
     fs.writeFileSync(
       lockPath,
-      JSON.stringify({ ...payload, startedAt: Date.now() }),
+      JSON.stringify({
+        ...payload,
+        processInstance: DOWNLOAD_PROCESS_INSTANCE,
+        startedAt: Date.now(),
+      }),
       { encoding: 'utf-8', flag: 'wx' }
     );
     return lockPath;
@@ -313,24 +320,36 @@ export function acquireEpisodeLock(
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     const age = Date.now() - fs.statSync(lockPath).mtimeMs;
     let ownerAlive = false;
+    let reusedPidFromAnotherInstance = false;
     try {
       const existing = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as {
         pid?: unknown;
+        processInstance?: unknown;
       };
       if (typeof existing.pid === 'number') {
         process.kill(existing.pid, 0);
-        ownerAlive = true;
+        reusedPidFromAnotherInstance =
+          existing.pid === process.pid &&
+          existing.processInstance !== DOWNLOAD_PROCESS_INSTANCE;
+        ownerAlive =
+          existing.pid !== process.pid ||
+          existing.processInstance === DOWNLOAD_PROCESS_INSTANCE;
       }
     } catch {
       ownerAlive = false;
     }
-    if (ownerAlive || age <= staleAfterMs) {
+    if (ownerAlive || (!reusedPidFromAnotherInstance && age <= staleAfterMs)) {
       throw new Error('该剧集已有下载任务进行中');
     }
     fs.rmSync(lockPath, { force: true });
     fs.writeFileSync(
       lockPath,
-      JSON.stringify({ ...payload, startedAt: Date.now(), reclaimed: true }),
+      JSON.stringify({
+        ...payload,
+        processInstance: DOWNLOAD_PROCESS_INSTANCE,
+        startedAt: Date.now(),
+        reclaimed: true,
+      }),
       { encoding: 'utf-8', flag: 'wx' }
     );
     return lockPath;

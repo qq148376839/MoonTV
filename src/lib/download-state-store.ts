@@ -484,7 +484,7 @@ export class DownloadStateStore {
   }
 
   loadRecoverableTasks(): DownloadTaskSnapshot[] {
-    return this.listTasks().flatMap((snapshot) => {
+    return this.listTasks().flatMap<DownloadTaskSnapshot>((snapshot) => {
       if (!RECOVERABLE_TASK_STATUSES.has(snapshot.status)) return [];
       if (
         ['partial_completed', 'failed'].includes(snapshot.status) &&
@@ -496,10 +496,11 @@ export class DownloadStateStore {
       // A task that never started has no generation to recover. Preserve its
       // queue state so DownloadService can rebuild it from the private recipe.
       if (
-        snapshot.status === 'pending' &&
-        Object.keys(snapshot.episodes).length === 0
+        ['pending', 'downloading'].includes(snapshot.status) &&
+        Object.keys(snapshot.episodes).length === 0 &&
+        Object.keys(snapshot.recovery?.episodeEntries ?? {}).length > 0
       ) {
-        return [snapshot];
+        return [{ ...snapshot, status: 'pending' }];
       }
 
       const episodes = Object.fromEntries(

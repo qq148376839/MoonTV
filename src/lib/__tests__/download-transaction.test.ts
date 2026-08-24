@@ -101,6 +101,30 @@ describe('download transaction', () => {
     ).not.toThrow();
   });
 
+  test('reclaims a lock left by a previous container instance with reused pid', () => {
+    const lockPath = path.join(root, '.episode_01.download.lock');
+    fs.writeFileSync(
+      lockPath,
+      JSON.stringify({
+        taskId: 'previous-container',
+        pid: process.pid,
+        processInstance: 'previous-instance',
+        startedAt: Date.now(),
+      })
+    );
+
+    expect(() =>
+      acquireEpisodeLock(root, 1, {
+        taskId: 'current-container',
+        pid: process.pid,
+      })
+    ).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
+      taskId: 'current-container',
+      reclaimed: true,
+    });
+  });
+
   test('validates resumable files by existence, nonempty size, and expected length', () => {
     const valid = path.join(root, 'valid.ts');
     const empty = path.join(root, 'empty.ts');
