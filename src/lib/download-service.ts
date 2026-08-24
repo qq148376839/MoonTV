@@ -4,6 +4,7 @@
 import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { finished } from 'stream/promises';
 
 import { filterM3U8Ads } from './ad-filter';
 import { getAvailableApiSites } from './config';
@@ -490,8 +491,56 @@ export class DownloadService {
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
     for (const snapshot of this.stateStore.loadRecoverableTasks()) {
       this.snapshots.set(snapshot.taskId, snapshot);
+      if (snapshot.status === 'pending') this.restorePendingTask(snapshot);
     }
     this.cleanupHistoryOncePerDay();
+    void this.processQueue();
+  }
+
+  private restorePendingTask(snapshot: DownloadTaskSnapshot): boolean {
+    if (this.tasks.has(snapshot.taskId)) return true;
+    const entries = Object.entries(snapshot.recovery?.episodeEntries ?? {})
+      .map(([episode, entry]) => ({ episode: Number(episode), entry }))
+      .filter(
+        ({ episode, entry }) =>
+          Number.isInteger(episode) &&
+          episode > 0 &&
+          typeof entry === 'string' &&
+          entry.length > 0
+      )
+      .sort((a, b) => a.episode - b.episode);
+    if (entries.length === 0) return false;
+    const totalEpisodes = Math.max(
+      ...snapshot.episodeNumbers,
+      ...entries.map(({ episode }) => episode)
+    );
+    const resourceEpisodes = Array.from({ length: totalEpisodes }, () => '');
+    entries.forEach(({ episode, entry }) => {
+      resourceEpisodes[episode - 1] = entry;
+    });
+    this.tasks.set(snapshot.taskId, {
+      id: snapshot.taskId,
+      source: snapshot.source,
+      resourceId: snapshot.resourceId,
+      resource: {
+        id: snapshot.resourceId,
+        title: snapshot.title,
+        poster: snapshot.poster ?? '',
+        episodes: resourceEpisodes,
+        source: snapshot.source,
+        source_name: snapshot.source,
+        year: snapshot.year,
+      },
+      episodes: entries.map(({ entry }) => entry),
+      episodeNumbers: entries.map(({ episode }) => episode),
+      forceRedownload: false,
+      addressMethod: 'direct',
+      status: DownloadStatus.PENDING,
+      progress: snapshot.progress,
+      createdAt: snapshot.createdAt,
+      updatedAt: snapshot.updatedAt,
+    });
+    return true;
   }
 
   private cleanupHistoryOncePerDay(now = Date.now()): void {
@@ -905,43 +954,32 @@ export class DownloadService {
    * 处理下载队列
    */
   private async processQueue(): Promise<void> {
-    // 如果已达到最大并发数，等待
-    if (this.activeDownloads.size >= this.maxConcurrent) {
-      return;
+    while (this.activeDownloads.size < this.maxConcurrent) {
+      const pendingTask = Array.from(this.tasks.values()).find(
+        (task) => task.status === DownloadStatus.PENDING
+      );
+      if (!pendingTask) return;
+
+      this.activeDownloads.add(pendingTask.id);
+      pendingTask.status = DownloadStatus.DOWNLOADING;
+      this.updateTask(pendingTask);
+
+      void this.downloadTask(pendingTask)
+        .catch((error) => {
+          console.error(
+            `[DownloadService] 下载任务失败: ${pendingTask.id}`,
+            error
+          );
+          pendingTask.status = DownloadStatus.FAILED;
+          pendingTask.error =
+            error instanceof Error ? error.message : String(error);
+          this.updateTask(pendingTask);
+        })
+        .finally(() => {
+          this.activeDownloads.delete(pendingTask.id);
+          void this.processQueue();
+        });
     }
-
-    // 查找待处理的任务
-    const pendingTask = Array.from(this.tasks.values()).find(
-      (task) => task.status === DownloadStatus.PENDING
-    );
-
-    if (!pendingTask) {
-      return;
-    }
-
-    // 开始下载
-    this.activeDownloads.add(pendingTask.id);
-    pendingTask.status = DownloadStatus.DOWNLOADING;
-    this.updateTask(pendingTask);
-
-    // 异步执行下载
-    this.downloadTask(pendingTask)
-      .then(() => {
-        this.activeDownloads.delete(pendingTask.id);
-        this.processQueue(); // 处理下一个任务
-      })
-      .catch((error) => {
-        console.error(
-          `[DownloadService] 下载任务失败: ${pendingTask.id}`,
-          error
-        );
-        pendingTask.status = DownloadStatus.FAILED;
-        pendingTask.error =
-          error instanceof Error ? error.message : String(error);
-        this.updateTask(pendingTask);
-        this.activeDownloads.delete(pendingTask.id);
-        this.processQueue(); // 处理下一个任务
-      });
   }
 
   /**
@@ -2221,10 +2259,11 @@ export class DownloadService {
     }
 
     const fileStream = fs.createWriteStream(filePath);
-    const streamCompletion = new Promise<void>((resolve, reject) => {
-      fileStream.once('finish', resolve);
-      fileStream.once('error', reject);
-    });
+    const streamCompletion = finished(fileStream);
+    // The stream can fail while the response reader is still pending. Attach a
+    // rejection handler immediately so Node does not report it as unhandled;
+    // the original promise is still awaited below and drives normal cleanup.
+    void streamCompletion.catch(() => undefined);
     let downloaded = 0;
     try {
       // eslint-disable-next-line no-constant-condition
@@ -2235,12 +2274,11 @@ export class DownloadService {
         );
         if (done) break;
         const chunk = Buffer.from(value);
-        if (!fileStream.write(chunk)) {
-          await new Promise<void>((resolve, reject) => {
-            fileStream.once('drain', resolve);
-            fileStream.once('error', reject);
-          });
-        }
+        await new Promise<void>((resolve, reject) => {
+          fileStream.write(chunk, (error) =>
+            error ? reject(error) : resolve()
+          );
+        });
         downloaded += value.length;
         progressCallback?.(
           contentLength > 0 ? (downloaded / contentLength) * 100 : 0,
@@ -2794,6 +2832,20 @@ export class DownloadService {
   ): Promise<CommandResult> {
     const snapshot = this.snapshots.get(taskId);
     if (!snapshot) return { ok: false, status: 'not_found' };
+    if (snapshot.status === 'pending') {
+      if (!this.restorePendingTask(snapshot)) {
+        return { ok: false, status: 'conflict' };
+      }
+      await this.processQueue();
+      const task = this.tasks.get(taskId);
+      return {
+        ok: true,
+        status:
+          task?.status === DownloadStatus.DOWNLOADING
+            ? 'downloading'
+            : 'pending',
+      };
+    }
     if (
       ![
         'paused',

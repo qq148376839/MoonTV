@@ -70,6 +70,154 @@ describe('DownloadService force redownload', () => {
     expect(readDownloadConcurrency(raw)).toBe(expected);
   });
 
+  test('fills all available task-level concurrency slots', async () => {
+    const previous = process.env.LOCAL_STORAGE_MAX_CONCURRENT;
+    process.env.LOCAL_STORAGE_MAX_CONCURRENT = '3';
+    try {
+      const service = new DownloadService();
+      const started: string[] = [];
+      const never = new Promise<void>(() => undefined);
+      const runtime = service as unknown as {
+        activeDownloads: Set<string>;
+        downloadTask: (task: { id: string }) => Promise<void>;
+        processQueue: () => Promise<void>;
+        tasks: Map<string, unknown>;
+      };
+      runtime.downloadTask = jest.fn((task: { id: string }) => {
+        started.push(task.id);
+        return never;
+      });
+      for (const id of ['task-1', 'task-2', 'task-3']) {
+        runtime.tasks.set(id, {
+          id,
+          status: DownloadStatus.PENDING,
+          progress: 0,
+          updatedAt: 0,
+        });
+      }
+
+      await runtime.processQueue();
+
+      expect(started).toEqual(['task-1', 'task-2', 'task-3']);
+      expect(runtime.activeDownloads).toEqual(
+        new Set(['task-1', 'task-2', 'task-3'])
+      );
+    } finally {
+      if (previous === undefined)
+        delete process.env.LOCAL_STORAGE_MAX_CONCURRENT;
+      else process.env.LOCAL_STORAGE_MAX_CONCURRENT = previous;
+    }
+  });
+
+  test('rehydrates persisted pending tasks and starts them after restart', () => {
+    const previous = process.env.LOCAL_STORAGE_MAX_CONCURRENT;
+    process.env.LOCAL_STORAGE_MAX_CONCURRENT = '3';
+    const started: string[] = [];
+    const never = new Promise<void>(() => undefined);
+    jest
+      .spyOn(
+        DownloadService.prototype as unknown as {
+          downloadTask(task: { id: string }): Promise<void>;
+        },
+        'downloadTask'
+      )
+      .mockImplementation((task) => {
+        started.push(task.id);
+        return never;
+      });
+    const snapshots = ['pending-1', 'pending-2', 'pending-3'].map(
+      (taskId): DownloadTaskSnapshot => ({
+        schemaVersion: 1,
+        taskId,
+        source: 'source-a',
+        resourceId: taskId,
+        title: taskId,
+        year: '2026',
+        recovery: {
+          source: 'source-a',
+          resourceId: taskId,
+          episodeEntries: {
+            '1': `https://media.example/${taskId}.m3u8`,
+          },
+        },
+        episodeNumbers: [1],
+        status: 'pending',
+        priority: 'normal',
+        currentEpisode: 1,
+        progress: 0,
+        progressEstimated: true,
+        speedBytesPerSecond: 0,
+        etaSeconds: null,
+        completedBytes: 0,
+        createdAt: 1,
+        updatedAt: 1,
+        episodes: {},
+      })
+    );
+    try {
+      new DownloadService({
+        storageManager: storageMock as never,
+        stateStore: {
+          loadRecoverableTasks: () => snapshots,
+          saveTask: jest.fn(),
+          deleteTaskState: jest.fn(),
+        },
+        scheduler: new DownloadScheduler({ concurrency: 1 }),
+        publishProgress: jest.fn(),
+        timer: async () => undefined,
+        random: () => 0,
+      });
+
+      expect(started).toEqual(['pending-1', 'pending-2', 'pending-3']);
+    } finally {
+      if (previous === undefined)
+        delete process.env.LOCAL_STORAGE_MAX_CONCURRENT;
+      else process.env.LOCAL_STORAGE_MAX_CONCURRENT = previous;
+    }
+  });
+
+  test('allows resume to enqueue a persisted pending task', async () => {
+    const service = new DownloadService();
+    const runtime = service as unknown as {
+      downloadTask: (task: { id: string }) => Promise<void>;
+      snapshots: Map<string, DownloadTaskSnapshot>;
+    };
+    runtime.downloadTask = jest.fn(() => new Promise<void>(() => undefined));
+    runtime.snapshots.set('pending-resume', {
+      schemaVersion: 1,
+      taskId: 'pending-resume',
+      source: 'source-a',
+      resourceId: 'movie-1',
+      title: 'Pending',
+      year: '2026',
+      recovery: {
+        source: 'source-a',
+        resourceId: 'movie-1',
+        episodeEntries: { '1': 'https://media.example/movie.m3u8' },
+      },
+      episodeNumbers: [1],
+      status: 'pending',
+      priority: 'normal',
+      currentEpisode: 1,
+      progress: 0,
+      progressEstimated: true,
+      speedBytesPerSecond: 0,
+      etaSeconds: null,
+      completedBytes: 0,
+      createdAt: 1,
+      updatedAt: 1,
+      episodes: {},
+    });
+
+    await expect(service.resumeTask('pending-resume')).resolves.toEqual({
+      ok: true,
+      status: 'downloading',
+    });
+    expect(runtime.downloadTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'pending-resume', episodeNumbers: [1] })
+    );
+  });
+
   test('shows in-memory legacy tasks as estimated without persisting or migrating media', () => {
     const saveTask = jest.fn();
     const service = new DownloadService({
@@ -307,6 +455,46 @@ describe('DownloadService force redownload', () => {
     expect(size).toBe(8);
     expect(Buffer.concat(chunks).toString()).toBe('complete');
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+  });
+
+  test('keeps writable stream listeners bounded across many chunks', async () => {
+    let maxErrorListeners = 0;
+    const writable = new Writable({
+      write(_chunk, _encoding, callback) {
+        maxErrorListeners = Math.max(
+          maxErrorListeners,
+          this.listenerCount('error')
+        );
+        callback();
+      },
+    });
+    jest
+      .spyOn(fs, 'createWriteStream')
+      .mockReturnValue(writable as fs.WriteStream);
+    let index = 0;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => '128' },
+      body: {
+        getReader: () => ({
+          read: async () =>
+            index++ < 128
+              ? { done: false, value: Buffer.from('x') }
+              : { done: true, value: undefined },
+        }),
+      },
+    });
+    const service = new DownloadService();
+
+    await expect(
+      (
+        service as unknown as {
+          downloadFile: (url: string, file: string) => Promise<number>;
+        }
+      ).downloadFile('https://media.example/many-chunks.ts', '/tmp/unused')
+    ).resolves.toBe(128);
+    expect(maxErrorListeners).toBeLessThanOrEqual(2);
   });
 
   test('does not complete an empty response when length is unknown', async () => {
