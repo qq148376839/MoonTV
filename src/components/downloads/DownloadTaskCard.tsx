@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
+import { playViaNative } from '@/lib/tv-bridge';
 import type { DownloadCommandAction } from '@/hooks/useDownloadTasks';
 
 import DownloadTaskDetails, { DownloadTaskDetail } from './DownloadTaskDetails';
@@ -31,6 +32,9 @@ export interface DownloadTaskSummary {
     failed: number;
   };
   recoverable?: boolean;
+  playable_episode?: number | null;
+  playable_segments?: number;
+  play_url?: string | null;
   polling_fallback?: boolean;
   error?: string;
   created_at: number;
@@ -139,6 +143,16 @@ export default function DownloadTaskCard({
   };
   const runDetailCommand = (_taskId: string, action: DownloadCommandAction) =>
     run(action);
+  const playProgressively = () => {
+    if (!task.play_url) return;
+    const url = new URL(task.play_url, window.location.origin).href;
+    const played = playViaNative(
+      url,
+      task.title || `${task.source}_${task.id}`,
+      task.playable_episode ? `第${task.playable_episode}集` : ''
+    );
+    if (!played) window.open(url, '_blank', 'noopener,noreferrer');
+  };
   useEffect(() => {
     if (!expanded || !loadDetails) return;
     let active = true;
@@ -191,6 +205,15 @@ export default function DownloadTaskCard({
             </div>
           </div>
           <div className='flex flex-wrap gap-2' aria-label='任务操作'>
+            {(task.playable_segments ?? 0) > 0 && task.play_url && (
+              <button
+                type='button'
+                onClick={playProgressively}
+                className='min-h-10 rounded-md bg-green-600 px-3 py-2 text-xs font-medium text-white'
+              >
+                边下边播
+              </button>
+            )}
             {active && (
               <button
                 disabled={busy}
@@ -283,6 +306,11 @@ export default function DownloadTaskCard({
               : '并发 —'}
           </span>
         </div>
+        {(task.playable_segments ?? 0) > 0 && (
+          <p className='mt-2 text-xs text-green-700 dark:text-green-300'>
+            已缓冲 {task.playable_segments} 个连续分片
+          </p>
+        )}
         {task.error && (
           <p
             role='alert'

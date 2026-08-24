@@ -322,6 +322,9 @@ describe('download routes', () => {
     expect(body.tasks[0]).toMatchObject({
       task_id: 'task-1',
       current_stage: 'downloading',
+      playable_episode: 1,
+      playable_segments: 13,
+      play_url: '/api/download/task-1/play.m3u8?episode=1',
     });
     expect(body.tasks[0]).not.toHaveProperty('episodes');
   });

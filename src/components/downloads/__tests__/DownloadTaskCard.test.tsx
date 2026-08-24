@@ -204,4 +204,33 @@ describe('DownloadTaskCard', () => {
       expect(onCommand).toHaveBeenCalledWith('task-1', 'resume')
     );
   });
+
+  test('opens progressive playback only when a continuous prefix is available', () => {
+    const open = jest.spyOn(window, 'open').mockImplementation(() => null);
+    const { rerender } = render(
+      <DownloadTaskCard task={summaryFixture()} onCommand={jest.fn()} />
+    );
+    expect(
+      screen.queryByRole('button', { name: '边下边播' })
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <DownloadTaskCard
+        task={summaryFixture({
+          playable_episode: 1,
+          playable_segments: 13,
+          play_url: '/api/download/task-1/play.m3u8?episode=1',
+        })}
+        onCommand={jest.fn()}
+      />
+    );
+    expect(screen.getByText('已缓冲 13 个连续分片')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '边下边播' }));
+    expect(open).toHaveBeenCalledWith(
+      'http://localhost/api/download/task-1/play.m3u8?episode=1',
+      '_blank',
+      'noopener,noreferrer'
+    );
+    open.mockRestore();
+  });
 });
