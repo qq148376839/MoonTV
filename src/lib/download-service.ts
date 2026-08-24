@@ -1780,7 +1780,7 @@ export class DownloadService {
           }
         }
 
-        fs.writeFileSync(keyFilePath, buf);
+        this.writeBufferAtomically(keyFilePath, buf);
         console.log(
           `[DownloadService] ✓ KEY 已写入: episode=${episodeIndex}, keyIndex=${keyIndex}, bytes=${buf.length}, sha256=${h}`
         );
@@ -1803,7 +1803,7 @@ export class DownloadService {
             `下载 MAP 长度不匹配: ${buf.length}/${expectedLength}`
           );
         }
-        fs.writeFileSync(mapFilePath, buf);
+        this.writeBufferAtomically(mapFilePath, buf);
       };
 
       for (const line of lines) {
@@ -2744,8 +2744,20 @@ export class DownloadService {
     if (expectedLength > 0 && buffer.length !== expectedLength) {
       throw new Error(`下载资源长度不匹配: ${buffer.length}/${expectedLength}`);
     }
-    fs.writeFileSync(filePath, buffer);
+    this.writeBufferAtomically(filePath, buffer);
     return buffer.length;
+  }
+
+  private writeBufferAtomically(filePath: string, buffer: Buffer): void {
+    const tempPath = `${filePath}.part`;
+    fs.rmSync(tempPath, { force: true });
+    try {
+      fs.writeFileSync(tempPath, buffer);
+      fs.renameSync(tempPath, filePath);
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true });
+      throw error;
+    }
   }
 
   private buildLocalPlaylist(
