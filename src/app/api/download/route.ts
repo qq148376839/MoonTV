@@ -569,7 +569,7 @@ export async function PATCH(request: NextRequest) {
     const result =
       action === 'pause'
         ? downloadService.pauseTask(taskId)
-        : await downloadService.resumeTask(taskId);
+        : downloadService.startResumeTask(taskId);
 
     if (!result.ok) {
       return NextResponse.json(

@@ -44,7 +44,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       result = service.pauseTask(taskId);
       break;
     case 'resume':
-      result = await service.resumeTask(taskId);
+      result = service.startResumeTask(taskId);
       break;
     case 'cancel':
       result = await service.cancelTask(taskId);

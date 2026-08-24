@@ -857,6 +857,80 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('starts recovery in the background and makes repeated starts idempotent', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'moontv-start-recovery-')
+    );
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
+    );
+    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), '#EXTM3U\nold.ts');
+    let resolveRefresh!: (value: {
+      playlistUrl: string;
+      content: string;
+    }) => void;
+    const refresh = new Promise<{
+      playlistUrl: string;
+      content: string;
+    }>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const reacquireEpisode = jest.fn(() => refresh);
+    global.fetch = jest.fn().mockResolvedValue(responseFor('new', 3));
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [recoverySnapshot('generation-a')],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode,
+    });
+
+    expect(service.startResumeTask('task-1')).toEqual({
+      ok: true,
+      status: 'downloading',
+    });
+    expect(service.startResumeTask('task-1')).toEqual({
+      ok: true,
+      status: 'downloading',
+    });
+    expect(reacquireEpisode).toHaveBeenCalledTimes(1);
+    expect(service.getSnapshot('task-1')).toMatchObject({
+      status: 'downloading',
+      episodes: { '1': { stage: 'downloading' } },
+    });
+
+    resolveRefresh({
+      playlistUrl: 'https://fresh.example/list.m3u8',
+      content:
+        '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts',
+    });
+    const operations = (
+      service as unknown as {
+        resumeOperations: Map<string, Promise<unknown>>;
+      }
+    ).resumeOperations;
+    await operations.get('task-1');
+    expect(service.getSnapshot('task-1')?.status).toBe('completed');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('recovery resolves the existing indexed path when the persisted title is encoded', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-indexed-path-'));
     const wrongRoot = path.join(root, '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB');

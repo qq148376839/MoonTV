@@ -477,6 +477,7 @@ export class DownloadService {
     RemappedMediaPlaylistResources
   >();
   private readonly taskLifecycleVersions = new Map<string, number>();
+  private readonly resumeOperations = new Map<string, Promise<CommandResult>>();
   private lastCleanupDay: number | null = null;
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
@@ -3062,6 +3063,54 @@ export class DownloadService {
       this.processQueue();
     }
     return { ok: true, status: snapshot.status };
+  }
+
+  public startResumeTask(taskId: string): CommandResult {
+    const running = this.resumeOperations.get(taskId);
+    if (running) {
+      return { ok: true, status: 'downloading' };
+    }
+
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    const resumableStatuses = [
+      'pending',
+      'paused',
+      'recovery_wait',
+      'cancelled_resumable',
+      'partial_completed',
+      'failed',
+    ];
+    if (
+      !resumableStatuses.includes(snapshot.status) ||
+      (['partial_completed', 'failed'].includes(snapshot.status) &&
+        !Object.values(snapshot.episodes).some(
+          (episode) => episode.recoverable
+        ))
+    ) {
+      return { ok: false, status: 'conflict' };
+    }
+
+    const operation = this.resumeTask(taskId);
+    this.resumeOperations.set(taskId, operation);
+    snapshot.status = 'downloading';
+    Object.values(snapshot.episodes).forEach((episode) => {
+      if (episode.stage !== 'completed') episode.stage = 'downloading';
+    });
+    this.flushSnapshot(snapshot, 'task.updated');
+    void operation.then(
+      () => {
+        if (this.resumeOperations.get(taskId) === operation) {
+          this.resumeOperations.delete(taskId);
+        }
+      },
+      () => {
+        if (this.resumeOperations.get(taskId) === operation) {
+          this.resumeOperations.delete(taskId);
+        }
+      }
+    );
+    return { ok: true, status: 'downloading' };
   }
 
   private async reacquireForResume(

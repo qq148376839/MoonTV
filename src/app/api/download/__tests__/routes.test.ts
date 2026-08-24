@@ -16,6 +16,7 @@ const service = {
     pausedTasks: 0,
   })),
   pauseTask: jest.fn(),
+  startResumeTask: jest.fn(),
   resumeTask: jest.fn(),
   cancelTask: jest.fn(),
   retryFailed: jest.fn(),
@@ -270,13 +271,13 @@ describe('download routes', () => {
   );
 
   test.each([
-    ['resume', 'resumeTask'],
+    ['resume', 'startResumeTask'],
     ['cancel', 'cancelTask'],
     ['cancel_and_clean', 'cancelTask'],
     ['retry_failed', 'retryFailed'],
     ['prioritize', 'prioritizeTask'],
   ] as const)('dispatches %s to the service', async (action, method) => {
-    if (method === 'prioritizeTask') {
+    if (method === 'prioritizeTask' || method === 'startResumeTask') {
       service[method].mockReturnValue({ ok: true, status: 'downloading' });
     } else {
       service[method].mockResolvedValue({ ok: true, status: 'downloading' });
@@ -292,6 +293,24 @@ describe('download routes', () => {
     if (action === 'cancel_and_clean') {
       expect(service.cancelTask).toHaveBeenCalledWith('task-1', true);
     }
+  });
+
+  test('accepts resume without waiting for the background download to finish', async () => {
+    service.startResumeTask.mockReturnValue({
+      ok: true,
+      status: 'downloading',
+    });
+
+    const response = await POST_COMMAND(
+      request('http://localhost/api/download/task-1/command', {
+        body: { action: 'resume' },
+      }),
+      { params: { taskId: 'task-1' } }
+    );
+
+    expect(response.status).toBe(200);
+    expect(service.startResumeTask).toHaveBeenCalledWith('task-1');
+    expect(service.resumeTask).not.toHaveBeenCalled();
   });
 
   test('list includes recovered snapshots without full episodes', async () => {
