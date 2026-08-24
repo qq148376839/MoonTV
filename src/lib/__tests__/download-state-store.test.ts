@@ -367,6 +367,23 @@ describe('DownloadStateStore', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  test('preserves an unstarted pending task for queue rehydration', () => {
+    const pending = snapshot('pending-task', {
+      status: 'pending',
+      progress: 0,
+      completedBytes: 0,
+      episodes: {},
+      recovery: {
+        source: 'provider',
+        resourceId: 'resource-1',
+        episodeEntries: { '1': 'https://media.example/episode-1.m3u8' },
+      },
+    });
+    store.saveTask(pending);
+
+    expect(store.loadRecoverableTasks()).toEqual([pending]);
+  });
+
   test('loads recoverable failed and partially completed tasks after restart', () => {
     for (const status of ['failed', 'partial_completed'] as const) {
       store.saveTask(

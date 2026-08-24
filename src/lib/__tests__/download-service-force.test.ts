@@ -155,7 +155,7 @@ describe('DownloadService force redownload', () => {
       })
     );
     try {
-      new DownloadService({
+      const service = new DownloadService({
         storageManager: storageMock as never,
         stateStore: {
           loadRecoverableTasks: () => snapshots,
@@ -167,6 +167,7 @@ describe('DownloadService force redownload', () => {
         timer: async () => undefined,
         random: () => 0,
       });
+      service.getAllTasks();
 
       expect(started).toEqual(['pending-1', 'pending-2', 'pending-3']);
     } finally {

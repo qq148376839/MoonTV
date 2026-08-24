@@ -491,10 +491,8 @@ export class DownloadService {
       parseInt(process.env.LOCAL_STORAGE_MAX_CONCURRENT || '3', 10) || 3;
     for (const snapshot of this.stateStore.loadRecoverableTasks()) {
       this.snapshots.set(snapshot.taskId, snapshot);
-      if (snapshot.status === 'pending') this.restorePendingTask(snapshot);
     }
     this.cleanupHistoryOncePerDay();
-    void this.processQueue();
   }
 
   private restorePendingTask(snapshot: DownloadTaskSnapshot): boolean {
@@ -2517,6 +2515,10 @@ export class DownloadService {
    */
   public getAllTasks(): DownloadTask[] {
     this.cleanupHistoryOncePerDay();
+    for (const snapshot of this.snapshots.values()) {
+      if (snapshot.status === 'pending') this.restorePendingTask(snapshot);
+    }
+    void this.processQueue();
     return Array.from(this.tasks.values());
   }
 

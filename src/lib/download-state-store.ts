@@ -493,6 +493,15 @@ export class DownloadStateStore {
         return [];
       }
 
+      // A task that never started has no generation to recover. Preserve its
+      // queue state so DownloadService can rebuild it from the private recipe.
+      if (
+        snapshot.status === 'pending' &&
+        Object.keys(snapshot.episodes).length === 0
+      ) {
+        return [snapshot];
+      }
+
       const episodes = Object.fromEntries(
         Object.entries(snapshot.episodes).map(([key, episode]) => [
           key,
