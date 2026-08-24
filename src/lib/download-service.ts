@@ -27,6 +27,7 @@ import type {
 } from './download-transaction';
 import {
   acquireEpisodeLock,
+  buildProgressivePlaylist,
   commitPlaylistAtomically,
   createEpisodeGeneration,
   parseMediaPlaylistResources,
@@ -574,6 +575,86 @@ export class DownloadService {
 
   public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
     return this.snapshots.get(taskId) ?? null;
+  }
+
+  public getProgressivePlayback(
+    taskId: string,
+    episodeNumber: number
+  ):
+    | { status: 'not_found' }
+    | { status: 'not_ready' }
+    | { status: 'completed'; playlistPath: string }
+    | {
+        status: 'ready';
+        content: string;
+        segmentCount: number;
+        durationSeconds: number;
+      } {
+    const snapshot = this.snapshots.get(taskId);
+    const episode = snapshot?.episodes[String(episodeNumber)];
+    if (!snapshot || !episode) return { status: 'not_found' };
+    const resourcePath = this.resolveSnapshotResourcePath(snapshot);
+    const completedPath = path.join(
+      resourcePath,
+      `episode_${String(episodeNumber).padStart(2, '0')}.m3u8`
+    );
+    if (episode.stage === 'completed' && fs.existsSync(completedPath)) {
+      return { status: 'completed', playlistPath: completedPath };
+    }
+
+    const generationRoot = containedGenerationPath(
+      resourcePath,
+      episode.episode,
+      episode.generationId
+    );
+    const cleanedPlaylistPath = path.join(
+      generationRoot,
+      'source.cleaned.m3u8'
+    );
+    if (!fs.existsSync(cleanedPlaylistPath)) return { status: 'not_ready' };
+    const nonemptyIndices = (directory: string, pattern: RegExp): number[] => {
+      if (!fs.existsSync(directory)) return [];
+      return fs.readdirSync(directory).flatMap((name) => {
+        const match = pattern.exec(name);
+        if (!match) return [];
+        const filePath = path.join(directory, name);
+        return fs.statSync(filePath).size > 0 ? [Number(match[1])] : [];
+      });
+    };
+    const segmentsDir = path.join(generationRoot, 'segments');
+    const keysDir = path.join(generationRoot, 'keys');
+    const mapsDir = path.join(generationRoot, 'maps');
+    const localUri = (filePath: string) =>
+      `/api/local-video?path=${encodeURIComponent(filePath)}`;
+    const result = buildProgressivePlaylist(
+      fs.readFileSync(cleanedPlaylistPath, 'utf-8'),
+      'https://progressive.invalid/playlist.m3u8',
+      {
+        availableSegmentIndices: nonemptyIndices(
+          segmentsDir,
+          /^segment_(\d+)\.ts$/
+        ),
+        availableKeyIndices: nonemptyIndices(keysDir, /^key_(\d+)\.key$/),
+        availableMapIndices: nonemptyIndices(mapsDir, /^map_(\d+)\.mp4$/),
+        segmentUri: (index) =>
+          localUri(
+            path.join(
+              segmentsDir,
+              `segment_${String(index).padStart(3, '0')}.ts`
+            )
+          ),
+        keyUri: (index) =>
+          localUri(
+            path.join(keysDir, `key_${String(index).padStart(3, '0')}.key`)
+          ),
+        mapUri: (index) =>
+          localUri(
+            path.join(mapsDir, `map_${String(index).padStart(3, '0')}.mp4`)
+          ),
+      }
+    );
+    if (result.segmentCount === 0) return { status: 'not_ready' };
+    return { status: 'ready', ...result };
   }
 
   public getSchedulerDiagnostics() {

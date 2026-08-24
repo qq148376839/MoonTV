@@ -931,6 +931,79 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  test('serves only the continuous nonempty generation prefix for progressive playback', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-progressive-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.mkdirSync(path.join(generation, 'keys'), { recursive: true });
+    fs.mkdirSync(path.join(generation, 'maps'), { recursive: true });
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      [
+        '#EXTM3U',
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+        '#EXTINF:5,',
+        '0.ts',
+        '#EXTINF:6,',
+        '1.ts',
+        '#EXTINF:7,',
+        '2.ts',
+        '#EXTINF:8,',
+        '3.ts',
+        '#EXT-X-ENDLIST',
+      ].join('\n')
+    );
+    fs.writeFileSync(path.join(generation, 'keys', 'key_000.key'), 'key');
+    fs.writeFileSync(path.join(generation, 'maps', 'map_000.mp4'), 'map');
+    for (const index of [0, 1, 3]) {
+      fs.writeFileSync(
+        path.join(
+          generation,
+          'segments',
+          `segment_${String(index).padStart(3, '0')}.ts`
+        ),
+        `segment-${index}`
+      );
+    }
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.status = 'downloading';
+    snapshot.episodes['1'].stage = 'downloading';
+    snapshot.episodes['1'].totalSegments = 4;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    const playback = service.getProgressivePlayback('task-1', 1);
+    expect(playback).toMatchObject({
+      status: 'ready',
+      segmentCount: 2,
+      durationSeconds: 11,
+    });
+    if (playback.status !== 'ready') throw new Error('playback not ready');
+    expect(playback.content).toContain('segment_000.ts');
+    expect(playback.content).toContain('segment_001.ts');
+    expect(playback.content).not.toContain('segment_003.ts');
+    expect(playback.content).toContain(encodeURIComponent(generation));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test('recovery resolves the existing indexed path when the persisted title is encoded', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-indexed-path-'));
     const wrongRoot = path.join(root, '%E6%BD%9C%E8%A1%8C%E7%8B%99%E5%87%BB');
