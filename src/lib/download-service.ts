@@ -583,24 +583,18 @@ export class DownloadService {
   ):
     | { status: 'not_found' }
     | { status: 'not_ready' }
-    | { status: 'completed'; playlistPath: string }
     | {
         status: 'ready';
         content: string;
         segmentCount: number;
         durationSeconds: number;
+        complete: boolean;
       } {
     const snapshot = this.snapshots.get(taskId);
     const episode = snapshot?.episodes[String(episodeNumber)];
     if (!snapshot || !episode) return { status: 'not_found' };
     const resourcePath = this.resolveSnapshotResourcePath(snapshot);
-    const completedPath = path.join(
-      resourcePath,
-      `episode_${String(episodeNumber).padStart(2, '0')}.m3u8`
-    );
-    if (episode.stage === 'completed' && fs.existsSync(completedPath)) {
-      return { status: 'completed', playlistPath: completedPath };
-    }
+    const complete = episode.stage === 'completed';
 
     const generationRoot = containedGenerationPath(
       resourcePath,
@@ -618,7 +612,11 @@ export class DownloadService {
         const match = pattern.exec(name);
         if (!match) return [];
         const filePath = path.join(directory, name);
-        return fs.statSync(filePath).size > 0 ? [Number(match[1])] : [];
+        try {
+          return fs.statSync(filePath).size > 0 ? [Number(match[1])] : [];
+        } catch {
+          return [];
+        }
       });
     };
     const segmentsDir = path.join(generationRoot, 'segments');
@@ -633,9 +631,15 @@ export class DownloadService {
         availableSegmentIndices: nonemptyIndices(
           segmentsDir,
           /^segment_(\d+)\.ts$/
-        ),
-        availableKeyIndices: nonemptyIndices(keysDir, /^key_(\d+)\.key$/),
-        availableMapIndices: nonemptyIndices(mapsDir, /^map_(\d+)\.mp4$/),
+        ).filter((index) => episode.completedSegmentIndices.includes(index)),
+        availableKeyIndices: nonemptyIndices(
+          keysDir,
+          /^key_(\d+)\.key$/
+        ).filter((index) => index < episode.keyCompleted),
+        availableMapIndices: nonemptyIndices(
+          mapsDir,
+          /^map_(\d+)\.mp4$/
+        ).filter((index) => index < episode.mapCompleted),
         segmentUri: (index) =>
           localUri(
             path.join(
@@ -651,10 +655,11 @@ export class DownloadService {
           localUri(
             path.join(mapsDir, `map_${String(index).padStart(3, '0')}.mp4`)
           ),
+        complete,
       }
     );
     if (result.segmentCount === 0) return { status: 'not_ready' };
-    return { status: 'ready', ...result };
+    return { status: 'ready', complete, ...result };
   }
 
   public getSchedulerDiagnostics() {

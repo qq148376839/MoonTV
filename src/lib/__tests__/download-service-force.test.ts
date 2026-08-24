@@ -974,6 +974,11 @@ describe('DownloadService force redownload', () => {
     snapshot.status = 'downloading';
     snapshot.episodes['1'].stage = 'downloading';
     snapshot.episodes['1'].totalSegments = 4;
+    snapshot.episodes['1'].completedSegmentIndices = [0, 1, 3];
+    snapshot.episodes['1'].keyTotal = 1;
+    snapshot.episodes['1'].keyCompleted = 1;
+    snapshot.episodes['1'].mapTotal = 1;
+    snapshot.episodes['1'].mapCompleted = 1;
     const service = new DownloadService({
       storageManager: {
         ...storageMock,
@@ -1001,6 +1006,13 @@ describe('DownloadService force redownload', () => {
     expect(playback.content).toContain('segment_001.ts');
     expect(playback.content).not.toContain('segment_003.ts');
     expect(playback.content).toContain(encodeURIComponent(generation));
+
+    fs.writeFileSync(
+      path.join(generation, 'segments', 'segment_002.ts'),
+      'still-being-written'
+    );
+    const whileWriting = service.getProgressivePlayback('task-1', 1);
+    expect(whileWriting).toMatchObject({ status: 'ready', segmentCount: 2 });
     fs.rmSync(root, { recursive: true, force: true });
   });
 

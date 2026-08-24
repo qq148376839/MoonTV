@@ -27,6 +27,7 @@ describe('progressive playback route', () => {
         '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:5,\n/api/local-video?path=one',
       segmentCount: 1,
       durationSeconds: 5,
+      complete: false,
     });
 
     const response = await GET(request(), { params: { taskId: 'task-1' } });
@@ -47,17 +48,27 @@ describe('progressive playback route', () => {
     expect(response.status).toBe(409);
   });
 
-  test('redirects completed playback to the committed local playlist', async () => {
+  test('returns a rewritten complete playlist after download finishes', async () => {
     service.getProgressivePlayback.mockReturnValue({
-      status: 'completed',
-      playlistPath: '/data/video/episode_01.m3u8',
+      status: 'ready',
+      content:
+        '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:5,\n/api/local-video?path=one\n#EXT-X-ENDLIST',
+      segmentCount: 1,
+      durationSeconds: 5,
+      complete: true,
     });
 
     const response = await GET(request(), { params: { taskId: 'task-1' } });
 
-    expect(response.status).toBe(302);
-    expect(response.headers.get('location')).toBe(
-      'http://localhost/api/local-video?path=%2Fdata%2Fvideo%2Fepisode_01.m3u8'
-    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('#EXT-X-ENDLIST');
+  });
+
+  test('rejects partially numeric episode values', async () => {
+    const response = await GET(request('1abc'), {
+      params: { taskId: 'task-1' },
+    });
+    expect(response.status).toBe(400);
+    expect(service.getProgressivePlayback).not.toHaveBeenCalled();
   });
 });

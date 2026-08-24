@@ -116,6 +116,22 @@ describe('download transaction', () => {
     expect(result.content).not.toContain('/media/segment/3');
     expect(result.content).not.toContain('#EXT-X-DISCONTINUITY');
     expect(result.content).not.toContain('#EXT-X-ENDLIST');
+
+    const completed = buildProgressivePlaylist(
+      source,
+      'https://cdn.test/list.m3u8',
+      {
+        availableSegmentIndices: [0, 1, 2, 3],
+        availableKeyIndices: [0],
+        availableMapIndices: [0],
+        segmentUri: (index) => `/media/segment/${index}`,
+        keyUri: (index) => `/media/key/${index}`,
+        mapUri: (index) => `/media/map/${index}`,
+        complete: true,
+      }
+    );
+    expect(completed.content).toContain('#EXT-X-PLAYLIST-TYPE:VOD');
+    expect(completed.content).toContain('#EXT-X-ENDLIST');
   });
 
   test('atomically replaces the entry playlist only after validation', () => {

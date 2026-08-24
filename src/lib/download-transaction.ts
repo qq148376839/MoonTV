@@ -63,6 +63,7 @@ export interface ProgressivePlaylistOptions {
   segmentUri: (index: number) => string;
   keyUri: (index: number) => string;
   mapUri: (index: number) => string;
+  complete?: boolean;
 }
 
 export interface ProgressivePlaylistResult {
@@ -256,10 +257,11 @@ export function buildProgressivePlaylist(
   const playlistTypeIndex = header.findIndex((line) =>
     /^#EXT-X-PLAYLIST-TYPE:/i.test(line.trim())
   );
+  const playlistType = options.complete ? 'VOD' : 'EVENT';
   if (playlistTypeIndex >= 0) {
-    header[playlistTypeIndex] = '#EXT-X-PLAYLIST-TYPE:EVENT';
+    header[playlistTypeIndex] = `#EXT-X-PLAYLIST-TYPE:${playlistType}`;
   } else {
-    header.push('#EXT-X-PLAYLIST-TYPE:EVENT');
+    header.push(`#EXT-X-PLAYLIST-TYPE:${playlistType}`);
   }
 
   let durationSeconds = 0;
@@ -305,7 +307,11 @@ export function buildProgressivePlaylist(
   );
 
   return {
-    content: [...header, ...rewrittenGroups.flat()].join('\n'),
+    content: [
+      ...header,
+      ...rewrittenGroups.flat(),
+      ...(options.complete ? ['#EXT-X-ENDLIST'] : []),
+    ].join('\n'),
     segmentCount,
     durationSeconds,
   };

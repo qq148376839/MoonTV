@@ -41,18 +41,14 @@ function publicPath(value: string): string {
   return value.split(/[\\/]/).filter(Boolean).pop() ?? '';
 }
 
-function continuousPrefixLength(indices: number[]): number {
-  const completed = new Set(indices);
-  let length = 0;
-  while (completed.has(length)) length += 1;
-  return length;
-}
-
 export function redactPublicText(value: string): string {
   return redactUrlsInText(value);
 }
 
-export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
+export function summarizeDownloadTask(
+  snapshot: DownloadTaskSnapshot,
+  playback?: { episode: number; segmentCount: number }
+) {
   const episodes = Object.values(snapshot.episodes);
   const current =
     (snapshot.currentEpisode !== null
@@ -71,17 +67,6 @@ export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
     0
   );
   const failures = episodes.flatMap((episode) => episode.failures);
-  const playbackEpisode =
-    current ?? episodes.find((episode) => episode.stage === 'completed');
-  const prerequisitesReady =
-    playbackEpisode != null &&
-    playbackEpisode.keyCompleted >= playbackEpisode.keyTotal &&
-    playbackEpisode.mapCompleted >= playbackEpisode.mapTotal;
-  const playableSegments = prerequisitesReady
-    ? playbackEpisode.stage === 'completed'
-      ? playbackEpisode.totalSegments
-      : continuousPrefixLength(playbackEpisode.completedSegmentIndices)
-    : 0;
   return {
     task_id: snapshot.taskId,
     source: snapshot.source,
@@ -110,14 +95,13 @@ export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
       failed: failures.length,
     },
     recoverable: episodes.some((episode) => episode.recoverable),
-    playable_episode:
-      playableSegments > 0 ? playbackEpisode?.episode ?? null : null,
-    playable_segments: playableSegments,
+    playable_episode: playback?.episode ?? null,
+    playable_segments: playback?.segmentCount ?? 0,
     play_url:
-      playableSegments > 0 && playbackEpisode
+      playback && playback.segmentCount > 0
         ? `/api/download/${encodeURIComponent(
             snapshot.taskId
-          )}/play.m3u8?episode=${playbackEpisode.episode}`
+          )}/play.m3u8?episode=${playback.episode}`
         : null,
     polling_fallback: false,
     created_at: snapshot.createdAt,

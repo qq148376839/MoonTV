@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 
-import { playViaNative } from '@/lib/tv-bridge';
 import type { DownloadCommandAction } from '@/hooks/useDownloadTasks';
 
 import DownloadTaskDetails, { DownloadTaskDetail } from './DownloadTaskDetails';
@@ -146,12 +145,7 @@ export default function DownloadTaskCard({
   const playProgressively = () => {
     if (!task.play_url) return;
     const url = new URL(task.play_url, window.location.origin).href;
-    const played = playViaNative(
-      url,
-      task.title || `${task.source}_${task.id}`,
-      task.playable_episode ? `第${task.playable_episode}集` : ''
-    );
-    if (!played) window.open(url, '_blank', 'noopener,noreferrer');
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
   useEffect(() => {
     if (!expanded || !loadDetails) return;

@@ -8,6 +8,7 @@ const service = {
   getTask: jest.fn(),
   getAllTasks: jest.fn<Array<Record<string, unknown>>, []>(() => []),
   getRecoverableTaskIds: jest.fn<string[], []>(() => []),
+  getProgressivePlayback: jest.fn(),
   getSchedulerDiagnostics: jest.fn(() => ({
     concurrency: 8,
     active: 3,
@@ -155,6 +156,13 @@ describe('download routes', () => {
     service.getTask.mockReturnValue(null);
     service.getAllTasks.mockReturnValue([]);
     service.getRecoverableTaskIds.mockReturnValue(['task-1']);
+    service.getProgressivePlayback.mockReturnValue({
+      status: 'ready',
+      content: '#EXTM3U',
+      segmentCount: 13,
+      durationSeconds: 60,
+      complete: false,
+    });
   });
 
   test('detail returns aggregate ranges and redacted failures', async () => {
