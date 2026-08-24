@@ -76,6 +76,7 @@ describe('download transaction', () => {
     const source = [
       '#EXTM3U',
       '#EXT-X-VERSION:3',
+      '#EXT-X-PLAYLIST-TYPE:VOD',
       '#EXT-X-TARGETDURATION:6',
       '#EXT-X-MAP:URI="init.mp4"',
       '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
@@ -107,6 +108,7 @@ describe('download transaction', () => {
     expect(result.segmentCount).toBe(2);
     expect(result.durationSeconds).toBe(11.5);
     expect(result.content).toContain('#EXT-X-PLAYLIST-TYPE:EVENT');
+    expect(result.content).not.toContain('#EXT-X-PLAYLIST-TYPE:VOD');
     expect(result.content).toContain('URI="/media/key/0"');
     expect(result.content).toContain('URI="/media/map/0"');
     expect(result.content).toContain('/media/segment/0');

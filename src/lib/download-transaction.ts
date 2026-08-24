@@ -253,7 +253,12 @@ export function buildProgressivePlaylist(
   if (!header.some((line) => /^#EXTM3U/i.test(line.trim()))) {
     header.unshift('#EXTM3U');
   }
-  if (!header.some((line) => /^#EXT-X-PLAYLIST-TYPE:/i.test(line.trim()))) {
+  const playlistTypeIndex = header.findIndex((line) =>
+    /^#EXT-X-PLAYLIST-TYPE:/i.test(line.trim())
+  );
+  if (playlistTypeIndex >= 0) {
+    header[playlistTypeIndex] = '#EXT-X-PLAYLIST-TYPE:EVENT';
+  } else {
     header.push('#EXT-X-PLAYLIST-TYPE:EVENT');
   }
 
