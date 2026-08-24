@@ -56,6 +56,22 @@ export interface RemappedMediaPlaylistResources {
   maps: MediaPlaylistUnit[];
 }
 
+export interface ProgressivePlaylistOptions {
+  availableSegmentIndices: number[];
+  availableKeyIndices: number[];
+  availableMapIndices: number[];
+  segmentUri: (index: number) => string;
+  keyUri: (index: number) => string;
+  mapUri: (index: number) => string;
+  complete?: boolean;
+}
+
+export interface ProgressivePlaylistResult {
+  content: string;
+  segmentCount: number;
+  durationSeconds: number;
+}
+
 function absolutePlaylistUrl(value: string, playlistUrl: string): string {
   return new URL(value, playlistUrl).href;
 }
@@ -181,6 +197,123 @@ export function remapMediaPlaylistResources(
     pendingSegments,
     keys: refreshed.keys,
     maps: refreshed.maps,
+  };
+}
+
+export function buildProgressivePlaylist(
+  content: string,
+  playlistUrl: string,
+  options: ProgressivePlaylistOptions
+): ProgressivePlaylistResult {
+  const resources = parseMediaPlaylistResources(content, playlistUrl);
+  const availableSegments = new Set(options.availableSegmentIndices);
+  const availableKeys = new Set(options.availableKeyIndices);
+  const availableMaps = new Set(options.availableMapIndices);
+  let segmentCount = 0;
+  for (const segment of resources.segments) {
+    if (
+      !availableSegments.has(segment.index) ||
+      (segment.keyIndex !== null && !availableKeys.has(segment.keyIndex)) ||
+      (segment.mapIndex !== null && !availableMaps.has(segment.mapIndex))
+    ) {
+      break;
+    }
+    segmentCount += 1;
+  }
+
+  const header: string[] = [];
+  const groups: string[][] = [];
+  let pending: string[] = [];
+  let segmentIndex = 0;
+  let sawSegmentScopedTag = false;
+  const segmentScopedTag =
+    /^#EXT(?:INF|-X-(?:KEY|MAP|BYTERANGE|DISCONTINUITY|PROGRAM-DATE-TIME))/i;
+
+  for (const rawLine of content.split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || /^#EXT-X-ENDLIST/i.test(trimmed)) continue;
+    if (segmentIndex === 0 && !sawSegmentScopedTag && trimmed.startsWith('#')) {
+      if (segmentScopedTag.test(trimmed)) {
+        sawSegmentScopedTag = true;
+        pending.push(rawLine);
+      } else {
+        header.push(rawLine);
+      }
+      continue;
+    }
+    if (trimmed.startsWith('#')) {
+      pending.push(rawLine);
+      continue;
+    }
+    if (segmentIndex >= segmentCount) break;
+    groups.push([...pending, options.segmentUri(segmentIndex)]);
+    pending = [];
+    segmentIndex += 1;
+  }
+
+  if (!header.some((line) => /^#EXTM3U/i.test(line.trim()))) {
+    header.unshift('#EXTM3U');
+  }
+  const playlistTypeIndex = header.findIndex((line) =>
+    /^#EXT-X-PLAYLIST-TYPE:/i.test(line.trim())
+  );
+  const playlistType = options.complete ? 'VOD' : 'EVENT';
+  if (playlistTypeIndex >= 0) {
+    header[playlistTypeIndex] = `#EXT-X-PLAYLIST-TYPE:${playlistType}`;
+  } else {
+    header.push(`#EXT-X-PLAYLIST-TYPE:${playlistType}`);
+  }
+
+  let durationSeconds = 0;
+  const rewrittenGroups = groups.map((group) =>
+    group.map((line) => {
+      const trimmed = line.trim();
+      const duration = trimmed.match(/^#EXTINF:([\d.]+)/i);
+      if (duration) durationSeconds += Number.parseFloat(duration[1]);
+      if (trimmed.startsWith('#EXT-X-KEY') && !/METHOD=NONE/i.test(trimmed)) {
+        const match = trimmed.match(/URI="([^"]+)"/i);
+        if (!match) return line;
+        const absolute = absolutePlaylistUrl(match[1], playlistUrl);
+        const relationship = relationshipSignature(trimmed);
+        const key = resources.keys.find(
+          (candidate) =>
+            candidate.url === absolute &&
+            candidate.relationship === relationship
+        );
+        if (!key) throw new Error('playlist structure mismatch');
+        return line.replace(
+          /URI="[^"]+"/i,
+          `URI="${options.keyUri(key.index)}"`
+        );
+      }
+      if (trimmed.startsWith('#EXT-X-MAP')) {
+        const match = trimmed.match(/URI="([^"]+)"/i);
+        if (!match) return line;
+        const absolute = absolutePlaylistUrl(match[1], playlistUrl);
+        const relationship = relationshipSignature(trimmed);
+        const map = resources.maps.find(
+          (candidate) =>
+            candidate.url === absolute &&
+            candidate.relationship === relationship
+        );
+        if (!map) throw new Error('playlist structure mismatch');
+        return line.replace(
+          /URI="[^"]+"/i,
+          `URI="${options.mapUri(map.index)}"`
+        );
+      }
+      return line;
+    })
+  );
+
+  return {
+    content: [
+      ...header,
+      ...rewrittenGroups.flat(),
+      ...(options.complete ? ['#EXT-X-ENDLIST'] : []),
+    ].join('\n'),
+    segmentCount,
+    durationSeconds,
   };
 }
 

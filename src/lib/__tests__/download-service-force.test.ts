@@ -433,6 +433,9 @@ describe('DownloadService force redownload', () => {
 
   test('waits for the writable stream to finish before resolving', async () => {
     const chunks: Buffer[] = [];
+    const rename = jest
+      .spyOn(fs, 'renameSync')
+      .mockImplementation(() => undefined);
     jest.spyOn(fs, 'createWriteStream').mockReturnValue(
       new Writable({
         write(chunk, _encoding, callback) {
@@ -456,9 +459,11 @@ describe('DownloadService force redownload', () => {
     expect(size).toBe(8);
     expect(Buffer.concat(chunks).toString()).toBe('complete');
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    expect(rename).toHaveBeenCalledWith('/tmp/unused.part', '/tmp/unused');
   });
 
   test('keeps writable stream listeners bounded across many chunks', async () => {
+    jest.spyOn(fs, 'renameSync').mockImplementation(() => undefined);
     let maxErrorListeners = 0;
     const writable = new Writable({
       write(_chunk, _encoding, callback) {
@@ -928,6 +933,115 @@ describe('DownloadService force redownload', () => {
     ).resumeOperations;
     await operations.get('task-1');
     expect(service.getSnapshot('task-1')?.status).toBe('completed');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('serves only the continuous nonempty generation prefix for progressive playback', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'moontv-progressive-'));
+    const generation = path.join(
+      root,
+      'episode_01_generations',
+      'generation-a'
+    );
+    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
+    fs.mkdirSync(path.join(generation, 'keys'), { recursive: true });
+    fs.mkdirSync(path.join(generation, 'maps'), { recursive: true });
+    fs.writeFileSync(
+      path.join(generation, 'source.cleaned.m3u8'),
+      [
+        '#EXTM3U',
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+        '#EXTINF:5,',
+        '0.ts',
+        '#EXTINF:6,',
+        '1.ts',
+        '#EXTINF:7,',
+        '2.ts',
+        '#EXTINF:8,',
+        '3.ts',
+        '#EXT-X-ENDLIST',
+      ].join('\n')
+    );
+    fs.writeFileSync(path.join(generation, 'keys', 'key_000.key'), 'key');
+    fs.writeFileSync(path.join(generation, 'maps', 'map_000.mp4'), 'map');
+    for (const index of [0, 1, 3]) {
+      fs.writeFileSync(
+        path.join(
+          generation,
+          'segments',
+          `segment_${String(index).padStart(3, '0')}.ts`
+        ),
+        `segment-${index}`
+      );
+    }
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.status = 'downloading';
+    snapshot.episodes['1'].stage = 'downloading';
+    snapshot.episodes['1'].totalSegments = 4;
+    snapshot.episodes['1'].completedSegmentIndices = [0, 1, 3];
+    snapshot.episodes['1'].keyTotal = 1;
+    snapshot.episodes['1'].keyCompleted = 1;
+    snapshot.episodes['1'].mapTotal = 1;
+    snapshot.episodes['1'].mapCompleted = 1;
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+
+    const playback = service.getProgressivePlayback('task-1', 1);
+    expect(playback).toMatchObject({
+      status: 'ready',
+      segmentCount: 2,
+      durationSeconds: 11,
+    });
+    if (playback.status !== 'ready') throw new Error('playback not ready');
+    expect(playback.content).toContain('segment_000.ts');
+    expect(playback.content).toContain('segment_001.ts');
+    expect(playback.content).not.toContain('segment_003.ts');
+    expect(playback.content).toContain(encodeURIComponent(generation));
+
+    fs.writeFileSync(
+      path.join(generation, 'segments', 'segment_002.ts'),
+      'still-being-written'
+    );
+    const whileWriting = service.getProgressivePlayback('task-1', 1);
+    expect(whileWriting).toMatchObject({ status: 'ready', segmentCount: 2 });
+
+    snapshot.episodes['1'].stage = 'completed';
+    fs.writeFileSync(
+      path.join(root, 'episode_01.m3u8'),
+      [
+        '#EXTM3U',
+        '#EXT-X-PLAYLIST-TYPE:VOD',
+        '#EXTINF:5,',
+        'episode_01_generations/generation-a/segments/segment_000.ts',
+        '#EXTINF:8,',
+        'episode_01_generations/generation-a/segments/segment_003.ts',
+        '#EXT-X-ENDLIST',
+      ].join('\n')
+    );
+    const completed = service.getProgressivePlayback('task-1', 1);
+    expect(completed).toMatchObject({
+      status: 'ready',
+      complete: true,
+      segmentCount: 2,
+      durationSeconds: 13,
+    });
+    if (completed.status !== 'ready') throw new Error('playback not ready');
+    expect(completed.content).toContain('segment_003.ts');
+    expect(completed.content).toContain('#EXT-X-ENDLIST');
     fs.rmSync(root, { recursive: true, force: true });
   });
 

@@ -45,7 +45,10 @@ export function redactPublicText(value: string): string {
   return redactUrlsInText(value);
 }
 
-export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
+export function summarizeDownloadTask(
+  snapshot: DownloadTaskSnapshot,
+  playback?: { episode: number; segmentCount: number }
+) {
   const episodes = Object.values(snapshot.episodes);
   const current =
     (snapshot.currentEpisode !== null
@@ -92,6 +95,14 @@ export function summarizeDownloadTask(snapshot: DownloadTaskSnapshot) {
       failed: failures.length,
     },
     recoverable: episodes.some((episode) => episode.recoverable),
+    playable_episode: playback?.episode ?? null,
+    playable_segments: playback?.segmentCount ?? 0,
+    play_url:
+      playback && playback.segmentCount > 0
+        ? `/api/download/${encodeURIComponent(
+            snapshot.taskId
+          )}/play.m3u8?episode=${playback.episode}`
+        : null,
     polling_fallback: false,
     created_at: snapshot.createdAt,
     updated_at: snapshot.updatedAt,

@@ -4,6 +4,7 @@ import path from 'path';
 
 import {
   acquireEpisodeLock,
+  buildProgressivePlaylist,
   commitPlaylistAtomically,
   createEpisodeGeneration,
   parseMediaPlaylistResources,
@@ -69,6 +70,68 @@ describe('download transaction', () => {
     const playlist = path.join(root, 'empty.m3u8');
     fs.writeFileSync(playlist, '#EXTM3U\n#EXT-X-ENDLIST');
     expect(validateLocalPlaylist(playlist).references).toBe(0);
+  });
+
+  test('builds an event playlist from only the continuous playable prefix', () => {
+    const source = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      '#EXT-X-PLAYLIST-TYPE:VOD',
+      '#EXT-X-TARGETDURATION:6',
+      '#EXT-X-MAP:URI="init.mp4"',
+      '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+      '#EXTINF:5.5,',
+      'segment-0.ts',
+      '#EXTINF:6,',
+      'segment-1.ts',
+      '#EXT-X-DISCONTINUITY',
+      '#EXTINF:4,',
+      'segment-2.ts',
+      '#EXTINF:6,',
+      'segment-3.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+
+    const result = buildProgressivePlaylist(
+      source,
+      'https://cdn.test/list.m3u8',
+      {
+        availableSegmentIndices: [0, 1, 3],
+        availableKeyIndices: [0],
+        availableMapIndices: [0],
+        segmentUri: (index) => `/media/segment/${index}`,
+        keyUri: (index) => `/media/key/${index}`,
+        mapUri: (index) => `/media/map/${index}`,
+      }
+    );
+
+    expect(result.segmentCount).toBe(2);
+    expect(result.durationSeconds).toBe(11.5);
+    expect(result.content).toContain('#EXT-X-PLAYLIST-TYPE:EVENT');
+    expect(result.content).not.toContain('#EXT-X-PLAYLIST-TYPE:VOD');
+    expect(result.content).toContain('URI="/media/key/0"');
+    expect(result.content).toContain('URI="/media/map/0"');
+    expect(result.content).toContain('/media/segment/0');
+    expect(result.content).toContain('/media/segment/1');
+    expect(result.content).not.toContain('/media/segment/3');
+    expect(result.content).not.toContain('#EXT-X-DISCONTINUITY');
+    expect(result.content).not.toContain('#EXT-X-ENDLIST');
+
+    const completed = buildProgressivePlaylist(
+      source,
+      'https://cdn.test/list.m3u8',
+      {
+        availableSegmentIndices: [0, 1, 2, 3],
+        availableKeyIndices: [0],
+        availableMapIndices: [0],
+        segmentUri: (index) => `/media/segment/${index}`,
+        keyUri: (index) => `/media/key/${index}`,
+        mapUri: (index) => `/media/map/${index}`,
+        complete: true,
+      }
+    );
+    expect(completed.content).toContain('#EXT-X-PLAYLIST-TYPE:VOD');
+    expect(completed.content).toContain('#EXT-X-ENDLIST');
   });
 
   test('atomically replaces the entry playlist only after validation', () => {

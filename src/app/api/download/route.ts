@@ -425,6 +425,28 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const taskId = searchParams.get('task_id');
+    const summarize = (
+      snapshot: NonNullable<ReturnType<typeof downloadService.getSnapshot>>
+    ) => {
+      const episodes = Object.values(snapshot.episodes);
+      const episode =
+        (snapshot.currentEpisode !== null
+          ? snapshot.episodes[String(snapshot.currentEpisode)]
+          : undefined) ??
+        episodes.find((candidate) => candidate.stage !== 'completed') ??
+        episodes.find((candidate) => candidate.stage === 'completed');
+      if (!episode) return summarizeDownloadTask(snapshot);
+      const playback = downloadService.getProgressivePlayback(
+        snapshot.taskId,
+        episode.episode
+      );
+      return summarizeDownloadTask(
+        snapshot,
+        playback.status === 'ready'
+          ? { episode: episode.episode, segmentCount: playback.segmentCount }
+          : undefined
+      );
+    };
 
     if (taskId) {
       // 获取单个任务状态
@@ -434,7 +456,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: '任务不存在' }, { status: 404 });
       }
 
-      if (snapshot) return NextResponse.json(summarizeDownloadTask(snapshot));
+      if (snapshot) return NextResponse.json(summarize(snapshot));
       if (!task) {
         return NextResponse.json({ error: '任务不存在' }, { status: 404 });
       }
@@ -457,7 +479,7 @@ export async function GET(request: NextRequest) {
       const taskIds = new Set(tasks.map((task) => task.id));
       const summaries = tasks.map((task) => {
         const snapshot = downloadService.getSnapshot(task.id);
-        if (snapshot) return summarizeDownloadTask(snapshot);
+        if (snapshot) return summarize(snapshot);
         return {
           task_id: task.id,
           source: task.source,
@@ -483,7 +505,7 @@ export async function GET(request: NextRequest) {
       for (const candidateId of downloadService.getRecoverableTaskIds()) {
         if (taskIds.has(candidateId)) continue;
         const snapshot = downloadService.getSnapshot(candidateId);
-        if (snapshot) summaries.push(summarizeDownloadTask(snapshot));
+        if (snapshot) summaries.push(summarize(snapshot));
       }
       return NextResponse.json(
         {

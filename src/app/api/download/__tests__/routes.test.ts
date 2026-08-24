@@ -8,6 +8,7 @@ const service = {
   getTask: jest.fn(),
   getAllTasks: jest.fn<Array<Record<string, unknown>>, []>(() => []),
   getRecoverableTaskIds: jest.fn<string[], []>(() => []),
+  getProgressivePlayback: jest.fn(),
   getSchedulerDiagnostics: jest.fn(() => ({
     concurrency: 8,
     active: 3,
@@ -155,6 +156,13 @@ describe('download routes', () => {
     service.getTask.mockReturnValue(null);
     service.getAllTasks.mockReturnValue([]);
     service.getRecoverableTaskIds.mockReturnValue(['task-1']);
+    service.getProgressivePlayback.mockReturnValue({
+      status: 'ready',
+      content: '#EXTM3U',
+      segmentCount: 13,
+      durationSeconds: 60,
+      complete: false,
+    });
   });
 
   test('detail returns aggregate ranges and redacted failures', async () => {
@@ -322,6 +330,9 @@ describe('download routes', () => {
     expect(body.tasks[0]).toMatchObject({
       task_id: 'task-1',
       current_stage: 'downloading',
+      playable_episode: 1,
+      playable_segments: 13,
+      play_url: '/api/download/task-1/play.m3u8?episode=1',
     });
     expect(body.tasks[0]).not.toHaveProperty('episodes');
   });

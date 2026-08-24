@@ -27,6 +27,7 @@ import type {
 } from './download-transaction';
 import {
   acquireEpisodeLock,
+  buildProgressivePlaylist,
   commitPlaylistAtomically,
   createEpisodeGeneration,
   parseMediaPlaylistResources,
@@ -574,6 +575,131 @@ export class DownloadService {
 
   public getSnapshot(taskId: string): DownloadTaskSnapshot | null {
     return this.snapshots.get(taskId) ?? null;
+  }
+
+  public getProgressivePlayback(
+    taskId: string,
+    episodeNumber: number
+  ):
+    | { status: 'not_found' }
+    | { status: 'not_ready' }
+    | {
+        status: 'ready';
+        content: string;
+        segmentCount: number;
+        durationSeconds: number;
+        complete: boolean;
+      } {
+    const snapshot = this.snapshots.get(taskId);
+    const episode = snapshot?.episodes[String(episodeNumber)];
+    if (!snapshot || !episode) return { status: 'not_found' };
+    const resourcePath = this.resolveSnapshotResourcePath(snapshot);
+    const complete = episode.stage === 'completed';
+    const localUri = (filePath: string) =>
+      `/api/local-video?path=${encodeURIComponent(filePath)}`;
+    if (complete) {
+      const completedPath = path.join(
+        resourcePath,
+        `episode_${String(episodeNumber).padStart(2, '0')}.m3u8`
+      );
+      if (!fs.existsSync(completedPath)) return { status: 'not_ready' };
+      let segmentCount = 0;
+      let durationSeconds = 0;
+      const content = fs
+        .readFileSync(completedPath, 'utf-8')
+        .split('\n')
+        .map((line) => {
+          const trimmed = line.trim();
+          const duration = trimmed.match(/^#EXTINF:([\d.]+)/i);
+          if (duration) durationSeconds += Number.parseFloat(duration[1]);
+          if (
+            trimmed.startsWith('#EXT-X-KEY') ||
+            trimmed.startsWith('#EXT-X-MAP')
+          ) {
+            return line.replace(
+              /URI="([^"]+)"/i,
+              (_match, uri: string) =>
+                `URI="${localUri(
+                  path.resolve(path.dirname(completedPath), uri)
+                )}"`
+            );
+          }
+          if (!trimmed || trimmed.startsWith('#')) return line;
+          segmentCount += 1;
+          return localUri(path.resolve(path.dirname(completedPath), trimmed));
+        })
+        .join('\n');
+      return {
+        status: 'ready',
+        complete: true,
+        content,
+        segmentCount,
+        durationSeconds,
+      };
+    }
+
+    const generationRoot = containedGenerationPath(
+      resourcePath,
+      episode.episode,
+      episode.generationId
+    );
+    const cleanedPlaylistPath = path.join(
+      generationRoot,
+      'source.cleaned.m3u8'
+    );
+    if (!fs.existsSync(cleanedPlaylistPath)) return { status: 'not_ready' };
+    const nonemptyIndices = (directory: string, pattern: RegExp): number[] => {
+      if (!fs.existsSync(directory)) return [];
+      return fs.readdirSync(directory).flatMap((name) => {
+        const match = pattern.exec(name);
+        if (!match) return [];
+        const filePath = path.join(directory, name);
+        try {
+          return fs.statSync(filePath).size > 0 ? [Number(match[1])] : [];
+        } catch {
+          return [];
+        }
+      });
+    };
+    const segmentsDir = path.join(generationRoot, 'segments');
+    const keysDir = path.join(generationRoot, 'keys');
+    const mapsDir = path.join(generationRoot, 'maps');
+    const result = buildProgressivePlaylist(
+      fs.readFileSync(cleanedPlaylistPath, 'utf-8'),
+      'https://progressive.invalid/playlist.m3u8',
+      {
+        availableSegmentIndices: nonemptyIndices(
+          segmentsDir,
+          /^segment_(\d+)\.ts$/
+        ).filter((index) => episode.completedSegmentIndices.includes(index)),
+        availableKeyIndices: nonemptyIndices(
+          keysDir,
+          /^key_(\d+)\.key$/
+        ).filter((index) => index < episode.keyCompleted),
+        availableMapIndices: nonemptyIndices(
+          mapsDir,
+          /^map_(\d+)\.mp4$/
+        ).filter((index) => index < episode.mapCompleted),
+        segmentUri: (index) =>
+          localUri(
+            path.join(
+              segmentsDir,
+              `segment_${String(index).padStart(3, '0')}.ts`
+            )
+          ),
+        keyUri: (index) =>
+          localUri(
+            path.join(keysDir, `key_${String(index).padStart(3, '0')}.key`)
+          ),
+        mapUri: (index) =>
+          localUri(
+            path.join(mapsDir, `map_${String(index).padStart(3, '0')}.mp4`)
+          ),
+        complete,
+      }
+    );
+    if (result.segmentCount === 0) return { status: 'not_ready' };
+    return { status: 'ready', complete, ...result };
   }
 
   public getSchedulerDiagnostics() {
@@ -1654,7 +1780,7 @@ export class DownloadService {
           }
         }
 
-        fs.writeFileSync(keyFilePath, buf);
+        this.writeBufferAtomically(keyFilePath, buf);
         console.log(
           `[DownloadService] ✓ KEY 已写入: episode=${episodeIndex}, keyIndex=${keyIndex}, bytes=${buf.length}, sha256=${h}`
         );
@@ -1677,7 +1803,7 @@ export class DownloadService {
             `下载 MAP 长度不匹配: ${buf.length}/${expectedLength}`
           );
         }
-        fs.writeFileSync(mapFilePath, buf);
+        this.writeBufferAtomically(mapFilePath, buf);
       };
 
       for (const line of lines) {
@@ -2272,7 +2398,9 @@ export class DownloadService {
       throw new Error('无法获取响应流');
     }
 
-    const fileStream = fs.createWriteStream(filePath);
+    const tempPath = `${filePath}.part`;
+    fs.rmSync(tempPath, { force: true });
+    const fileStream = fs.createWriteStream(tempPath);
     const streamCompletion = finished(fileStream);
     // The stream can fail while the response reader is still pending. Attach a
     // rejection handler immediately so Node does not report it as unhandled;
@@ -2308,10 +2436,11 @@ export class DownloadService {
       if (contentLength > 0 && downloaded !== contentLength) {
         throw new Error(`下载长度不匹配: ${downloaded}/${contentLength}`);
       }
+      fs.renameSync(tempPath, filePath);
       return downloaded;
     } catch (error) {
       fileStream.destroy();
-      fs.rmSync(filePath, { force: true });
+      fs.rmSync(tempPath, { force: true });
       throw error;
     }
   }
@@ -2615,8 +2744,20 @@ export class DownloadService {
     if (expectedLength > 0 && buffer.length !== expectedLength) {
       throw new Error(`下载资源长度不匹配: ${buffer.length}/${expectedLength}`);
     }
-    fs.writeFileSync(filePath, buffer);
+    this.writeBufferAtomically(filePath, buffer);
     return buffer.length;
+  }
+
+  private writeBufferAtomically(filePath: string, buffer: Buffer): void {
+    const tempPath = `${filePath}.part`;
+    fs.rmSync(tempPath, { force: true });
+    try {
+      fs.writeFileSync(tempPath, buffer);
+      fs.renameSync(tempPath, filePath);
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true });
+      throw error;
+    }
   }
 
   private buildLocalPlaylist(
