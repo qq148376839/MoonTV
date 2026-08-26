@@ -479,6 +479,7 @@ export class DownloadService {
   >();
   private readonly taskLifecycleVersions = new Map<string, number>();
   private readonly resumeOperations = new Map<string, Promise<CommandResult>>();
+  private readonly autoResumeAttempted = new Set<string>();
   private lastCleanupDay: number | null = null;
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
@@ -2661,7 +2662,23 @@ export class DownloadService {
   public getAllTasks(): DownloadTask[] {
     this.cleanupHistoryOncePerDay();
     for (const snapshot of this.snapshots.values()) {
-      if (snapshot.status === 'pending') this.restorePendingTask(snapshot);
+      if (snapshot.status === 'pending') {
+        this.restorePendingTask(snapshot);
+        continue;
+      }
+      if (
+        ['recovery_wait', 'partial_completed', 'failed'].includes(
+          snapshot.status
+        ) &&
+        !this.autoResumeAttempted.has(snapshot.taskId) &&
+        (snapshot.status === 'recovery_wait' ||
+          Object.values(snapshot.episodes).some(
+            (episode) => episode.recoverable
+          ))
+      ) {
+        this.autoResumeAttempted.add(snapshot.taskId);
+        this.startResumeTask(snapshot.taskId);
+      }
     }
     void this.processQueue();
     return Array.from(this.tasks.values());

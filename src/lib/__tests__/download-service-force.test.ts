@@ -655,6 +655,33 @@ describe('DownloadService force redownload', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  test('automatically resumes recoverable interrupted work when the queue is polled', () => {
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.status = 'recovery_wait';
+    snapshot.episodes['1'].stage = 'recovery_wait';
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    const resume = jest
+      .spyOn(service, 'resumeTask')
+      .mockResolvedValue({ ok: true, status: 'downloading' });
+
+    service.getAllTasks();
+
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume).toHaveBeenCalledWith('task-1');
+    expect(service.getSnapshot('task-1')?.status).toBe('downloading');
+  });
+
   test('retries an item at most three times with exponential jittered delays', async () => {
     const delays: number[] = [];
     const service = new DownloadService({

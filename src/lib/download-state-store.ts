@@ -503,6 +503,8 @@ export class DownloadStateStore {
         return [{ ...snapshot, status: 'pending' }];
       }
 
+      if (snapshot.status === 'paused') return [snapshot];
+
       const episodes = Object.fromEntries(
         Object.entries(snapshot.episodes).map(([key, episode]) => [
           key,

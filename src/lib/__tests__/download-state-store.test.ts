@@ -367,6 +367,23 @@ describe('DownloadStateStore', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  test('keeps an explicitly paused task paused during recovery loading', () => {
+    store.saveTask(
+      snapshot('paused-task', {
+        status: 'paused',
+        episodes: {
+          '1': episode(1, { stage: 'paused', recoverable: true }),
+        },
+      })
+    );
+
+    const recovered = store.loadRecoverableTasks();
+
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].status).toBe('paused');
+    expect(recovered[0].episodes['1'].stage).toBe('paused');
+  });
+
   test('preserves an unstarted pending task for queue rehydration', () => {
     const pending = snapshot('pending-task', {
       status: 'pending',
