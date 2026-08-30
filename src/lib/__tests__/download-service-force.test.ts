@@ -15,6 +15,7 @@ jest.mock('p-limit', () => ({
 
 import { DownloadScheduler } from '../download-scheduler';
 import {
+  buildFetchHeaders,
   DownloadService,
   DownloadStatus,
   normalizeFetchHeaders,
@@ -72,6 +73,15 @@ describe('DownloadService force redownload', () => {
       Referer: 'https://media.example/video/%E7%AC%AC01%E9%9B%86/index.m3u8',
       'User-Agent': 'TVBox Player',
     });
+  });
+
+  test('normalizes the default referer derived from an unescaped request URL', () => {
+    expect(
+      buildFetchHeaders(
+        'https://media.example/video/第01集/index.m3u8',
+        undefined
+      ).Referer
+    ).toBe('https://media.example/video/%E7%AC%AC01%E9%9B%86/index.m3u8');
   });
 
   test.each([

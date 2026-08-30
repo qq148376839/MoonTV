@@ -54,6 +54,23 @@ describe('DownloadTaskCard', () => {
     expect(screen.queryByText('第 1 集 · 等待状态')).not.toBeInTheDocument();
   });
 
+  test('shows the task failure instead of an unknown waiting state when no episode snapshot exists', () => {
+    render(
+      <DownloadTaskCard
+        task={summaryFixture({
+          status: 'failed',
+          current_episode: 1,
+          current_stage: null,
+        })}
+        loadDetails={jest.fn()}
+        onCommand={jest.fn()}
+      />
+    );
+
+    expect(screen.getByText('第 1 集 · 下载失败')).toBeInTheDocument();
+    expect(screen.queryByText('第 1 集 · 等待状态')).not.toBeInTheDocument();
+  });
+
   test('shows current episode stage speed eta bytes and segment counts', () => {
     render(<DownloadTaskCard task={summaryFixture()} onCommand={jest.fn()} />);
 

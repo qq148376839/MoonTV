@@ -129,10 +129,12 @@ export default function DownloadTaskCard({
         stageNames[task.current_stage ?? ''] ??
         task.current_stage ??
         stageNames[fallbackStage] ??
+        statusNames[fallbackStage] ??
         '等待状态'
       }`
     : stageNames[task.current_stage ?? ''] ??
       stageNames[fallbackStage] ??
+      statusNames[fallbackStage] ??
       '等待状态';
 
   const run = async (action: DownloadCommandAction) => {

@@ -83,6 +83,19 @@ export function normalizeFetchHeaders(
   );
 }
 
+export function buildFetchHeaders(
+  url: string,
+  input?: HeadersInit
+): Record<string, string> {
+  return normalizeFetchHeaders({
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    Referer: url,
+    Accept: '*/*',
+    ...normalizeFetchHeaders(input),
+  });
+}
+
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
@@ -101,13 +114,7 @@ async function fetchWithRetry(
       const fetchOptions: RequestInit = {
         ...options,
         signal: controller.signal,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-          Referer: url,
-          Accept: '*/*',
-          ...normalizeFetchHeaders(options.headers),
-        },
+        headers: buildFetchHeaders(url, options.headers),
       };
 
       const response = await fetch(url, fetchOptions);
