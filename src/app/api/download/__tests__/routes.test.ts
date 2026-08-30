@@ -18,6 +18,7 @@ const service = {
   })),
   pauseTask: jest.fn(),
   startResumeTask: jest.fn(),
+  restartTaskFromPersistedSource: jest.fn(),
   resumeTask: jest.fn(),
   cancelTask: jest.fn(),
   retryFailed: jest.fn(),
@@ -226,7 +227,10 @@ describe('download routes', () => {
     persisted.episodeNumbers = [1];
     service.getRecoverableTaskIds.mockReturnValue(['task-1']);
     service.getSnapshot.mockReturnValue(persisted);
-    service.resumeTask.mockResolvedValue({ ok: true, status: 'completed' });
+    service.restartTaskFromPersistedSource.mockReturnValue({
+      ok: true,
+      status: 'pending',
+    });
     const currentResource = {
       id: 'movie-1',
       source: 'source-a',
@@ -249,7 +253,10 @@ describe('download routes', () => {
     );
 
     expect(response.status).toBe(200);
-    expect(service.resumeTask).toHaveBeenCalledWith('task-1', currentResource);
+    expect(service.restartTaskFromPersistedSource).toHaveBeenCalledWith(
+      'task-1',
+      currentResource
+    );
     expect(service.createTask).not.toHaveBeenCalled();
   });
 

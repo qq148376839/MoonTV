@@ -308,7 +308,7 @@ export async function POST(request: NextRequest) {
             )
         );
       if (recoverableSnapshot) {
-        const recovered = await downloadService.resumeTask(
+        const recovered = downloadService.restartTaskFromPersistedSource(
           recoverableSnapshot.taskId,
           resource
         );

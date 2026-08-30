@@ -19,6 +19,7 @@ import {
   DownloadService,
   DownloadStatus,
   normalizeFetchHeaders,
+  persistableDownloadHeaders,
   readDownloadConcurrency,
 } from '../download-service';
 import type {
@@ -82,6 +83,20 @@ describe('DownloadService force redownload', () => {
         undefined
       ).Referer
     ).toBe('https://media.example/video/%E7%AC%AC01%E9%9B%86/index.m3u8');
+  });
+
+  test('persists playback headers without credentials', () => {
+    expect(
+      persistableDownloadHeaders({
+        Referer: 'https://media.example/',
+        'User-Agent': 'TVBox',
+        Authorization: 'Bearer secret',
+        Cookie: 'session=secret',
+      })
+    ).toEqual({
+      Referer: 'https://media.example/',
+      'User-Agent': 'TVBox',
+    });
   });
 
   test('records the real episode when the media playlist cannot be fetched', async () => {
@@ -198,6 +213,81 @@ describe('DownloadService force redownload', () => {
         delete process.env.LOCAL_STORAGE_MAX_CONCURRENT;
       else process.env.LOCAL_STORAGE_MAX_CONCURRENT = previous;
     }
+  });
+
+  test('manual resume restarts unfinished episodes from persisted source entries', async () => {
+    const snapshot = recoverySnapshot('obsolete-generation');
+    snapshot.status = 'failed';
+    snapshot.recovery = {
+      source: 'source-a',
+      resourceId: 'movie-1',
+      episodeEntries: {
+        '1': 'https://media.example/episode-1.m3u8',
+        '2': 'https://media.example/episode-2.m3u8',
+      },
+      episodeHeaders: {
+        '1': { Referer: 'https://media.example/' },
+        '2': { Referer: 'https://media.example/' },
+      },
+    };
+    snapshot.episodeNumbers = [1, 2];
+    snapshot.currentEpisode = 2;
+    snapshot.episodes['1'].stage = 'completed';
+    snapshot.episodes['1'].recoverable = false;
+    snapshot.episodes['2'] = {
+      ...snapshot.episodes['1'],
+      episode: 2,
+      generationId: 'obsolete-generation-2',
+      stage: 'partial_failed',
+      recoverable: true,
+    };
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    const runtime = service as unknown as {
+      processQueue(): Promise<void>;
+      tasks: Map<
+        string,
+        {
+          episodes: string[];
+          episodeNumbers: number[];
+          episodeHeaders: Record<string, string>[];
+        }
+      >;
+    };
+    jest.spyOn(runtime, 'processQueue').mockResolvedValue(undefined);
+
+    expect(service.restartTaskFromPersistedSource('task-1')).toEqual({
+      ok: true,
+      status: 'pending',
+    });
+
+    expect(service.getSnapshot('task-1')).toMatchObject({
+      status: 'pending',
+      currentEpisode: 1,
+      progress: 0,
+      episodes: {},
+    });
+    expect(runtime.tasks.get('task-1')).toMatchObject({
+      episodes: [
+        'https://media.example/episode-1.m3u8',
+        'https://media.example/episode-2.m3u8',
+      ],
+      episodeNumbers: [1, 2],
+      episodeHeaders: [
+        { Referer: 'https://media.example/' },
+        { Referer: 'https://media.example/' },
+      ],
+    });
   });
 
   test('rehydrates persisted pending tasks and starts them after restart', () => {
@@ -979,41 +1069,17 @@ describe('DownloadService force redownload', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  test('starts recovery in the background and makes repeated starts idempotent', async () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'moontv-start-recovery-')
-    );
-    const generation = path.join(
-      root,
-      'episode_01_generations',
-      'generation-a'
-    );
-    fs.mkdirSync(path.join(generation, 'segments'), { recursive: true });
-    fs.writeFileSync(path.join(generation, 'segments', 'segment_000.ts'), 'ok');
-    fs.writeFileSync(
-      path.join(generation, 'source.cleaned.m3u8'),
-      '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nold-10.ts\n#EXTINF:1,\nold-11.ts'
-    );
-    fs.writeFileSync(path.join(root, 'episode_01.m3u8'), '#EXTM3U\nold.ts');
-    let resolveRefresh!: (value: {
-      playlistUrl: string;
-      content: string;
-    }) => void;
-    const refresh = new Promise<{
-      playlistUrl: string;
-      content: string;
-    }>((resolve) => {
-      resolveRefresh = resolve;
-    });
-    const reacquireEpisode = jest.fn(() => refresh);
-    global.fetch = jest.fn().mockResolvedValue(responseFor('new', 3));
+  test('manual start uses the persisted source instead of legacy recovery', () => {
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.recovery = {
+      source: 'source-a',
+      resourceId: 'movie-1',
+      episodeEntries: { '1': 'https://media.example/episode-1.m3u8' },
+    };
     const service = new DownloadService({
-      storageManager: {
-        ...storageMock,
-        getResourcePath: () => root,
-      } as never,
+      storageManager: storageMock as never,
       stateStore: {
-        loadRecoverableTasks: () => [recoverySnapshot('generation-a')],
+        loadRecoverableTasks: () => [snapshot],
         saveTask: jest.fn(),
         deleteTaskState: jest.fn(),
       },
@@ -1021,39 +1087,24 @@ describe('DownloadService force redownload', () => {
       publishProgress: jest.fn(),
       timer: async () => undefined,
       random: () => 0,
-      reacquireEpisode,
     });
+    const runtime = service as unknown as { processQueue(): Promise<void> };
+    jest.spyOn(runtime, 'processQueue').mockResolvedValue(undefined);
+    const legacyResume = jest.spyOn(service, 'resumeTask');
 
     expect(service.startResumeTask('task-1')).toEqual({
       ok: true,
-      status: 'downloading',
+      status: 'pending',
     });
-    expect(service.startResumeTask('task-1')).toEqual({
-      ok: true,
-      status: 'downloading',
-    });
-    expect(reacquireEpisode).toHaveBeenCalledTimes(1);
+    expect(legacyResume).not.toHaveBeenCalled();
     expect(service.getSnapshot('task-1')).toMatchObject({
-      status: 'downloading',
-      episodes: { '1': { stage: 'recovery_wait' } },
+      status: 'pending',
+      progress: 0,
+      episodes: {},
     });
-
-    resolveRefresh({
-      playlistUrl: 'https://fresh.example/list.m3u8',
-      content:
-        '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nfresh-10.ts\n#EXTINF:1,\nfresh-11.ts',
-    });
-    const operations = (
-      service as unknown as {
-        resumeOperations: Map<string, Promise<unknown>>;
-      }
-    ).resumeOperations;
-    await operations.get('task-1');
-    expect(service.getSnapshot('task-1')?.status).toBe('completed');
-    fs.rmSync(root, { recursive: true, force: true });
   });
 
-  test('background recovery does not premark episodes that have not started', () => {
+  test('manual restart refuses snapshots without persisted source data', () => {
     const snapshot = recoverySnapshot('generation-a');
     snapshot.episodeNumbers = [1, 2];
     snapshot.episodes['2'] = {
@@ -1073,15 +1124,14 @@ describe('DownloadService force redownload', () => {
       timer: async () => undefined,
       random: () => 0,
     });
-    jest
-      .spyOn(service, 'resumeTask')
-      .mockImplementation(() => new Promise<never>(() => undefined));
-
     expect(service.startResumeTask('task-1')).toEqual({
-      ok: true,
-      status: 'downloading',
+      ok: false,
+      status: 'conflict',
     });
 
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe(
+      'recovery_wait'
+    );
     expect(service.getSnapshot('task-1')?.episodes['2'].stage).toBe(
       'recovery_wait'
     );

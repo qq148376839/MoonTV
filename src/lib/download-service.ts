@@ -96,6 +96,24 @@ export function buildFetchHeaders(
   });
 }
 
+export function persistableDownloadHeaders(
+  input?: Record<string, string>
+): Record<string, string> {
+  const allowed = new Set([
+    'accept',
+    'cache-control',
+    'origin',
+    'pragma',
+    'referer',
+    'user-agent',
+  ]);
+  return Object.fromEntries(
+    Object.entries(normalizeFetchHeaders(input)).filter(([key]) =>
+      allowed.has(key.toLowerCase())
+    )
+  );
+}
+
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
@@ -1107,7 +1125,7 @@ export class DownloadService {
         episodeHeaders: Object.fromEntries(
           numbersToDownload.map((episodeNumber, index) => [
             String(episodeNumber),
-            task.episodeHeaders[index] ?? {},
+            persistableDownloadHeaders(task.episodeHeaders[index]),
           ])
         ),
       },
@@ -2820,6 +2838,58 @@ export class DownloadService {
   /**
    * 恢复任务
    */
+  public restartTaskFromPersistedSource(
+    taskId: string,
+    currentResource?: SearchResult
+  ): CommandResult {
+    const snapshot = this.snapshots.get(taskId);
+    if (!snapshot) return { ok: false, status: 'not_found' };
+    if (!snapshot.recovery) return { ok: false, status: 'conflict' };
+    if (
+      ![
+        'pending',
+        'paused',
+        'recovery_wait',
+        'cancelled_resumable',
+        'partial_completed',
+        'failed',
+      ].includes(snapshot.status)
+    ) {
+      return { ok: false, status: 'conflict' };
+    }
+    return this.restartSnapshotFromPersistedSource(snapshot, currentResource);
+  }
+
+  private restartSnapshotFromPersistedSource(
+    snapshot: DownloadTaskSnapshot,
+    currentResource?: SearchResult
+  ): CommandResult {
+    if (currentResource && snapshot.recovery) {
+      for (const episode of snapshot.episodeNumbers) {
+        const entry = currentResource.episodes?.[episode - 1];
+        if (entry) snapshot.recovery.episodeEntries[String(episode)] = entry;
+      }
+    }
+
+    this.tasks.delete(snapshot.taskId);
+    snapshot.status = 'pending';
+    snapshot.currentEpisode = snapshot.episodeNumbers[0] ?? null;
+    snapshot.progress = 0;
+    snapshot.progressEstimated = true;
+    snapshot.speedBytesPerSecond = 0;
+    snapshot.etaSeconds = null;
+    snapshot.completedBytes = 0;
+    snapshot.episodes = {};
+    if (!this.restorePendingTask(snapshot)) {
+      snapshot.status = 'failed';
+      this.flushSnapshot(snapshot, 'task.updated');
+      return { ok: false, status: 'conflict' };
+    }
+    this.flushSnapshot(snapshot, 'task.updated');
+    void this.processQueue();
+    return { ok: true, status: snapshot.status };
+  }
+
   private async downloadRecoveredBinary(
     url: string,
     filePath: string,
@@ -3310,11 +3380,6 @@ export class DownloadService {
   }
 
   public startResumeTask(taskId: string): CommandResult {
-    const running = this.resumeOperations.get(taskId);
-    if (running) {
-      return { ok: true, status: 'downloading' };
-    }
-
     const snapshot = this.snapshots.get(taskId);
     if (!snapshot) return { ok: false, status: 'not_found' };
     const resumableStatuses = [
@@ -3335,23 +3400,7 @@ export class DownloadService {
       return { ok: false, status: 'conflict' };
     }
 
-    const operation = this.resumeTask(taskId);
-    this.resumeOperations.set(taskId, operation);
-    snapshot.status = 'downloading';
-    this.flushSnapshot(snapshot, 'task.updated');
-    void operation.then(
-      () => {
-        if (this.resumeOperations.get(taskId) === operation) {
-          this.resumeOperations.delete(taskId);
-        }
-      },
-      () => {
-        if (this.resumeOperations.get(taskId) === operation) {
-          this.resumeOperations.delete(taskId);
-        }
-      }
-    );
-    return { ok: true, status: 'downloading' };
+    return this.restartTaskFromPersistedSource(taskId);
   }
 
   private async reacquireForResume(
