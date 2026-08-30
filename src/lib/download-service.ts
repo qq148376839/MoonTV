@@ -518,7 +518,6 @@ export class DownloadService {
   >();
   private readonly taskLifecycleVersions = new Map<string, number>();
   private readonly resumeOperations = new Map<string, Promise<CommandResult>>();
-  private readonly autoResumeAttempted = new Set<string>();
   private lastCleanupDay: number | null = null;
 
   constructor(deps: DownloadServiceDependencies = defaultDependencies()) {
@@ -1604,16 +1603,41 @@ export class DownloadService {
   }> {
     console.log(`[DownloadService] 下载 M3U8: ${redactDownloadUrl(m3u8Url)}`);
 
+    const generationId = `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    const episodeState = this.ensureEpisodeState(
+      auditContext.taskId,
+      episodeIndex,
+      generationId
+    );
+    episodeState.addressSource = auditContext.addressMethod;
+    this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
+
     // 下载 M3U8 播放列表（带重试）
     const requestOptions = { headers: auditContext.requestHeaders };
-    const m3u8Response = await fetchWithRetry(
-      m3u8Url,
-      requestOptions,
-      3,
-      30000
-    );
-    if (!m3u8Response.ok) {
-      throw new Error(`下载 M3U8 失败: ${m3u8Response.status}`);
+    let m3u8Response: Response;
+    try {
+      m3u8Response = await fetchWithRetry(m3u8Url, requestOptions, 3, 30000);
+      if (!m3u8Response.ok) {
+        throw new Error(`下载 M3U8 失败: ${m3u8Response.status}`);
+      }
+    } catch (error) {
+      episodeState.stage = 'partial_failed';
+      episodeState.oldEntryRetained = true;
+      episodeState.recoverable = true;
+      episodeState.failures.push({
+        kind: 'segment',
+        index: -1,
+        category: this.classifyFailure(error),
+        attempts: 1,
+        path: '',
+        message: redactDownloadUrl(
+          error instanceof Error ? error.message : String(error)
+        ),
+      });
+      this.flushSnapshotForTask(auditContext.taskId, 'episode.updated');
+      throw error;
     }
 
     const m3u8Content = await m3u8Response.text();
@@ -1688,20 +1712,11 @@ export class DownloadService {
     const epNo = episodeIndex.toString().padStart(2, '0');
     const m3u8FileName = `episode_${epNo}.m3u8`;
     const m3u8FilePath = path.join(localPath, m3u8FileName);
-    const generationId = `${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 10)}`;
     const generation = createEpisodeGeneration(
       localPath,
       episodeIndex,
       generationId
     );
-    const episodeState = this.ensureEpisodeState(
-      auditContext.taskId,
-      episodeIndex,
-      generationId
-    );
-    episodeState.addressSource = auditContext.addressMethod;
     const episodeDir = generation.segmentsDir;
     const originalSegmentCount = mediaPlaylistContent
       .split('\n')
@@ -2740,20 +2755,6 @@ export class DownloadService {
     for (const snapshot of this.snapshots.values()) {
       if (snapshot.status === 'pending') {
         this.restorePendingTask(snapshot);
-        continue;
-      }
-      if (
-        ['recovery_wait', 'partial_completed', 'failed'].includes(
-          snapshot.status
-        ) &&
-        !this.autoResumeAttempted.has(snapshot.taskId) &&
-        (snapshot.status === 'recovery_wait' ||
-          Object.values(snapshot.episodes).some(
-            (episode) => episode.recoverable
-          ))
-      ) {
-        this.autoResumeAttempted.add(snapshot.taskId);
-        this.startResumeTask(snapshot.taskId);
       }
     }
     void this.processQueue();
@@ -3136,6 +3137,7 @@ export class DownloadService {
     try {
       for (const episode of Object.values(snapshot.episodes)) {
         if (episode.stage === 'completed') continue;
+        snapshot.currentEpisode = episode.episode;
         const generationRoot = containedGenerationPath(
           resourcePath,
           episode.episode,
@@ -3265,8 +3267,11 @@ export class DownloadService {
       );
     } catch (error) {
       snapshot.status = 'failed';
-      Object.values(snapshot.episodes).forEach((episode) => {
-        if (episode.stage === 'completed') return;
+      const episode =
+        snapshot.currentEpisode === null
+          ? undefined
+          : snapshot.episodes[String(snapshot.currentEpisode)];
+      if (episode && episode.stage !== 'completed') {
         episode.stage = 'partial_failed';
         episode.oldEntryRetained = true;
         episode.recoverable = true;
@@ -3280,7 +3285,7 @@ export class DownloadService {
             error instanceof Error ? error.message : String(error)
           ),
         });
-      });
+      }
       this.flushSnapshot(snapshot, 'task.updated');
       return { ok: false, status: snapshot.status };
     }
@@ -3333,9 +3338,6 @@ export class DownloadService {
     const operation = this.resumeTask(taskId);
     this.resumeOperations.set(taskId, operation);
     snapshot.status = 'downloading';
-    Object.values(snapshot.episodes).forEach((episode) => {
-      if (episode.stage !== 'completed') episode.stage = 'downloading';
-    });
     this.flushSnapshot(snapshot, 'task.updated');
     void operation.then(
       () => {

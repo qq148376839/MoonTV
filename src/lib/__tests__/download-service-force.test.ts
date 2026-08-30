@@ -84,6 +84,74 @@ describe('DownloadService force redownload', () => {
     ).toBe('https://media.example/video/%E7%AC%AC01%E9%9B%86/index.m3u8');
   });
 
+  test('records the real episode when the media playlist cannot be fetched', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'moontv-manifest-fail-')
+    );
+    const snapshot = recoverySnapshot('unused-generation');
+    snapshot.status = 'downloading';
+    snapshot.currentEpisode = null;
+    snapshot.progress = 0;
+    snapshot.episodes = {};
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+
+    await expect(
+      (
+        service as unknown as {
+          downloadM3U8(
+            url: string,
+            localPath: string,
+            episode: number,
+            progress: undefined,
+            audit: {
+              taskId: string;
+              sourceUrl: string;
+              addressMethod: 'direct';
+            }
+          ): Promise<unknown>;
+        }
+      ).downloadM3U8(
+        'https://media.example/episode-2.m3u8',
+        root,
+        2,
+        undefined,
+        {
+          taskId: 'task-1',
+          sourceUrl: 'https://media.example/episode-2.m3u8',
+          addressMethod: 'direct',
+        }
+      )
+    ).rejects.toThrow('下载 M3U8 失败: 503');
+
+    expect(service.getSnapshot('task-1')).toMatchObject({
+      currentEpisode: 2,
+      status: 'failed',
+      episodes: {
+        '2': {
+          episode: 2,
+          stage: 'partial_failed',
+          recoverable: true,
+          failures: [
+            expect.objectContaining({ message: '下载 M3U8 失败: 503' }),
+          ],
+        },
+      },
+    });
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   test.each([
     ['1', 2],
     ['8', 8],
@@ -678,7 +746,7 @@ describe('DownloadService force redownload', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  test('automatically resumes recoverable interrupted work when the queue is polled', () => {
+  test('does not resume recoverable interrupted work when the queue is only read', () => {
     const snapshot = recoverySnapshot('generation-a');
     snapshot.status = 'recovery_wait';
     snapshot.episodes['1'].stage = 'recovery_wait';
@@ -700,9 +768,8 @@ describe('DownloadService force redownload', () => {
 
     service.getAllTasks();
 
-    expect(resume).toHaveBeenCalledTimes(1);
-    expect(resume).toHaveBeenCalledWith('task-1');
-    expect(service.getSnapshot('task-1')?.status).toBe('downloading');
+    expect(resume).not.toHaveBeenCalled();
+    expect(service.getSnapshot('task-1')?.status).toBe('recovery_wait');
   });
 
   test('retries an item at most three times with exponential jittered delays', async () => {
@@ -968,7 +1035,7 @@ describe('DownloadService force redownload', () => {
     expect(reacquireEpisode).toHaveBeenCalledTimes(1);
     expect(service.getSnapshot('task-1')).toMatchObject({
       status: 'downloading',
-      episodes: { '1': { stage: 'downloading' } },
+      episodes: { '1': { stage: 'recovery_wait' } },
     });
 
     resolveRefresh({
@@ -983,6 +1050,97 @@ describe('DownloadService force redownload', () => {
     ).resumeOperations;
     await operations.get('task-1');
     expect(service.getSnapshot('task-1')?.status).toBe('completed');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('background recovery does not premark episodes that have not started', () => {
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.episodeNumbers = [1, 2];
+    snapshot.episodes['2'] = {
+      ...snapshot.episodes['1'],
+      episode: 2,
+      generationId: 'generation-b',
+    };
+    const service = new DownloadService({
+      storageManager: storageMock as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+    });
+    jest
+      .spyOn(service, 'resumeTask')
+      .mockImplementation(() => new Promise<never>(() => undefined));
+
+    expect(service.startResumeTask('task-1')).toEqual({
+      ok: true,
+      status: 'downloading',
+    });
+
+    expect(service.getSnapshot('task-1')?.episodes['2'].stage).toBe(
+      'recovery_wait'
+    );
+  });
+
+  test('a recovery error only fails the episode that was actually attempted', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'moontv-isolated-failure-')
+    );
+    const snapshot = recoverySnapshot('generation-a');
+    snapshot.episodeNumbers = [1, 2];
+    snapshot.episodes['2'] = {
+      ...snapshot.episodes['1'],
+      episode: 2,
+      generationId: 'generation-b',
+    };
+    for (const [episode, generation] of [
+      [1, 'generation-a'],
+      [2, 'generation-b'],
+    ] as const) {
+      const directory = path.join(
+        root,
+        `episode_${String(episode).padStart(2, '0')}_generations`,
+        generation
+      );
+      fs.mkdirSync(path.join(directory, 'segments'), { recursive: true });
+      fs.writeFileSync(
+        path.join(directory, 'source.cleaned.m3u8'),
+        '#EXTM3U\n#EXTINF:1,\nold.ts'
+      );
+    }
+    const service = new DownloadService({
+      storageManager: {
+        ...storageMock,
+        getResourcePath: () => root,
+      } as never,
+      stateStore: {
+        loadRecoverableTasks: () => [snapshot],
+        saveTask: jest.fn(),
+        deleteTaskState: jest.fn(),
+      },
+      scheduler: new DownloadScheduler({ concurrency: 1 }),
+      publishProgress: jest.fn(),
+      timer: async () => undefined,
+      random: () => 0,
+      reacquireEpisode: jest.fn().mockRejectedValue(new Error('source reset')),
+    });
+
+    await expect(service.resumeTask('task-1')).resolves.toEqual({
+      ok: false,
+      status: 'failed',
+    });
+
+    expect(service.getSnapshot('task-1')?.episodes['1'].stage).toBe(
+      'partial_failed'
+    );
+    expect(service.getSnapshot('task-1')?.episodes['2'].stage).toBe(
+      'recovery_wait'
+    );
     fs.rmSync(root, { recursive: true, force: true });
   });
 
