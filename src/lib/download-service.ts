@@ -55,6 +55,34 @@ import { SearchResult } from './types';
 /**
  * 带重试和超时的 fetch 请求
  */
+export function normalizeFetchHeaders(
+  input?: HeadersInit
+): Record<string, string> {
+  if (!input) return {};
+  const entries: [string, string][] =
+    input instanceof Headers
+      ? Array.from(input.entries())
+      : Array.isArray(input)
+      ? input.map(([key, value]) => [key, value])
+      : Object.entries(input);
+
+  return Object.fromEntries(
+    entries.flatMap(([key, originalValue]) => {
+      let value = String(originalValue);
+      if (/^(referer|origin)$/i.test(key)) {
+        try {
+          const parsed = new URL(value);
+          value = /^origin$/i.test(key) ? parsed.origin : parsed.href;
+        } catch {
+          return [];
+        }
+      }
+      if (/[^\t\x20-\x7e\x80-\xff]/.test(value)) return [];
+      return [[key, value] as [string, string]];
+    })
+  );
+}
+
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
@@ -78,7 +106,7 @@ async function fetchWithRetry(
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
           Referer: url,
           Accept: '*/*',
-          ...options.headers,
+          ...normalizeFetchHeaders(options.headers),
         },
       };
 
@@ -214,6 +242,7 @@ export interface DownloadTask {
    * This is critical for range/partial downloads so we never "10-12 => 01-03".
    */
   episodeNumbers: number[];
+  episodeHeaders: Record<string, string>[];
   forceRedownload: boolean;
   addressMethod:
     | 'direct'
@@ -294,7 +323,8 @@ async function reacquireEpisodeFromCurrentResource(
 }
 
 async function reacquireEpisodeFromEntry(
-  entry: string
+  entry: string,
+  requestHeaders?: Record<string, string>
 ): Promise<{ playlistUrl: string; content: string }> {
   let playlistUrl = entry;
   if (!playlistUrl.toLowerCase().includes('m3u8')) {
@@ -302,13 +332,15 @@ async function reacquireEpisodeFromEntry(
     if (!parsed) throw new Error('unable to reacquire playlist URL');
     playlistUrl = parsed;
   }
-  return fetchCurrentMediaPlaylist(playlistUrl);
+  return fetchCurrentMediaPlaylist(playlistUrl, requestHeaders);
 }
 
 async function fetchCurrentMediaPlaylist(
-  playlistUrl: string
+  playlistUrl: string,
+  requestHeaders?: Record<string, string>
 ): Promise<{ playlistUrl: string; content: string }> {
-  const response = await fetchWithRetry(playlistUrl, {}, 3, 30000);
+  const options = { headers: requestHeaders };
+  const response = await fetchWithRetry(playlistUrl, options, 3, 30000);
   if (!response.ok) {
     throw new Error(`playlist refresh failed: ${response.status}`);
   }
@@ -337,7 +369,7 @@ async function fetchCurrentMediaPlaylist(
   }
   if (!selectedUrl)
     throw new Error('playlist refresh master has no media stream');
-  const mediaResponse = await fetchWithRetry(selectedUrl, {}, 3, 30000);
+  const mediaResponse = await fetchWithRetry(selectedUrl, options, 3, 30000);
   if (!mediaResponse.ok) {
     throw new Error(`playlist refresh failed: ${mediaResponse.status}`);
   }
@@ -534,6 +566,10 @@ export class DownloadService {
       },
       episodes: entries.map(({ entry }) => entry),
       episodeNumbers: entries.map(({ episode }) => episode),
+      episodeHeaders: entries.map(
+        ({ episode }) =>
+          snapshot.recovery?.episodeHeaders?.[String(episode)] ?? {}
+      ),
       forceRedownload: false,
       addressMethod: 'direct',
       status: DownloadStatus.PENDING,
@@ -963,6 +999,7 @@ export class DownloadService {
     opts: {
       forceRedownload?: boolean;
       addressMethod?: DownloadTask['addressMethod'];
+      episodeHeaders?: Record<string, string>[];
     } = {}
   ): DownloadTask {
     const episodesToDownload = Array.isArray(episodes)
@@ -1006,6 +1043,9 @@ export class DownloadService {
         resource,
         episodes: episodesToDownload,
         episodeNumbers: numbersToDownload,
+        episodeHeaders: numbersToDownload.map((_, index) =>
+          opts.episodeHeaders?.[index] ? { ...opts.episodeHeaders[index] } : {}
+        ),
         forceRedownload: false,
         addressMethod: 'direct',
         status: DownloadStatus.COMPLETED,
@@ -1028,6 +1068,9 @@ export class DownloadService {
       resource,
       episodes: episodesToDownload,
       episodeNumbers: numbersToDownload,
+      episodeHeaders: numbersToDownload.map((_, index) =>
+        opts.episodeHeaders?.[index] ? { ...opts.episodeHeaders[index] } : {}
+      ),
       forceRedownload,
       addressMethod: opts.addressMethod ?? 'direct',
       status: DownloadStatus.PENDING,
@@ -1053,6 +1096,12 @@ export class DownloadService {
           numbersToDownload.map((episodeNumber, index) => [
             String(episodeNumber),
             episodesToDownload[index],
+          ])
+        ),
+        episodeHeaders: Object.fromEntries(
+          numbersToDownload.map((episodeNumber, index) => [
+            String(episodeNumber),
+            task.episodeHeaders[index] ?? {},
           ])
         ),
       },
@@ -1243,6 +1292,7 @@ export class DownloadService {
                   task.resource?.source === 'official',
                 forceRedownload: task.forceRedownload,
                 addressMethod: task.addressMethod,
+                requestHeaders: task.episodeHeaders[i],
               },
               (progress) => {
                 // 更新总进度
@@ -1443,6 +1493,7 @@ export class DownloadService {
       preferParse?: boolean;
       forceRedownload?: boolean;
       addressMethod?: DownloadTask['addressMethod'];
+      requestHeaders?: Record<string, string>;
     },
     progressCallback?: (progress: number) => void
   ): Promise<{
@@ -1466,6 +1517,7 @@ export class DownloadService {
           opts?.addressMethod === 'direct' || !opts?.addressMethod
             ? 'direct'
             : opts.addressMethod,
+        requestHeaders: opts?.requestHeaders,
       });
     }
 
@@ -1497,6 +1549,7 @@ export class DownloadService {
               opts?.addressMethod === 'direct' || !opts?.addressMethod
                 ? 'parsed'
                 : opts.addressMethod,
+            requestHeaders: opts?.requestHeaders,
           }
         );
       }
@@ -1529,6 +1582,7 @@ export class DownloadService {
       taskId: string;
       sourceUrl: string;
       addressMethod: EpisodeDownloadAuditSummary['address_method'];
+      requestHeaders?: Record<string, string>;
     } = {
       taskId: `legacy-${episodeIndex}`,
       sourceUrl: m3u8Url,
@@ -1544,7 +1598,13 @@ export class DownloadService {
     console.log(`[DownloadService] 下载 M3U8: ${redactDownloadUrl(m3u8Url)}`);
 
     // 下载 M3U8 播放列表（带重试）
-    const m3u8Response = await fetchWithRetry(m3u8Url, {}, 3, 30000);
+    const requestOptions = { headers: auditContext.requestHeaders };
+    const m3u8Response = await fetchWithRetry(
+      m3u8Url,
+      requestOptions,
+      3,
+      30000
+    );
     if (!m3u8Response.ok) {
       throw new Error(`下载 M3U8 失败: ${m3u8Response.status}`);
     }
@@ -1608,7 +1668,7 @@ export class DownloadService {
       // 下载子播放列表（带重试）
       const mediaResponse = await fetchWithRetry(
         mediaPlaylistUrl,
-        {},
+        requestOptions,
         3,
         30000
       );
@@ -1738,6 +1798,7 @@ export class DownloadService {
           keyAbsUrl,
           {
             headers: {
+              ...auditContext.requestHeaders,
               // 防盗链/防缓存敏感：Referer 指向媒体播放列表 URL
               Referer: mediaPlaylistUrl,
               Accept: '*/*',
@@ -1791,7 +1852,7 @@ export class DownloadService {
       const downloadMapByUrl = async (mapAbsUrl: string, mapIndex: number) => {
         const mapFileName = `map_${String(mapIndex).padStart(3, '0')}.mp4`;
         const mapFilePath = path.join(generation.mapsDir, mapFileName);
-        const resp = await fetchWithRetry(mapAbsUrl, {}, 1, 30000);
+        const resp = await fetchWithRetry(mapAbsUrl, requestOptions, 1, 30000);
         if (!resp.ok) throw new Error(`下载 MAP 失败: ${resp.status}`);
         const buf = Buffer.from(await resp.arrayBuffer());
         if (buf.length === 0) throw new Error('下载 MAP 为空');
@@ -2007,7 +2068,9 @@ export class DownloadService {
                   currentResources.segments[i]?.url ?? tsUrl,
                   segmentFilePath,
                   (_progress, writtenBytes) =>
-                    reportWrittenBytes?.(writtenBytes)
+                    reportWrittenBytes?.(writtenBytes),
+                  60000,
+                  auditContext.requestHeaders
                 ),
               refreshResources
             );
@@ -2380,10 +2443,16 @@ export class DownloadService {
     url: string,
     filePath: string,
     progressCallback?: (progress: number, writtenBytes: number) => void,
-    streamIdleTimeoutMs = 60000
+    streamIdleTimeoutMs = 60000,
+    requestHeaders?: Record<string, string>
   ): Promise<number> {
     // 使用带重试的 fetch（TS 片段下载使用更长的超时时间）
-    const response = await fetchWithRetry(url, {}, 1, 60000);
+    const response = await fetchWithRetry(
+      url,
+      { headers: requestHeaders },
+      1,
+      60000
+    );
     if (!response.ok) {
       throw new Error(`下载失败: ${response.status}`);
     }
@@ -2850,6 +2919,8 @@ export class DownloadService {
     refreshed: ParsedMediaPlaylistResources,
     remapped: RemappedMediaPlaylistResources
   ): Promise<void> {
+    const requestHeaders =
+      snapshot.recovery?.episodeHeaders?.[String(episode.episode)] ?? {};
     const episodeNumber = String(episode.episode).padStart(2, '0');
     const relativePrefix = `episode_${episodeNumber}_generations/${episode.generationId}`;
     const generationRoot = path.join(resourcePath, relativePrefix);
@@ -2894,6 +2965,7 @@ export class DownloadService {
         keyPath,
         () =>
           this.downloadRecoveredBinary(key.url, keyPath, {
+            ...requestHeaders,
             Referer: playlistUrl,
           })
       );
@@ -2915,7 +2987,7 @@ export class DownloadService {
           attempt: 1,
         },
         mapPath,
-        () => this.downloadRecoveredBinary(map.url, mapPath)
+        () => this.downloadRecoveredBinary(map.url, mapPath, requestHeaders)
       );
     }
     const segmentResults = await Promise.allSettled(
@@ -2942,7 +3014,9 @@ export class DownloadService {
               const bytes = await this.downloadFile(
                 segment.url,
                 temporaryPath,
-                (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes)
+                (_progress, writtenBytes) => reportWrittenBytes?.(writtenBytes),
+                60000,
+                requestHeaders
               );
               fs.renameSync(temporaryPath, segmentPath);
               return bytes;
@@ -3286,9 +3360,11 @@ export class DownloadService {
     }
 
     const persistedEntry = snapshot.recovery?.episodeEntries[String(episode)];
+    const requestHeaders =
+      snapshot.recovery?.episodeHeaders?.[String(episode)] ?? {};
     if (persistedEntry) {
       try {
-        return await reacquireEpisodeFromEntry(persistedEntry);
+        return await reacquireEpisodeFromEntry(persistedEntry, requestHeaders);
       } catch {
         // Signed or parsed entries may expire. The stable source recipe is the
         // authoritative second chance and deliberately stores no credentials.

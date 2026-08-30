@@ -23,7 +23,7 @@ const CORS_HEADERS = {
  *   poster?: string,
  *   type_name?: string,
  *   desc?: string,
- *   episodes: [{ name: string, url: string }]
+ *   episodes: [{ name: string, url: string, headers?: Record<string, string> }]
  * }
  */
 export async function POST(request: NextRequest) {
@@ -41,7 +41,11 @@ export async function POST(request: NextRequest) {
     poster?: string;
     type_name?: string;
     desc?: string;
-    episodes: { name: string; url: string }[];
+    episodes: {
+      name: string;
+      url: string;
+      headers?: Record<string, string>;
+    }[];
   };
 
   try {
@@ -82,7 +86,14 @@ export async function POST(request: NextRequest) {
   const episodeNumbers = episodes.map((_, i) => i + 1);
 
   const downloadService = getDownloadService();
-  const task = downloadService.createTask(resource, episodeUrls, episodeNumbers);
+  const task = downloadService.createTask(
+    resource,
+    episodeUrls,
+    episodeNumbers,
+    {
+      episodeHeaders: episodes.map((episode) => episode.headers ?? {}),
+    }
+  );
 
   return NextResponse.json(
     {

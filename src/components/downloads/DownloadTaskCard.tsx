@@ -122,11 +122,18 @@ export default function DownloadTaskCard({
   const [confirmClean, setConfirmClean] = useState(false);
   const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
   const speed = task.speed_bytes_per_second ?? 0;
+  const fallbackStage =
+    task.status === 'downloading' ? 'preparing' : task.status;
   const current = task.current_episode
     ? `第 ${task.current_episode} 集 · ${
-        stageNames[task.current_stage ?? ''] ?? task.current_stage ?? '等待状态'
+        stageNames[task.current_stage ?? ''] ??
+        task.current_stage ??
+        stageNames[fallbackStage] ??
+        '等待状态'
       }`
-    : stageNames[task.current_stage ?? ''] ?? '等待状态';
+    : stageNames[task.current_stage ?? ''] ??
+      stageNames[fallbackStage] ??
+      '等待状态';
 
   const run = async (action: DownloadCommandAction) => {
     setBusy(true);

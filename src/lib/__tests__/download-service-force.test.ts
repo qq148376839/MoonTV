@@ -17,6 +17,7 @@ import { DownloadScheduler } from '../download-scheduler';
 import {
   DownloadService,
   DownloadStatus,
+  normalizeFetchHeaders,
   readDownloadConcurrency,
 } from '../download-service';
 import type {
@@ -59,6 +60,18 @@ describe('DownloadService force redownload', () => {
     jest.useRealTimers();
     jest.restoreAllMocks();
     delete (global as { fetch?: unknown }).fetch;
+  });
+
+  test('normalizes unicode URL headers before passing them to fetch', () => {
+    expect(
+      normalizeFetchHeaders({
+        Referer: 'https://media.example/video/第01集/index.m3u8',
+        'User-Agent': 'TVBox Player',
+      })
+    ).toEqual({
+      Referer: 'https://media.example/video/%E7%AC%AC01%E9%9B%86/index.m3u8',
+      'User-Agent': 'TVBox Player',
+    });
   });
 
   test.each([

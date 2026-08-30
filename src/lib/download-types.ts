@@ -86,6 +86,7 @@ export interface DownloadRecoveryRecipe {
   source: string;
   resourceId: string;
   episodeEntries: Record<string, string>;
+  episodeHeaders?: Record<string, Record<string, string>>;
 }
 
 export interface DownloadTaskSnapshot {

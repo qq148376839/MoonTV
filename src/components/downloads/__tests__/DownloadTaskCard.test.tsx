@@ -37,6 +37,23 @@ export function summaryFixture(
 }
 
 describe('DownloadTaskCard', () => {
+  test('shows preparing instead of an unknown waiting state before the episode snapshot exists', () => {
+    render(
+      <DownloadTaskCard
+        task={summaryFixture({
+          status: 'downloading',
+          current_episode: 1,
+          current_stage: null,
+        })}
+        loadDetails={jest.fn()}
+        onCommand={jest.fn()}
+      />
+    );
+
+    expect(screen.getByText('第 1 集 · 准备与过滤广告')).toBeInTheDocument();
+    expect(screen.queryByText('第 1 集 · 等待状态')).not.toBeInTheDocument();
+  });
+
   test('shows current episode stage speed eta bytes and segment counts', () => {
     render(<DownloadTaskCard task={summaryFixture()} onCommand={jest.fn()} />);
 
